@@ -4,31 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RAG-ARC is a modular Retrieval-Augmented Generation (RAG) framework built on Python 3.11+ with FastAPI. It implements multi-path retrieval (dense/sparse/graph), graph-based knowledge extraction (GraphRAG with pruned HippoRAG), and a DeepSearch capability for complex reasoning over knowledge graphs.
+RAG-ARC is a modular Retrieval-Augmented Generation framework with multi-path retrieval (Dense/BM25/Graph), graph extraction, and fusion ranking. The system uses a layered architecture with factory patterns, singleton management, and a component registry system.
 
-## Common Commands
+## Development Commands
 
-### Development Setup
+### Environment Setup
 ```bash
-# Install dependencies (uv auto-creates venv)
+# Install dependencies (creates virtual environment automatically)
 uv sync
 
-# Install with dev dependencies (pytest, httpx)
+# Install with development dependencies (for tests)
 uv sync --extra dev
 
-# Download local models (only needed for MODEL_PROFILE=local)
+# Download local models (only needed for local profile)
 uv run python download_models.py
 ```
 
-### Running the Application
+### Running the Service
 ```bash
 # Start FastAPI server
 uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-# CLI commands (requires .env and backing services)
-uv run rag-arc ingest-file ./doc.pdf --owner-id <UUID>
-uv run rag-arc chat "What is RAG-ARC?" --owner-id <UUID>
-uv run rag-arc export-graph --output graph.json --owner-id <UUID>
+# Docker deployment
+./build.sh   # Build images (one-time setup)
+./start.sh   # Start all services
+./stop.sh    # Stop containers (keeps data)
 ```
 
 ### Testing
@@ -36,337 +36,394 @@ uv run rag-arc export-graph --output graph.json --owner-id <UUID>
 # Run all tests
 uv run pytest
 
-# Run specific test file
-uv run pytest test/deepsearch/test_service.py
-
 # Run with verbose output
 uv run pytest -v
+
+# Run specific test file
+uv run pytest test/core/test_rag_pipeline.py
 
 # Run with short traceback
 uv run pytest --tb=short
 ```
 
-Integration tests require environment flags:
-- `RUN_RAGARC_INTEGRATION_TESTS=1`: GPU/model-heavy suites
-- `RUN_RAGARC_POSTGRES_TESTS=1`: PostgreSQL integration tests
-- `RUN_RAGARC_CHAT_STORAGE_TESTS=1`: Chat storage tests (PostgreSQL + Redis)
-- `RUN_RAGARC_VECTOR_TESTS=1`: Faiss/Qwen vector tests
+**Important**: Tests require `.env` configuration. Integration tests are opt-in via environment flags:
+- `RUN_RAGARC_INTEGRATION_TESTS=1` - GPU/model-heavy tests
+- `RUN_RAGARC_POSTGRES_TESTS=1` - PostgreSQL integration tests
+- `RUN_RAGARC_CHAT_STORAGE_TESTS=1` - Chat storage tests
+- `RUN_RAGARC_VECTOR_TESTS=1` - FAISS/vector tests
 
-### Docker Deployment
+### CLI Commands (No HTTP Server)
 ```bash
-# Build images (one-time setup)
-./build.sh
+# Ingest documents (upload + parse + index + graph build)
+uv run rag-arc ingest-folder ./docs --owner-id <UUID>
 
-# Start all services (PostgreSQL, Redis, Neo4j, RAG-ARC)
-./start.sh
+# Parse only (no indexing)
+uv run rag-arc parse-folder ./docs --owner-id <UUID>
 
-# Stop containers (keeps data)
-./stop.sh
+# List files
+uv run rag-arc list-files --owner-id <UUID> --json
 
-# Clean Docker resources but keep local data
-./cleanup.sh
+# Re-run indexing for existing files
+uv run rag-arc trigger-index FILE_ID_1 FILE_ID_2
 
-# Full cleanup including data directories
-./clean-docker-data.sh
+# Chat with RAG system
+uv run rag-arc chat "What is RAG-ARC?" --owner-id <UUID>
+
+# Graph-only QA
+uv run rag-arc graph-qa "What relations exist?" --json
+
+# Export graph
+uv run rag-arc export-graph --output graph.json
+
+# DeepSearch
+uv run rag-arc deepsearch "Question?" --with-evidence --json
+
+# MCP servers
+uv run rag-arc tool-mcp-server --transport stdio
+uv run rag-arc chat-mcp-server --transport stdio
 ```
+
+**Note**: CLI requires backing services (PostgreSQL/Redis/Neo4j) to be running. Set `DEVELOP_MODE=true` in `.env` to expose Docker service ports to localhost.
 
 ## Architecture
 
-### Layered Design
-RAG-ARC follows a strict layered architecture with dependency flow downward:
+### Layered Structure
 
-```
-api/                    # FastAPI routes, MCP servers
-  ↓
-application/            # Business logic modules (rag_inference, knowledge, account, deepsearch)
-  ↓
-core/                   # Core capabilities (retrieval, rerank, file_management, query_rewrite)
-  ↓
-encapsulation/          # Abstraction layer (database, llm, data_model)
-  ↓
-framework/              # Framework primitives (module, register, config, decorators)
-```
+1. **Framework Layer** (`framework/`)
+   - `register.py`: Component registry (singleton) that loads JSON configs and instantiates modules
+   - `module.py`: Base `AbstractModule` class for all business modules
+   - `config.py`: Base `AbstractConfig` class for configuration
+   - `singleton_decorator.py`: Singleton pattern implementation
+   - `shared_module_decorator.py`: Shared instance management for retrievers/embeddings
+   - `thread_pool.py`: Global thread pool for async operations
 
-### Component Registration System
-The framework uses a centralized registration system (`framework/register.py`) that:
-- Loads JSON configs from `config/json_configs/` at startup
-- Substitutes environment variables (`${VAR_NAME}` syntax)
-- Builds module instances via `AbstractConfig.build()` pattern
-- Stores singletons in `Register.registrations` dict
+2. **Configuration Layer** (`config/`)
+   - `json_configs/`: JSON configuration files with `${ENV_VAR}` placeholder support
+     - `rag_inference.json` / `rag_inference_local.json`: RAG pipeline config
+     - `knowledge.json` / `knowledge_local.json`: Document processing config
+     - `deepsearch_service.json`: DeepSearch configuration
+     - `account.json`, `session.json`, `chat_message.json`: User management
+   - `application/`: Python config classes (Pydantic models)
+   - `core/`: Core module configurations
+   - `env-en.md` / `env-zh.md`: Full environment variable reference
 
-Key registration happens in `app_registration.py`:
-```python
-registrator.register(config_path, app_name, config_type)
-module = registrator.get_object(app_name)  # Retrieve registered instance
-```
+3. **Core Layer** (`core/`)
+   - `file_management/`: Document parsing (PDF/DOCX/PPT/Excel) and chunking strategies
+   - `retrieval/`: Dense (FAISS), BM25 (Tantivy), Graph (Neo4j HippoRAG), and hybrid fusion
+   - `rerank/`: Re-ranking algorithms (listwise, LLM-based, Qwen local)
+   - `query_rewrite/`: Query rewriting and expansion
+   - `graph_adapter/`: Graph database adapters (Neo4j, igraph)
+   - `prompts/`: Prompt templates for LLM interactions
 
-### Shared Module Pattern
-The `@shared_module` decorator (`framework/shared_module_decorator.py`) enables instance reuse:
-- Same config parameters → same instance (reduces memory/GPU usage)
-- Different parameters → new instance
-- Used for LLM clients, embedding models, retrievers, tokenizers
+4. **Encapsulation Layer** (`encapsulation/`)
+   - `llm/`: LLM provider abstractions (OpenAI, HuggingFace, vLLM)
+   - `database/`: Database interfaces (PostgreSQL, Redis, Neo4j, MinIO)
+   - `data_model/`: Pydantic models and schemas
+   - `message_queue/`: Task queue abstractions (Celery, in-process)
+   - `web_search/`: Web search integration (Tavily)
 
-Example: Multiple retrievers sharing the same embedding model will use a single GPU-loaded instance.
+5. **Application Layer** (`application/`)
+   - `rag_inference/`: RAG inference pipeline and chat logic
+   - `knowledge/`: Knowledge management (file upload, indexing, deletion)
+   - `account/`: User authentication and authorization
+   - `deepsearch/`: DeepSearch service (graph-first reasoning)
+   - `intent_routing/`: Semantic intent routing
 
-### Multi-Path Retrieval Fusion
-`core/retrieval/multipath.py` orchestrates multiple retrieval paths:
-1. **Dense Retrieval**: FAISS vector similarity (GPU/CPU)
-2. **Sparse Retrieval**: BM25 via Tantivy (full-text search)
-3. **Graph Retrieval**: Neo4j-based with Pruned HippoRAG (Personalized PageRank on subgraphs)
+6. **API Layer** (`api/`)
+   - `routers/`: FastAPI route definitions
+   - `middleware/`: Request/response middleware
+   - `mcp/`: MCP server implementations
 
-Fusion methods (configured via `fusion_method`):
-- `rrf`: Reciprocal Rank Fusion (default)
-- `weighted_sum`: Custom weights per retriever
-- `rank_fusion`: Rank-based combination
+### Key Design Patterns
 
-Graph retriever captures subgraph metadata in chunk metadata (`_subgraph_info`) for downstream use.
+**Component Registry Pattern**:
+- `app_registration.py` initializes all modules at startup
+- `Register` singleton loads JSON configs and instantiates modules via factory pattern
+- Modules are retrieved via `registrator.get_object("module_name")`
 
-### Graph Adapter System
-`core/graph_adapter/` provides pluggable graph backends:
-- **Base**: `GraphAdapter` abstract interface (`base.py`)
-- **HippoRAG**: Default implementation with subgraph PPR (`hipporag.py`)
-- **Registry**: `GraphAdapterRegistry` for registering new adapters (`registry.py`)
-- **Scope Provider**: Global scope configuration for graph isolation (`scope_provider.py`)
+**Factory Pattern**:
+- LLM, Embedding, and Retriever components use factory methods
+- Configuration-driven instantiation via JSON configs
 
-To add a new graph backend, implement `GraphAdapter` and register it via the registry.
+**Shared Instance Management**:
+- Retrievers and embedding models use `@shared_module` decorator
+- Prevents duplicate model loading and improves performance
+- Instances are reused across requests based on configuration fingerprint
 
-### DeepSearch on Graph
-DeepSearch (`application/rag_inference/deepsearch/service.py`) implements a think-driven loop:
-1. **Think**: Intent detection + plan update + decide next tool calls.
-2. **Explore**: Graph-first orchestration (parallel actions: search/graph.ops/read.pages/web.search).
-3. **Code**: Deterministic math/finance verification (`code.python`).
-4. **Report Composer**: Synthesizes evidence into structured reports.
+**Owner-Scoped Data Isolation**:
+- All data (files, chunks, graphs) is scoped to `owner_id` (UUID)
+- Multi-tenant isolation at database and index level
+- Admin can access cross-tenant data via `ADMIN_OWNER_ID`
 
-Only three tools are exposed to the LLM (`think`, `explore`, `code.python`); all other actions are internal explore subtools.
+## Configuration System
 
-### Document Processing Pipeline
-`core/file_management/index_manager.py` coordinates:
-1. **Storage**: Files stored in local filesystem or MinIO (configurable via `file_db.type`)
-2. **Parsing**: Multi-format support (PDF, DOCX, PPTX, Excel, HTML)
-   - Native parsers for standard formats
-   - OCR parsers (DOTS-OCR, VLM-based) for scanned documents
-3. **Chunking**: Strategies in `core/file_management/chunker/`
-   - Token-based, semantic, recursive, markdown header-based
-   - Semantic unit chunking (`semantic_unit_chunker.py`) preserves tables/code/lists
-4. **Indexing**: Multi-index coordination
-   - FAISS (dense vectors)
-   - Tantivy (BM25 sparse)
-   - Neo4j (graph triples)
+### Two-Layer Configuration
 
-### Configuration Profiles
-Two built-in profiles (controlled by `MODEL_PROFILE` env var):
-- **api** (default): Uses OpenAI-compatible APIs for chat/embedding/OCR
-  - Configs: `rag_inference.json`, `knowledge.json`
-- **local**: Uses local HuggingFace models
-  - Configs: `rag_inference_local.json`, `knowledge_local.json`
+1. **`.env` file**: Secrets and feature switches only
+   - Required: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `JWT_SECRET_KEY`
+   - Optional: Infrastructure overrides (PostgreSQL/Redis/Neo4j connection details)
+   - Feature flags: `MODEL_PROFILE`, `DEVELOP_MODE`, `TASK_QUEUE_MODE`, `bench_mode`
 
-Override specific providers via env vars:
-- `CHAT_MODEL_PROVIDER`, `EMBEDDING_MODEL_PROVIDER`, `OCR_MODEL_PROVIDER`
-- Falls back to `OPENAI_API_KEY`/`OPENAI_BASE_URL` when component keys are empty
+2. **`config/` directory**: All tunable parameters
+   - Retrieval top-k, thresholds, weights
+   - Chunking strategies and sizes
+   - Model selection and GPU assignment
+   - Graph construction parameters
 
-When changing providers in Docker, rebuild the image: `./build.sh && ./start.sh`
+### Model Profiles
 
-### User Isolation & Admin Access
-- All data (files, chunks, graph) is scoped by `owner_id` (UUID)
-- PostgreSQL, FAISS, BM25, and Neo4j queries filter by owner
-- Admin access: Set `ADMIN_OWNER_ID` in `.env` to enable cross-owner operations via `include_all_owners=true` or `target_owner_id=<UUID>` params
+Switch between API and local models via `MODEL_PROFILE` in `.env`:
 
-### Evidence & SSE Streaming
-HTTP endpoints support evidence bundles (`include_evidence=true`):
-- Chunks, triples, seed entities, graph metadata
-- Controlled by env vars: `CHAT_TOP_CHUNKS`, `CHAT_TOP_TRIPLES`, `DEEPSEARCH_TOP_CHUNKS`, etc.
-- `ENABLE_ALL_EVIDENCE=true` disables trimming
+- `MODEL_PROFILE=api` (default): Uses OpenAI-compatible APIs
+  - Config: `rag_inference.json`, `knowledge.json`
+  - Providers: `openai` for chat/embedding/OCR
 
-SSE streaming (`/rag_inference/stream_chat/{session_id}`):
-- OpenAI-compatible streaming format
-- Evidence delivered via `delta.tool_calls[].function.name == "rag_arc_payload"`
-- Progress updates via `delta.tool_calls[].function.name == "rag_arc_progress"`
+- `MODEL_PROFILE=local`: Uses local HuggingFace models
+  - Config: `rag_inference_local.json`, `knowledge_local.json`
+  - Providers: `huggingface` for chat/embedding, `dots_ocr_parser` for OCR
+  - Requires model download: `uv run python download_models.py`
 
-## Important Implementation Details
-
-### Semantic Unit Chunker
-`core/file_management/chunker/semantic_unit_chunker.py` preserves structural units:
-- **Tables**: Tracked as anchors with slices (rows)
-- **Code blocks**: Preserved with language metadata
-- **Lists**: Maintained with hierarchy
-
-Configuration via `SEMANTIC_CHUNKING_LEVEL`:
-- `disabled`: Skip semantic processing
-- `basic`: Basic structure detection
-- `standard`: Enhanced table/code/list handling
-- `advanced`: Maximum structure preservation
-
-Anchor backfill in multipath retrieval ensures related structural units are included even if not directly retrieved.
-
-### Graph Construction
-Knowledge graph built from chunks via:
-1. **Entity Extraction**: LLM identifies entities and relations
-2. **Triple Formation**: (subject, predicate, object) triples stored in Neo4j
-3. **PPR Indexing**: Personalized PageRank computed on demand for query-relevant subgraphs
-4. **Incremental Updates**: New documents extend existing graph without full rebuild
-
-Subgraph PPR (vs. full-graph) improves efficiency and precision by limiting traversal to query-relevant nodes.
-
-### Asynchronous Indexing
-`core/file_management/index_manager.py` uses async patterns:
-- File upload → indexing trigger (non-blocking)
-- Status tracking: `PENDING` → `PROCESSING` → `COMPLETED` or `FAILED`
-- Soft deletion: `delete-file` CLI marks status as `DELETED` without cleanup
-- Full deletion: HTTP `DELETE /knowledge/{file_id}` triggers async cleanup of chunks, indexes, blobs, graph
-
-### Database Layer
-`encapsulation/database/` abstracts storage:
-- **relational_db**: PostgreSQL via SQLAlchemy (users, files, sessions, messages)
-- **cache_db**: Redis for session state and caching
-- **graph_db**: Neo4j for knowledge graph
-- **vector_db**: FAISS for dense embeddings
-- **bm25_indexer**: Tantivy for sparse retrieval
-
-All use connection pooling and scope-based isolation (owner_id filtering).
-
-### LLM Factory Pattern
-`encapsulation/llm/` implements provider-agnostic LLM clients:
-- **openai_llm**: OpenAI API (and compatible providers like DeepSeek)
-- **huggingface_llm**: Local transformers models
-- **vllm_llm**: vLLM for high-throughput inference
-
-Factory selection based on `provider` field in config:
-```python
-if provider == "openai":
-    return OpenAILLM(config)
-elif provider == "huggingface":
-    return HuggingFaceLLM(config)
-```
-
-## File Organization Conventions
-
-### Config Files
-- `config/json_configs/*.json`: Module configurations (loaded at startup)
-- `config/application/*.py`: Pydantic config schemas
-- `config/core/*.py`: Core component configs
-- `.env`: Runtime environment variables (do NOT commit secrets)
-
-### Test Structure
-```
-test/
-├── core/                    # Core module tests
-│   ├── retrieval/          # Retrieval tests (multipath, graph, BM25, FAISS)
-│   └── file_management/    # Parsing, chunking tests
-├── encapsulation/          # Database, LLM abstraction tests
-├── deepsearch/             # DeepSearch think/explore tool tests
-└── test_complete_e2e_api.py  # End-to-end HTTP API tests
-```
-
-Use pytest markers: `@pytest.mark.integration` for tests requiring external services.
-
-### Data Directories
-- `./data/`: Persistent storage (PostgreSQL, Neo4j, Redis data when using Docker)
-- `./local/`: Runtime/cache data (file chunks, test outputs)
-- `./models/`: Local model weights (Qwen, DOTS-OCR, MiniLM)
-
-These are `.gitignore`d; never commit data or models.
-
-## Development Workflows
-
-### Adding a New Retriever
-1. Create class in `core/retrieval/` implementing `BaseRetriever`
-2. Add config schema in `config/core/retrieval/`
-3. Register in multipath config's `retrievers` list
-4. Test isolation with `test/core/retrieval/test_*.py` pattern
-
-### Adding a New LLM Provider
-1. Implement in `encapsulation/llm/` following factory pattern
-2. Add provider enum to config schemas
-3. Update `app_registration.py` provider resolution logic
-4. Test with both API and local profiles
-
-### Adding a New Chunker
-1. Implement in `core/file_management/chunker/` with `ChunkerConfig`
-2. Add to `parser_combinator.py` strategy selection
-3. Write tests in `test/core/file_management/chunker/`
-4. Document in knowledge config JSON
-
-### Extending DeepSearch Tools
-1. Define tool in `application/rag_inference/deepsearch/` or `encapsulation/deepsearch/`
-2. Categorize as F-Tool, H-Tool, or X-Tool (see architecture section)
-3. Register in tool manager's `build_builtin_tools`
-4. Add MCP descriptor if exposing via MCP server
-5. Test with `test/deepsearch/test_tools.py`
-
-## Configuration Tips
-
-### Switching Between API and Local Profiles
+**Important**: When using Docker, rebuild after changing `MODEL_PROFILE`:
 ```bash
-# In .env
-MODEL_PROFILE=local  # Use local HuggingFace models
-
-# Or for API mode (default)
-MODEL_PROFILE=api    # Use OpenAI-compatible APIs
+./build.sh  # Rebuild with new .env settings
+./start.sh  # Restart services
 ```
 
-After changing, rebuild Docker: `./build.sh && ./start.sh`
+### Environment Variable Substitution
 
-### Configuring Multi-Path Retrieval Weights
-Edit `config/json_configs/rag_inference.json`:
+JSON configs support `${ENV_VAR}` placeholders:
 ```json
 {
-  "retriever": {
-    "fusion_method": "weighted_sum",
-    "weights": [0.4, 0.3, 0.3],  // [dense, sparse, graph]
-    "retrievers": [...]
-  }
+  "api_key": "${OPENAI_API_KEY}",
+  "base_url": "${OPENAI_BASE_URL}"
 }
 ```
 
-### Enabling External Search in DeepSearch
+The `Register` class automatically substitutes environment variables when loading configs.
+
+## Multi-Path Retrieval System
+
+RAG-ARC uses three parallel retrieval paths with Reciprocal Rank Fusion (RRF):
+
+1. **Dense Retrieval** (FAISS)
+   - GPU-accelerated vector similarity search
+   - Supports flat, IVF, and HNSW index types
+   - Two-stage retrieval for HNSW (ANN prefetch + exact rescoring)
+   - Owner-scoped isolation
+
+2. **Sparse Retrieval** (BM25 via Tantivy)
+   - Full-text search with BM25 scoring
+   - Owner-scoped isolation
+   - Supports query variants for mixed-language corpora
+
+3. **Graph Retrieval** (Neo4j HippoRAG)
+   - Subgraph PPR (Personalized PageRank on relevant subgraphs)
+   - Query-aware pruning for efficiency
+   - Incremental updates without full reconstruction
+   - Optional dense-seeded file prior to reduce cross-product drift
+
+**Fusion Configuration**:
+- Weights controlled via `.env`: `RAG_RETRIEVAL_WEIGHT_DENSE`, `RAG_RETRIEVAL_WEIGHT_BM25`, `RAG_RETRIEVAL_WEIGHT_GRAPH`
+- Default: Graph retrieval disabled for normal RAG (weight=0.0) to reduce latency
+- Graph is still built and used by DeepSearch
+- Dynamic quota allocation via `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED`
+
+## Document Processing Pipeline
+
+### Stages
+
+1. **Upload**: Store file in MinIO or local filesystem
+2. **Parse**: Extract text/images from documents
+   - Native: PDF text extraction (no OCR)
+   - DotsOCR: Local OCR
+   - MinerU: Remote parsing service (recommended for complex PDFs)
+3. **Chunk**: Split text into chunks
+   - Token-based, semantic, recursive, markdown header-based
+   - Configurable via `SEMANTIC_CHUNKING_LEVEL`
+4. **Index**: Build indexes
+   - FAISS (dense vectors)
+   - Tantivy (BM25)
+   - Neo4j (graph)
+5. **Graph Build**: Extract entities/relations and build knowledge graph
+
+### Parse/Index Decoupling
+
+Files can be parsed separately from indexing:
+- `ingest_mode=parse`: Upload + parse only (status: `PARSED`)
+- `ingest_mode=index`: Full pipeline (status: `INDEXED`)
+- `trigger-index`: Re-index existing `PARSED` files without re-parsing
+
+This is useful when:
+- Parsing is expensive (MinerU with VLM)
+- You want to parse once and index multiple times with different parameters
+- Sharing parsed output across environments
+
+## GraphRAG Implementation
+
+Based on HippoRAG2 with enhancements:
+
+1. **Subgraph PPR**: Compute Personalized PageRank on relevant subgraphs (not full graph)
+2. **Query-Aware Pruning**: Dynamically adjust neighbor retention based on entity relevance
+3. **Incremental Updates**: Update graph without full reconstruction
+4. **Dense-Seeded File Prior**: Boost file passage weights when dense chunks concentrate on single file
+
+**Knowledge Graph Maintenance**:
+- L0 (hot-path): Materialize `EntityMention` during ingest for disambiguation
+- L1 (background): Disambiguate same-name entities using mention context
+- Creates `EntityIdentity` cluster centers with `RESOLVED_TO` relationships
+- Configurable via `kg_maintenance` in `knowledge*.json`
+
+## PageIndex (Long Document Navigation)
+
+DeepSearch uses PageIndex for efficient navigation of long documents:
+
+1. **Document-level routing**: `search.file` aggregates relevant files
+2. **Section-level routing**: `toc.tree` / `section.select` for ToC navigation
+3. **Page-level reading**: `read.pages` for full context
+
+Controlled via `.env`:
+- `PAGEINDEX_ENABLED=true`
+- `SECTION_INDEX_ENABLED=true`
+- `PAGEINDEX_TOC_CHECK_PAGE_NUM=20`
+- `PAGEINDEX_MAX_PAGE_NUM_EACH_NODE=10`
+
+## DeepSearch
+
+Graph-first reasoning system with think→explore→report loop:
+
+- **Think**: Plan exploration strategy
+- **Explore**: Execute tools (search, graph traversal, web search)
+- **Report**: Synthesize findings
+
+**Tools**:
+- `search.file`: Document-level routing
+- `toc.tree` / `section.select`: Section navigation
+- `read.pages`: Full page reading
+- `web.search`: Real-time web search (Tavily)
+- `code.python`: Deterministic math/finance verification
+
+**Configuration**:
+- `config/json_configs/deepsearch_service.json`
+- Tool manager with MCP routing support
+- Evidence bundle (chunks/triples/seeds) via `include_evidence=true`
+
+## Testing Guidelines
+
+### Test Structure
+- Unit tests: `test/core/`, `test/framework/`, `test/encapsulation/`
+- Integration tests: Marked with `@pytest.mark.integration`
+- API tests: `test/api/`
+
+### Running Integration Tests
+Integration tests require external services and are opt-in:
 ```bash
-# In .env
-DEEPSEARCH_EXTERNAL_SEARCH_ENABLED=true
-TAVILY_API_KEY=<your-key>
+# Enable all integration tests
+export RUN_RAGARC_INTEGRATION_TESTS=1
+export RUN_RAGARC_POSTGRES_TESTS=1
+export RUN_RAGARC_CHAT_STORAGE_TESTS=1
+export RUN_RAGARC_VECTOR_TESTS=1
+
+# Run tests
+uv run pytest
 ```
 
-Gap detector will trigger Tavily web search when graph coverage is insufficient.
+### Test Dependencies
+- PostgreSQL, Redis, Neo4j must be running
+- Set connection details in `.env`
+- For E2E tests, set `RAGARC_E2E_TOKEN` (JWT bearer token)
 
-### Debug Mode for Services
-```bash
-# In .env
-DEVELOP_MODE=true         # Expose Docker service ports to localhost
-LOG_LEVEL=DEBUG           # Enable verbose logging
+## Common Development Patterns
+
+### Adding a New Retriever
+1. Create retriever class in `core/retrieval/`
+2. Implement `retrieve()` method returning `List[Chunk]`
+3. Add factory method in retriever config
+4. Register in `config/json_configs/rag_inference*.json`
+5. Update fusion weights if needed
+
+### Adding a New Parser
+1. Create parser class in `core/file_management/parsers/`
+2. Implement `parse()` method returning markdown
+3. Register in `ParserFactory`
+4. Add to `knowledge*.json` parser config
+
+### Adding a New Chunking Strategy
+1. Create chunker class in `core/file_management/chunking/`
+2. Implement `chunk()` method returning `List[Chunk]`
+3. Register in `ChunkerFactory`
+4. Add to `knowledge*.json` chunker config
+
+### Accessing Registered Modules
+```python
+from app_registration import registrator
+
+# Get module instance
+rag_inference = registrator.get_object("rag_inference")
+knowledge = registrator.get_object("knowledge")
+deepsearch = registrator.get_object("deepsearch_service")
+
+# Call module methods
+result = await rag_inference.chat(query="...", owner_id=uuid.UUID(...))
 ```
 
-## Key Files Reference
+## Important Notes
 
-- `main.py`: FastAPI app entry point, router registration
-- `app_registration.py`: Component initialization, config loading
-- `framework/register.py`: Core registration system
-- `core/retrieval/multipath.py`: Multi-path retrieval orchestration
-- `core/file_management/index_manager.py`: Document processing coordinator
-- `core/graph_adapter/hipporag.py`: HippoRAG graph implementation
-- `application/rag_inference/deepsearch/service.py`: DeepSearch orchestrator
-- `encapsulation/database/bm25_indexer.py`: Tantivy BM25 implementation
-- `api/routers/`: HTTP endpoint definitions (knowledge, rag_inference, deepsearch, auth)
-- `cli/rag.py`: CLI command implementations
+### Owner ID Management
+- Always pass `owner_id` (UUID) for data isolation
+- CLI caches default owner in `~/.rag_arc_owner_id`
+- Override via `--owner-id` flag or `CLI_OWNER_ID` env var
+- Admin access via `ADMIN_OWNER_ID` in `.env`
 
-## Notes for Future Developers
+### Deletion Behavior
+- CLI `delete-file`: Marks file as `DELETED` (metadata only)
+- API `DELETE /knowledge/{file_id}`: Full async cleanup (chunks, indexes, blobs, graph)
+- Use API for production deletions
 
-### Maintain Layered Dependencies
-Never import from upper layers (e.g., `core/` should not import from `application/`). Encapsulation layer provides abstractions for cross-cutting concerns (database, LLM).
+### Dependency Health Checks
+- Startup checks: PostgreSQL, Redis, Neo4j, MinerU (if configured)
+- Mode: `RAGARC_DEPENDENCY_CHECK_MODE` (off/warn/strict)
+- Indexing checks: `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE`
 
-### Profile Consistency
-When adding new model-dependent features, support both API and local profiles. Add provider selection in `app_registration.py` and create both `config.json` and `config_local.json`.
+### Logging
+- Logs written to `./log/` directory
+- Daily rotation with size limits (10MB per file, 30 days retention)
+- Beijing timezone (UTC+8) for timestamps
+- Request ID tracking via `X-Request-ID` header
 
-### Owner Isolation
-All new data models must include `owner_id` field and filter by it in queries. PostgreSQL, vector stores, and graph queries must respect owner boundaries unless `ADMIN_OWNER_ID` is used.
+### Security
+- JWT-based authentication
+- Role-based access control (RBAC)
+- Document-level permissions (VIEW/EDIT)
+- Bcrypt password hashing
+- Owner-scoped data isolation
 
-### Async Patterns
-New indexing/processing operations should follow the async pattern:
-1. Accept request, return immediately with `PENDING` status
-2. Process in background (or via task queue)
-3. Update status to `COMPLETED`/`FAILED`
-4. Provide status query endpoint
+## Troubleshooting
 
-### Environment Variable Substitution
-Config JSONs support `${VAR_NAME}` substitution. Use this for paths, API keys, and provider selection. See `framework/register.py:_substitute_env_vars()`.
+### Module Registration Failures
+Check logs from `app_registration.initialize()` for config validation errors. Common issues:
+- Missing environment variables in JSON placeholders
+- Invalid JSON syntax
+- Missing model files for local profile
+- Database connection failures
 
-### Graph Adapter Extensibility
-When implementing new graph backends (e.g., LightRAG, GraphSearch), extend `GraphAdapter` base class and register via `GraphAdapterRegistry`. Existing DeepSearch tools will work with any compliant adapter.
+### FAISS Index Issues
+- Ensure `FAISS_INDEX_PATH` is consistent between indexing and retrieval
+- For HNSW, enable two-stage retrieval: `FAISS_TWO_STAGE_ENABLED=true`
+- Check GPU availability for `faiss-gpu-cu12`
+
+### Graph Retrieval Issues
+- Verify Neo4j connection: `NEO4J_URL`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`
+- Check graph index path: `GRAPH_STORAGE_PATH`
+- Ensure graph weight > 0: `RAG_RETRIEVAL_WEIGHT_GRAPH=1.0`
+
+### MinerU Parsing Failures
+- Check `MINERU_SERVER_URL` is reachable
+- Increase timeout: `MINERU_TIMEOUT_S=900`
+- Enable fallback: `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE=true`
+- Check MinerU server logs for VLM issues
+
+### CLI Not Working
+- Ensure `DEVELOP_MODE=true` to expose Docker ports
+- Check backing services are running
+- Verify `.env` connection details match Docker setup
+- Install libpq: `sudo apt install -y libpq5 libpq-dev`
