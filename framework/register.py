@@ -28,6 +28,9 @@ class Register:
     """
     def __init__(self):
         self.registrations = {}
+        # Keep a lightweight record of registration failures so callers can surface actionable errors
+        # (e.g., CLI commands failing with a bare KeyError when a module never registered).
+        self.registration_errors: dict[str, str] = {}
 
     def _substitute_env_vars(self, obj: Any):
         """Recursively substitute environment variables in config data"""
@@ -85,6 +88,8 @@ class Register:
         logger.info(f"Registering {app_name} with config path {config_path}")
         with open(config_path, "r") as f:
             try:
+                # Clear any previous error for this app before attempting a fresh registration.
+                self.registration_errors.pop(app_name, None)
                 json_str = f.read()
                 config_data = json.loads(json_str)
                 # Substitute environment variables
@@ -93,8 +98,27 @@ class Register:
                 self.registrations[app_name] = config.build()
                 logger.info(f"Successfully registered {app_name}")
             except Exception as e:
+                # Store a concise error for downstream UX (full details are in logs).
+                try:
+                    self.registration_errors[app_name] = str(e) or repr(e)
+                except Exception:  # pragma: no cover
+                    self.registration_errors[app_name] = repr(e)
                 logger.error(f"Error registering {app_name}, the config file is not valid\n {e}")
                 raise e
 
     def get_object(self, app_name: str) -> AbstractModule:
-        return self.registrations[app_name]
+        if app_name in self.registrations:
+            return self.registrations[app_name]
+
+        # Provide a more actionable message than KeyError('knowledge') when a module failed to register.
+        available = sorted(self.registrations.keys())
+        err = self.registration_errors.get(app_name)
+        if err:
+            raise KeyError(
+                f"Module '{app_name}' is not registered (registration previously failed: {err}). "
+                f"Available modules: {available}. Check earlier logs from app_registration.initialize()."
+            )
+        raise KeyError(
+            f"Module '{app_name}' is not registered. Available modules: {available}. "
+            f"Check earlier logs from app_registration.initialize()."
+        )
