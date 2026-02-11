@@ -236,6 +236,67 @@ def test_semantic_unit_chunker_standard_emits_list_anchor_and_slice():
     assert "- item 3" in slice_content
 
 
+def test_semantic_unit_chunker_keeps_heading_with_immediate_list():
+    chunker = SemanticUnitChunkerConfig(
+        level="standard",
+        list_small_max_tokens=10_000,
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "# Heading",
+            "",
+            "- item 1",
+            "- item 2",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+
+    heading_only = [c for c in chunks if (c.get("content") or "").strip() == "# Heading"]
+    assert not heading_only, "expected heading to stay with list chunk"
+
+    list_chunks = [
+        c
+        for c in chunks
+        if c.get("metadata", {}).get("semantic_unit_type") == "list"
+        and c.get("metadata", {}).get("chunk_role") == "anchor"
+    ]
+    assert list_chunks, "expected list anchor"
+    list_content = list_chunks[0].get("content") or ""
+    assert "# Heading" in list_content
+    assert "- item 1" in list_content
+
+
+def test_semantic_unit_chunker_keeps_intro_text_when_heading_attaches_to_list():
+    chunker = SemanticUnitChunkerConfig(
+        level="standard",
+        list_small_max_tokens=10_000,
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "Intro paragraph.",
+            "",
+            "# Heading",
+            "- item 1",
+            "- item 2",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+
+    text_chunks = [
+        c
+        for c in chunks
+        if c.get("metadata", {}).get("semantic_unit_type") == "text"
+    ]
+    assert any("Intro paragraph." in (c.get("content") or "") for c in text_chunks)
+    assert all("# Heading" not in (c.get("content") or "") for c in text_chunks)
+
+
 def test_semantic_unit_chunker_standard_emits_math_anchor():
     chunker = SemanticUnitChunkerConfig(
         level="standard",
