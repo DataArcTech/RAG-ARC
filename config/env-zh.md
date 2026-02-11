@@ -219,6 +219,7 @@ Benchmark/实验模式：
 | `CHATBOT_LLM_TOP_SOURCES` | `10` | Chatbot 接口用于传给 LLM 的 Sources 上限（可大于前端展示的 `CHATBOT_TOP_SOURCES`，用于提升“特点/优势/功能”等泛问覆盖度）。 |
 | `USER_TYPE` | `0` | `rag_inference` 的提示词风格/领域选择开关（读取 `config/prompts/rag_inference_prompts.yaml` 做分层拼接）。 |
 | `RAG_INFERENCE_PROMPTS_YAML_PATH` | (空) | 覆盖 `config/prompts/rag_inference_prompts.yaml` 的路径；为空则使用仓库默认路径。 |
+| `（内置行为）` | - | RAG Chat 与 DeepSearch 的系统提示词会在运行时自动追加日期上下文首行：`今天是 YYYY-MM-DD。`（用于“今天/昨日/明日”等时态问题对齐）。 |
 | `RAGARC_CITATION_STREAM_MODE` | `appearance` | `rag_inference` SSE 流式引用模式：`appearance` 表示边流式边按首次出现顺序重编号（不再发送 `final_text` 刷新），`final` 表示流式期间保持原编号并在结束时发送 `final_text`。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |

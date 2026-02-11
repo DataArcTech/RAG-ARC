@@ -14,6 +14,7 @@ from .rag_inference_prompts import (
     RAG_CHAT_CITATION_ADDON_SYSTEM_PROMPT_EN,
     RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN,
 )
+from .runtime_context import current_local_date_str, prepend_today_line
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ _DEFAULT_SYSTEM_PROMPT_CLI = RAG_CHAT_BASE_SYSTEM_PROMPT_EN
 
 # 缓存加载的 prompt
 _cached_prompt: Optional[str] = None
-_cached_key: Optional[Tuple[str, int]] = None
+_cached_key: Optional[Tuple[str, int, str]] = None
 
 
 def _get_yaml_path() -> Path:
@@ -157,7 +158,7 @@ def get_rag_chat_system_prompt(
     
     # 使用缓存避免重复加载
     global _cached_prompt, _cached_key
-    cache_key = (str(profile), int(resolved_user_type))
+    cache_key = (str(profile), int(resolved_user_type), current_local_date_str())
     if _cached_prompt is not None and _cached_key == cache_key:
         return _cached_prompt
     
@@ -185,6 +186,8 @@ def get_rag_chat_system_prompt(
                 parts.append(domain)
             prompt = "\n\n".join([p.strip() for p in parts if p and p.strip()]).strip()
     
+    prompt = prepend_today_line(prompt)
+
     # 更新缓存
     _cached_prompt = prompt
     _cached_key = cache_key

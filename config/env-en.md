@@ -219,6 +219,7 @@ Notes:
 | `CHATBOT_LLM_TOP_SOURCES` | `10` | Max Sources passed to the chatbot LLM (can be higher than UI `CHATBOT_TOP_SOURCES` to improve coverage for broad queries like "features/benefits"). |
 | `USER_TYPE` | `0` | Prompt style/domain selector used by `rag_inference` prompt layering (`config/prompts/rag_inference_prompts.yaml`). |
 | `RAG_INFERENCE_PROMPTS_YAML_PATH` | (empty) | Optional override path for `config/prompts/rag_inference_prompts.yaml`. When empty, uses the repo default. |
+| `(built-in behavior)` | - | RAG Chat and DeepSearch system prompts automatically prepend the runtime date hint: `今天是 YYYY-MM-DD。` (helps align today/yesterday/tomorrow questions). |
 | `RAGARC_CITATION_STREAM_MODE` | `appearance` | Streaming citation mode for `rag_inference` SSE: `appearance` renumbers as the answer streams (no `final_text` refresh), `final` keeps original citations during streaming and sends `final_text` at the end. |
 | `CHAT_TOP_TRIPLES` | `5` | Maximum graph triples returned in chat evidence. |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Maximum seed entities surfaced in chat evidence. |

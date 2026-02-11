@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from config.core.deepsearch import tool_defaults
 from core.prompts.deepsearch import JSON_RETRY_INSTRUCTION_EN
+from core.prompts.runtime_context import prepend_today_line
 
 from core.utils.json_extract import extract_json_from_text, safe_json_loads
 
@@ -25,14 +26,21 @@ async def _call_llm_async(llm: Any, messages: List[Dict[str, Any]], **kwargs: An
     if llm is None:
         raise RuntimeError("LLM connector is required for this tool")
 
+    normalized_messages: List[Dict[str, Any]] = []
+    for item in list(messages or []):
+        row = dict(item or {})
+        if str(row.get("role") or "").strip() == "system":
+            row["content"] = prepend_today_line(str(row.get("content") or ""))
+        normalized_messages.append(row)
+
     async_chat = getattr(llm, "achat", None)
     if callable(async_chat):
-        return await async_chat(messages, **kwargs)
+        return await async_chat(normalized_messages, **kwargs)
 
     chat = getattr(llm, "chat", None)
     if not callable(chat):
         raise RuntimeError("LLM connector does not expose chat/achat methods")
-    return chat(messages, **kwargs)
+    return chat(normalized_messages, **kwargs)
 
 
 async def call_llm_json_with_retry(

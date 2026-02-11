@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote, ToolResultPayload, GraphQueryContext
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
+from core.prompts.runtime_context import prepend_today_line
 from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
 from core.utils.json_extract import safe_json_loads as _safe_json_loads
 
@@ -171,6 +172,13 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
     # Debug-only metadata (do NOT forward to provider SDKs).
     warn_context = str(kwargs.pop("warn_context", "") or "").strip() or None
 
+    normalized_messages: List[Dict[str, Any]] = []
+    for item in list(messages or []):
+        row = dict(item or {})
+        if str(row.get("role") or "").strip() == "system":
+            row["content"] = prepend_today_line(str(row.get("content") or ""))
+        normalized_messages.append(row)
+
     from core.utils.llm_debug_dump import append_llm_event  # local import to avoid global side-effects
     from framework.run_context import get_run_id  # debug-only context (no runtime behavior changes)
 
@@ -198,10 +206,10 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
                     "run_id": run_id,
                     "llm_call_id": llm_call_id,
                     "kwargs": dict(kwargs),
-                    "messages": messages,
+                    "messages": normalized_messages,
                 }
             )
-            response = await async_chat(messages, **kwargs)
+            response = await async_chat(normalized_messages, **kwargs)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             append_llm_event(
                 {
@@ -245,10 +253,10 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
                 "run_id": run_id,
                 "llm_call_id": llm_call_id,
                 "kwargs": dict(kwargs),
-                "messages": messages,
+                "messages": normalized_messages,
             }
         )
-        response = chat(messages, **kwargs)
+        response = chat(normalized_messages, **kwargs)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         append_llm_event(
             {
