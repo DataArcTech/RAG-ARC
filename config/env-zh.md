@@ -203,6 +203,7 @@ Benchmark/实验模式：
 | `SECTION_CHUNK_MATCH_SNIPPET_CHARS` | `200` | chunk→章节定位的文本片段长度（字符）。 |
 | `SECTION_PAGE_MATCH_SNIPPET_CHARS` | `160` | chunk→页码匹配的文本片段长度（字符）。 |
 | `SECTION_PAGE_MATCH_MAX_PAGES` | `20` | 页码匹配时最多扫描的页数（离线）。 |
+| `PAGEINDEX_STRICT_PAGE_CHUNKING_MODE` | `auto` | 严格页级切块模式：`off` 关闭；`auto` 有 MinerU content_list 时按页切块（缺失时回退）；`require` 缺页文本时直接失败。 |
 | `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | 章节树 JSON 文件名。 |
 | `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | 章节节点 JSONL 文件名。 |
 | `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | 文档描述 JSON 文件名。 |
@@ -231,6 +232,10 @@ Benchmark/实验模式：
 | `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。由低成本模型生成 JSON `{lang: rewritten_query}`。若只填写 `zh-Hans` 可禁用其他变体。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
+| `LLM_JSON_RETRY_DEFAULT_ATTEMPTS` | `2` | LLM JSON 输出的全局默认重试次数（含首次生成）。DeepSearch 与非 DeepSearch 的 JSON 解析流程会复用该默认值，除非模块另行覆盖。 |
+| `LLM_JSON_RETRY_MAX_ATTEMPTS` | `8` | JSON 重试的全局上限，防止异常情况下无限重试。 |
+| `LLM_JSON_RETRY_DEFAULT_TEMPERATURE` | `0.0` | 修复 JSON 输出时使用的默认温度。 |
+| `LLM_JSON_RETRY_DEFAULT_MAX_RAW_CHARS` | `2000` | 回注给模型修复的“上一轮无效输出”最大字符数。 |
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath 的 RRF 融合权重：graph 路径。设为 `0` 表示在**普通 RAG**中禁用图检索（可显著提速）；设为正值（如 `1.0`）可启用。注意这并不影响离线入库/索引阶段的图谱构建，DeepSearch 仍可在其专用流程中使用图信号。 |
