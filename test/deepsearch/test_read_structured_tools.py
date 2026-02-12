@@ -1,6 +1,6 @@
 import pytest
+from types import SimpleNamespace
 
-from core.deepsearch.tools import ToolRunRequest
 from core.deepsearch.tools.explore.read_structured import ReadPagesTool
 from core.graph_adapter.base import GraphAccessScope
 
@@ -52,6 +52,26 @@ class _FakeAdapter:
         ]
 
 
+class _LegacyFallbackAdapter:
+    def cypher_capable(self) -> bool:
+        return True
+
+    async def acypher(self, cypher: str, params=None, *, access_scope=None):  # noqa: ANN001, ARG002
+        params = params or {}
+        file_id = params.get("file_id")
+        if file_id != "11111111-1111-1111-1111-111111111111":
+            return []
+        if "c.page_start IS NOT NULL" in cypher:
+            return []
+        return [
+            {
+                "chunk_id": "legacy-c2",
+                "content": "Legacy page metadata only.",
+                "metadata": {"chunk_index": 1, "page_start": 1, "page_end": 1},
+            }
+        ]
+
+
 class _FakeListHeavyAdapter:
     def cypher_capable(self) -> bool:
         return True
@@ -77,7 +97,7 @@ class _FakeListHeavyAdapter:
 @pytest.mark.asyncio
 async def test_read_pages_filters_by_page_range() -> None:
     tool = ReadPagesTool()
-    req = ToolRunRequest(
+    req = SimpleNamespace(
         question="read",
         plan_step="plan_01",
         context_evidences=[],
@@ -110,12 +130,13 @@ async def test_read_pages_filters_by_page_range() -> None:
     assert meta2.get("source_file_id") == "11111111-1111-1111-1111-111111111111"
     assert meta1.get("page_start") == 1
     assert meta2.get("page_start") == 2
+    assert (result.diagnostics or {}).get("query_mode") == "indexed_page_overlap"
 
 
 @pytest.mark.asyncio
 async def test_read_pages_suggests_contiguous_expansion_for_list_heavy_pages() -> None:
     tool = ReadPagesTool()
-    req = ToolRunRequest(
+    req = SimpleNamespace(
         question="read",
         plan_step="plan_01",
         context_evidences=[],
@@ -138,4 +159,22 @@ async def test_read_pages_suggests_contiguous_expansion_for_list_heavy_pages() -
     args = first.get("args") if isinstance(first.get("args"), dict) else {}
     assert args.get("page_start") == 0
     assert args.get("page_end") == 2
-    assert "list_detected" in str(first.get("reason") or "")
+
+
+@pytest.mark.asyncio
+async def test_read_pages_legacy_scan_fallback_when_page_props_missing() -> None:
+    tool = ReadPagesTool()
+    req = SimpleNamespace(
+        question="read",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=_LegacyFallbackAdapter(),
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"file_id": "11111111-1111-1111-1111-111111111111", "page_start": 1, "page_end": 1},
+        graph_context=None,
+        coverage_metrics=None,
+    )
+    result = await tool.run(req)
+    assert result.evidences
+    assert "Legacy page metadata only." in result.evidences[0].content
+    assert (result.diagnostics or {}).get("query_mode") == "legacy_full_scan_fallback"

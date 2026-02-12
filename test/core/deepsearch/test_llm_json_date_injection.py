@@ -21,6 +21,6 @@ async def test_llm_json_helper_injects_today_into_system_prompt(monkeypatch):
         {"role": "system", "content": "Return strict JSON."},
         {"role": "user", "content": "test"},
     ]
-    out = await llm_json._call_llm_async(llm, messages)
+    out = await llm_json.call_llm_json_with_retry(llm, messages)
     assert out == "{}"
     assert llm.messages[0]["content"].startswith("今天是 2026-02-11。\n")

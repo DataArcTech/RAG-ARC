@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from config.core.deepsearch import tool_defaults
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_TOOL_OUTPUT
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
-from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
 from core.prompts.deepsearch.tools import LOGIC_CHECK_SYSTEM_PROMPT_EN
+from core.utils.llm_json import repair_json_from_raw_with_retry
 
 from ..base import (
     GraphTool,
@@ -500,17 +500,17 @@ class LogicCheckTool(GraphTool):
     async def _attempt_json_repair(self, *, messages: List[Dict[str, str]], raw: str) -> Any:
         if self.json_repair_attempts <= 0:
             return None
-        snippet = (raw or "").strip()
-        if len(snippet) > self.json_repair_max_raw_chars:
-            snippet = snippet[: self.json_repair_max_raw_chars] + "..."
-        repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
-            expected_top_level="object",
-            error="invalid_json",
-            raw_snippet=snippet,
-        )
-        thread = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
         try:
-            response = await call_llm_async(self.llm_connector, thread, temperature=self.json_repair_temperature)
+            repaired = await repair_json_from_raw_with_retry(
+                llm_connector=self.llm_connector,
+                messages=messages,
+                raw=str(raw or ""),
+                expected="dict",
+                temperature=self.json_repair_temperature,
+                attempts=self.json_repair_attempts,
+                include_today_line=True,
+                max_raw_chars=self.json_repair_max_raw_chars,
+            )
         except Exception:
             return None
-        return safe_json_loads(response, expected="dict")
+        return repaired if isinstance(repaired, dict) else None

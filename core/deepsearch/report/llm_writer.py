@@ -15,6 +15,7 @@ from core.deepsearch.utils.language_policy import infer_user_language
 from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
 from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
 from core.utils.multimodal_llm import call_llm_with_optional_images_async
+from core.utils.llm_json import call_llm_json_with_retry, repair_json_from_raw_with_retry
 from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_SYSTEM_PROMPT_EN,
     REPORT_OUTLINE_USER_PROMPT_EN,
@@ -553,9 +554,22 @@ class DeepSearchLLMReportWriter:
         last_raw: str | None = None
         retries = max(int(self.max_retries), 1)
         for attempt in range(retries):
-            raw = await self._call(messages, phase="outline")
+            payload = await call_llm_json_with_retry(
+                llm_connector=self.llm_connector,
+                messages=messages,
+                expected="list",
+                temperature=self.temperature,
+                attempts=max(1, int(self.json_repair_attempts)),
+                return_raw=True,
+            )
+            if isinstance(payload, tuple):
+                data, raw = payload
+            else:
+                data, raw = payload, ""
+            raw = str(raw or "")
             last_raw = raw
-            data = _safe_parse_json(raw, expected="list")
+            if not isinstance(data, list):
+                data = _safe_parse_json(raw, expected="list")
             parsed_list = False
             try:
                 snippet = _extract_first_json(str(raw or "").strip())
@@ -714,8 +728,15 @@ class DeepSearchLLMReportWriter:
                         },
                         {"role": "user", "content": select_prompt},
                     ]
-                    raw_sel = await self._call(select_messages, phase="report_source_select")
-                    sel_obj = _safe_parse_json(raw_sel, expected="dict") or {}
+                    sel_obj = await call_llm_json_with_retry(
+                        llm_connector=self.llm_connector,
+                        messages=select_messages,
+                        expected="dict",
+                        temperature=self.temperature,
+                        attempts=max(1, int(self.json_repair_attempts)),
+                    )
+                    if not isinstance(sel_obj, dict):
+                        sel_obj = {}
                     sel_keys = _coerce_source_key_list(sel_obj.get("answer"))
                     sel_keys = sel_keys[:max_sources]
                     if len(sel_keys) < min_sources:
@@ -1135,6 +1156,7 @@ class DeepSearchLLMReportWriter:
     ) -> Any:
         if self.json_repair_attempts <= 0:
             return None
+        _ = phase  # keep signature stable for call sites/log context
         snippet = _snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))
         expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
         repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
@@ -1142,19 +1164,17 @@ class DeepSearchLLMReportWriter:
             error=error,
             raw_snippet=snippet,
         )
-        messages = base_messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
-        last_raw = raw
-        for attempt in range(int(self.json_repair_attempts)):
-            last_raw = await self._call(messages, phase=f"{phase}:{attempt + 1}")
-            parsed = _safe_parse_json(last_raw, expected=expected)
-            if parsed:
-                return parsed
-            # Keep the most recent output in the repair thread.
-            messages = base_messages + [
-                {"role": "assistant", "content": str(last_raw or "")},
-                {"role": "user", "content": repair_prompt},
-            ]
-        return None
+        repaired = await repair_json_from_raw_with_retry(
+            llm_connector=self.llm_connector,
+            messages=base_messages,
+            raw=str(raw or ""),
+            expected=expected,
+            temperature=self.temperature,
+            attempts=int(self.json_repair_attempts),
+            max_raw_chars=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS),
+            retry_instruction=repair_prompt,
+        )
+        return repaired if repaired else None
 
 
 def render_markdown_from_structured(structured: Dict[str, Any]) -> str:

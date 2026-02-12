@@ -1,98 +1,45 @@
-"""Helpers for strict JSON tool outputs.
-
-Many DeepSearch tools require model outputs to be valid JSON. Even good models sometimes emit
-markdown fences or get truncated. This module provides a centralized, configurable retry loop.
-
-Note: This lives under `core/deepsearch/utils/` so it can be reused by tools and other
-DeepSearch components without creating circular imports.
-"""
-from typing import Any, Dict, List, Mapping, Optional
+"""DeepSearch wrapper for global JSON retry helpers."""
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from config.core.deepsearch import tool_defaults
-from core.prompts.deepsearch import JSON_RETRY_INSTRUCTION_EN
-from core.prompts.runtime_context import prepend_today_line
-
-from core.utils.json_extract import extract_json_from_text, safe_json_loads
-
-
-async def _call_llm_async(llm: Any, messages: List[Dict[str, Any]], **kwargs: Any) -> str:
-    """Invoke sync/async LLM connectors transparently.
-
-    NOTE: This is duplicated from `core.deepsearch.tools.base` on purpose to avoid importing
-    the `core.deepsearch.tools` package (which has import-time registrations and can create
-    circular imports when called from utilities).
-    """
-
-    if llm is None:
-        raise RuntimeError("LLM connector is required for this tool")
-
-    normalized_messages: List[Dict[str, Any]] = []
-    for item in list(messages or []):
-        row = dict(item or {})
-        if str(row.get("role") or "").strip() == "system":
-            row["content"] = prepend_today_line(str(row.get("content") or ""))
-        normalized_messages.append(row)
-
-    async_chat = getattr(llm, "achat", None)
-    if callable(async_chat):
-        return await async_chat(normalized_messages, **kwargs)
-
-    chat = getattr(llm, "chat", None)
-    if not callable(chat):
-        raise RuntimeError("LLM connector does not expose chat/achat methods")
-    return chat(normalized_messages, **kwargs)
+from core.utils.llm_json import call_llm_json_with_retry as _call_llm_json_with_retry
 
 
 async def call_llm_json_with_retry(
-    *,
     llm_connector: Any,
     messages: List[Dict[str, Any]],
-    expected: str,
-    temperature: float,
-    max_tokens: int,
+    expected: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
     attempts: int | None = None,
     llm_kwargs: Optional[Mapping[str, Any]] = None,
-) -> Any | None:
-    """Call an LLM and parse JSON with centralized retries.
+    return_raw: bool = False,
+) -> Union[Any, Tuple[Any, str], str]:
+    """DeepSearch compatibility shim that preserves prior defaults.
 
-    - Uses the shared JSON extractor/parsers from core.utils.json_extract.
-    - Retries are done by asking the model to re-emit strict JSON (no heuristic brace-closing).
+    Backward compatibility:
+    - positional invocation is supported;
+    - when ``expected`` is omitted and ``return_raw=False``, we return raw text.
     """
 
-    tries = int(attempts) if attempts is not None else int(
-        getattr(tool_defaults, "SEARCH_ENTITY_EXTRACT_JSON_REPAIR_ATTEMPTS", 2)
+    if attempts is None:
+        attempts = int(getattr(tool_defaults, "SEARCH_ENTITY_EXTRACT_JSON_REPAIR_ATTEMPTS", 2))
+    legacy_raw_mode = expected is None and not bool(return_raw)
+    payload = await _call_llm_json_with_retry(
+        llm_connector=llm_connector,
+        messages=messages,
+        expected=expected,
+        temperature=float(temperature) if temperature is not None else None,
+        max_tokens=int(max_tokens) if max_tokens is not None else None,
+        attempts=attempts,
+        llm_kwargs=llm_kwargs,
+        include_today_line=True,
+        return_raw=return_raw or legacy_raw_mode,
     )
-    tries = max(1, min(tries, 8))
-
-    expected_norm = expected
-    if expected_norm == "object":
-        expected_norm = "dict"
-
-    # Keep the original message list stable; append retry instruction on later attempts.
-    base_messages = list(messages or [])
-    last_raw: str | None = None
-    extra_kwargs: Dict[str, Any] = dict(llm_kwargs or {})
-    for attempt in range(tries):
-        call_messages: List[Dict[str, Any]] = list(base_messages)
-        if attempt > 0:
-            # Feed the prior output back as an assistant message so the model can repair it, then
-            # request strict JSON only. Keep excerpts short to avoid ballooning context.
-            if last_raw:
-                call_messages.append({"role": "assistant", "content": last_raw[:2000]})
-            call_messages.append({"role": "user", "content": JSON_RETRY_INSTRUCTION_EN})
-        raw = await _call_llm_async(
-            llm_connector,
-            call_messages,
-            temperature=float(temperature),
-            max_tokens=int(max_tokens),
-            **extra_kwargs,
-        )
-        last_raw = str(raw or "")
-        extracted = extract_json_from_text(last_raw)
-        payload = safe_json_loads(extracted or last_raw, expected=expected_norm)
-        if payload is not None:
-            return payload
-    return None
+    if legacy_raw_mode and isinstance(payload, tuple):
+        _parsed, raw = payload
+        return raw
+    return payload
 
 
 __all__ = ["call_llm_json_with_retry"]

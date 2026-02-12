@@ -6,10 +6,10 @@ from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
-from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT_EN
 from core.deepsearch.utils.evidence_cards import evidence_cards
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
+from core.utils.llm_json import repair_json_from_raw_with_retry
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
@@ -370,33 +370,28 @@ class ThinkTool(GraphTool):
     ) -> Any:
         if self.json_repair_attempts <= 0:
             return None
-        snippet = (raw or "").strip()
-        if len(snippet) > self.json_repair_max_raw_chars:
-            snippet = snippet[: self.json_repair_max_raw_chars] + "…"
-        expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
-        repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
-            expected_top_level=expected_label,
-            error=error,
-            raw_snippet=snippet,
+        _ = error  # kept for compatibility/logging context
+        model = self.json_repair_model
+        if model is None:
+            cfg = getattr(self.llm_connector, "config", None) if self.llm_connector is not None else None
+            candidate = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
+            if isinstance(candidate, str) and candidate.strip():
+                model = candidate.strip()
+        kwargs: Dict[str, Any] = {}
+        if model:
+            kwargs["model"] = model
+        repaired = await repair_json_from_raw_with_retry(
+            llm_connector=self.llm_connector,
+            messages=messages,
+            raw=str(raw or ""),
+            expected=expected,
+            temperature=self.json_repair_temperature,
+            attempts=self.json_repair_attempts,
+            llm_kwargs=kwargs or None,
+            include_today_line=True,
+            max_raw_chars=self.json_repair_max_raw_chars,
         )
-        thread = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
-        last_raw = raw
-        for _attempt in range(self.json_repair_attempts):
-            model = self.json_repair_model
-            if model is None:
-                cfg = getattr(self.llm_connector, "config", None) if self.llm_connector is not None else None
-                candidate = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
-                if isinstance(candidate, str) and candidate.strip():
-                    model = candidate.strip()
-            kwargs: Dict[str, Any] = {"temperature": self.json_repair_temperature}
-            if model:
-                kwargs["model"] = model
-            last_raw = await call_llm_async(self.llm_connector, thread, warn_context="deepsearch.think.loop", **kwargs)
-            parsed = safe_json_loads(last_raw, expected=expected)
-            if parsed is not None:
-                return parsed
-            thread = messages + [{"role": "assistant", "content": str(last_raw or "")}, {"role": "user", "content": repair_prompt}]
-        return None
+        return repaired
 
     @staticmethod
     def _graph_context_snapshot(graph_context: GraphQueryContext | None) -> Dict[str, Any]:

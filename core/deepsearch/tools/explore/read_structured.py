@@ -75,8 +75,14 @@ class _ChunkRow:
         return _coerce_int(self.metadata.get("page_end"))
 
 
-async def _fetch_file_chunks(*, request: ToolRunRequest, file_id: str) -> Tuple[List[_ChunkRow], Dict[str, Any]]:
-    diagnostics: Dict[str, Any] = {"file_id": file_id}
+async def _fetch_file_chunks(
+    *,
+    request: ToolRunRequest,
+    file_id: str,
+    page_start: int,
+    page_end: int,
+) -> Tuple[List[_ChunkRow], Dict[str, Any]]:
+    diagnostics: Dict[str, Any] = {"file_id": file_id, "page_start": page_start, "page_end": page_end}
     if not pageindex_cfg.pageindex_enabled():
         diagnostics["reason"] = "pageindex_disabled"
         return [], diagnostics
@@ -90,13 +96,31 @@ async def _fetch_file_chunks(*, request: ToolRunRequest, file_id: str) -> Tuple[
     cypher = (
         "MATCH (c:Chunk)\n"
         "WHERE c.source_file_id = $file_id AND COALESCE(c.owner_id, $global_owner) = $owner_id\n"
-        "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata\n"
+        "  AND c.page_start IS NOT NULL AND c.page_end IS NOT NULL\n"
+        "  AND c.page_start <= $page_end AND c.page_end >= $page_start\n"
+        "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, "
+        "c.page_start AS page_start, c.page_end AS page_end\n"
     )
     # NOTE: Do not apply a LIMIT here. `read.pages` must be able to return a full page even when
     # the file contains many chunks. Selection should be controlled by the requested page range.
-    params = {"file_id": file_id}
+    params = {"file_id": file_id, "page_start": page_start, "page_end": page_end}
     async with adapter_locked(request.adapter):
         rows = await request.adapter.acypher(cypher, params, access_scope=request.access_scope)
+
+    diagnostics["query_mode"] = "indexed_page_overlap"
+    diagnostics["rows_scanned"] = len(rows or [])
+
+    # Backward compatibility for legacy chunks that only keep page info in metadata JSON.
+    if not rows:
+        legacy_cypher = (
+            "MATCH (c:Chunk)\n"
+            "WHERE c.source_file_id = $file_id AND COALESCE(c.owner_id, $global_owner) = $owner_id\n"
+            "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata\n"
+        )
+        async with adapter_locked(request.adapter):
+            rows = await request.adapter.acypher(legacy_cypher, {"file_id": file_id}, access_scope=request.access_scope)
+        diagnostics["query_mode"] = "legacy_full_scan_fallback"
+        diagnostics["rows_scanned"] = len(rows or [])
 
     parsed: List[_ChunkRow] = []
     missing = 0
@@ -107,10 +131,15 @@ async def _fetch_file_chunks(*, request: ToolRunRequest, file_id: str) -> Tuple[
         if not chunk_id:
             continue
         meta = _parse_metadata(row.get("metadata"))
+        row_page_start = row.get("page_start")
+        row_page_end = row.get("page_end")
+        if row_page_start is not None:
+            meta["page_start"] = row_page_start
+        if row_page_end is not None:
+            meta["page_end"] = row_page_end
         if not meta:
             missing += 1
         parsed.append(_ChunkRow(chunk_id=chunk_id, content=str(row.get("content") or ""), metadata=meta))
-    diagnostics["rows_scanned"] = len(rows or [])
     diagnostics["missing_metadata_rows"] = missing
     return parsed, diagnostics
 
@@ -187,7 +216,12 @@ class ReadPagesTool(GraphTool):
         if page_end < page_start:
             page_start, page_end = page_end, page_start
 
-        all_rows, fetch_diag = await _fetch_file_chunks(request=request, file_id=file_id)
+        all_rows, fetch_diag = await _fetch_file_chunks(
+            request=request,
+            file_id=file_id,
+            page_start=page_start,
+            page_end=page_end,
+        )
         if not all_rows:
             return ToolResult(summary="read.pages returned no chunks.", diagnostics={**fetch_diag, "reason": fetch_diag.get("reason") or "empty_file"})
 

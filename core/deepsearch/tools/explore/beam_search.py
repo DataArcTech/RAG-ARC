@@ -12,9 +12,6 @@ from ..base import (
     ToolResult,
     ToolRunRequest,
     build_input_schema,
-    call_llm_async,
-    extract_json_from_text,
-    safe_json_loads,
 )
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
 from config.core.deepsearch.tool_defaults import (
@@ -263,12 +260,14 @@ class BeamSearchTool(GraphTool):
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        response = await call_llm_async(
-            self.llm_connector,
-            messages,
+        data = await call_llm_json_with_retry(
+            llm_connector=self.llm_connector,
+            messages=messages,
+            expected="list",
             temperature=self.temperature,
+            max_tokens=None,
         )
-        data = safe_json_loads(response, expected="list") or []
+        data = data or []
         scores: Dict[str, float] = {}
         if isinstance(data, list):
             for item in data:
