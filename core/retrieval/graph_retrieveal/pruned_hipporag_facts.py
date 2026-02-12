@@ -8,6 +8,7 @@ import numpy as np
 from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
 from core.prompts.graph_retrieval import FACT_RERANK_RETRY_USER_PROMPT, FACT_RERANK_USER_PROMPT
 from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
+from core.utils.llm_json import repair_json_from_raw_with_retry_sync
 from core.utils.owner_guard import normalize_owner_id
 
 logger = logging.getLogger(__name__)
@@ -369,7 +370,6 @@ class _PrunedHippoRAGFactsMixin:
             prompt = template.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
             messages = [{"role": "user", "content": prompt}]
             last_response = self._llm_rerank_chat(messages, enforce_json_object=enforce_json_object)
-
             selected_indices = parse_ranked_choice_indices(
                 last_response,
                 candidate_count=len(candidate_facts),
@@ -377,6 +377,21 @@ class _PrunedHippoRAGFactsMixin:
                 one_based=True,
                 allow_fallback=False,
             )
+            if not selected_indices:
+                repaired = repair_json_from_raw_with_retry_sync(
+                    llm_connector=self.llm_client,
+                    messages=messages,
+                    raw=str(last_response or ""),
+                    expected=None,
+                )
+                if repaired is not None:
+                    selected_indices = parse_ranked_choice_indices(
+                        repaired,
+                        candidate_count=len(candidate_facts),
+                        k=int(len_after_rerank),
+                        one_based=True,
+                        allow_fallback=False,
+                    )
             if selected_indices:
                 top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
                 top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]

@@ -20,6 +20,7 @@ from .dots_ocr_utils.layout_utils import pre_process_bboxes, post_process_output
 # from .dots_ocr_utils.layout_utils import draw_layout_on_image  # Not needed - image output disabled
 from .dots_ocr_utils.consts import MIN_PIXELS, MAX_PIXELS, image_extensions
 from .dots_ocr_utils.format_transformer import layoutjson2md, clean_base64_images
+from core.utils.llm_json import call_prompt_json_with_retry_sync
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.dots_ocr import DotsOCRParserConfig
@@ -273,8 +274,23 @@ class DotsOCRParser(AbstractParser):
         
         prompt = self._get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
 
-        # Use LLM service for inference
-        response = self.llm_service.infer(image, prompt)
+        # Use LLM service for inference.
+        json_prompt_modes = {"prompt_layout_all_en", "prompt_layout_only_en", "prompt_grounding_ocr"}
+        if prompt_mode in json_prompt_modes:
+            payload = call_prompt_json_with_retry_sync(
+                infer_once=lambda next_prompt: str(self.llm_service.infer(image, next_prompt) or ""),
+                prompt=prompt,
+                expected="list",
+                return_raw=True,
+            )
+            if isinstance(payload, tuple):
+                parsed_payload, response = payload
+            else:
+                parsed_payload, response = payload, ""
+            if isinstance(parsed_payload, list):
+                response = json.dumps(parsed_payload, ensure_ascii=False)
+        else:
+            response = self.llm_service.infer(image, prompt)
 
         result = {
             'page_no': page_idx,

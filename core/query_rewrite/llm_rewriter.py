@@ -19,6 +19,7 @@ from config.rag_intent_routing import (
     rag_rewrite_history_user_only,
     rag_rewrite_history_most_recent_first,
 )
+from core.utils.llm_json import call_llm_json_with_retry_sync
 
 import logging
 
@@ -340,11 +341,14 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         )
 
         try:
-            raw = self.chat_llm.chat(messages=messages, **kwargs)
-            text = str(raw or "").strip()
-            from core.utils.json_extract import safe_json_loads
-
-            payload = safe_json_loads(text, expected="dict")
+            payload, text = call_llm_json_with_retry_sync(
+                llm_connector=self.chat_llm,
+                messages=messages,
+                expected="dict",
+                llm_kwargs=kwargs,
+                return_raw=True,
+            )
+            text = str(text or "").strip()
             if not isinstance(payload, dict):
                 logger.warning("rewrite_query_with_intent: non-JSON response; fallback to original query")
                 fallback = {"intent": "RAG_REQUIRED", "rewritten_query": str(query), "anchors": []}
@@ -520,11 +524,14 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         )
 
         try:
-            raw = self.chat_llm.chat(messages=messages, **kwargs)
-            text = str(raw or "").strip()
-            from core.utils.json_extract import safe_json_loads
-
-            payload = safe_json_loads(text, expected="dict")
+            payload, text = call_llm_json_with_retry_sync(
+                llm_connector=self.chat_llm,
+                messages=messages,
+                expected="dict",
+                llm_kwargs=kwargs,
+                return_raw=True,
+            )
+            text = str(text or "").strip()
             if not isinstance(payload, dict):
                 # Strict contract: routing mode must return JSON.
                 # Avoid a second LLM call on failure; keep behavior deterministic.

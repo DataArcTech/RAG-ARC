@@ -32,7 +32,7 @@ from core.prompts.hipporag2_extractor_prompt_json import (
     HIPPORAG2_NER_JSON_SYSTEM_EN,
     HIPPORAG2_NER_JSON_SYSTEM_ZH,
 )
-from core.utils.structured_output import StructuredOutputError, parse_pydantic_json_from_llm_text
+from core.utils.structured_output import StructuredOutputError, call_pydantic_json_with_retry
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -141,9 +141,13 @@ class GraphExtractor(ExtractorBase):
             example_output=HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_ZH if language == "zh" else HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_EN,
             passage=text,
         )
-        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
         try:
-            return parse_pydantic_json_from_llm_text(response, ExtractedEntities)
+            return await call_pydantic_json_with_retry(
+                llm_connector=self.llm,
+                messages=messages,
+                model_cls=ExtractedEntities,
+            )
         except StructuredOutputError as exc:
             raise ValueError(f"GraphExtractor NER(JSON) structured output invalid: {exc}") from exc
 
@@ -159,9 +163,13 @@ class GraphExtractor(ExtractorBase):
             reference_time=reference_time,
             passage=text,
         )
-        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
         try:
-            model = parse_pydantic_json_from_llm_text(response, ExtractedEdges)
+            model = await call_pydantic_json_with_retry(
+                llm_connector=self.llm,
+                messages=messages,
+                model_cls=ExtractedEdges,
+            )
         except StructuredOutputError as exc:
             raise ValueError(f"GraphExtractor edges(JSON) structured output invalid: {exc}") from exc
         return model, reference_time
