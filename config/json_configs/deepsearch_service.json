@@ -73,7 +73,7 @@
       "max_tool_calls": 4,
       "tool_call_concurrency": 2,
       "tool_catalog_max_items": 12,
-        "tool_catalog_allowlist": [
+      "tool_catalog_allowlist": [
         "explore",
         "code.python"
       ],
@@ -127,6 +127,14 @@
           "max_memory_mb": 1024,
           "emit_result_evidence": true,
           "disable_file_io": true
+        }
+      },
+      "web.search": {
+        "params": {
+          "aggregate_enabled": true,
+          "aggregate_group_by": "domain",
+          "aggregate_max_groups": 3,
+          "aggregate_max_results_per_group": 2
         }
       }
     },

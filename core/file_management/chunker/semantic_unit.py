@@ -49,6 +49,7 @@ class SemanticUnitChunker(AbstractChunker):
     _LIST_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+(.*)$")
     _ORDERED_ITEM_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
     _TASK_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(.*)$")
+    _HEADER_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S+")
     _MATH_BLOCK_START_RE = re.compile(r"^\s*(\$\$|\\\[)\s*$")
     _MATH_BLOCK_END_RE = re.compile(r"^\s*(\$\$|\\\])\s*$")
     _HTML_TABLE_START_RE = re.compile(r"<table\b", re.IGNORECASE)
@@ -722,6 +723,7 @@ class SemanticUnitChunker(AbstractChunker):
                     continue
 
                 if enable_lists and self._is_list_start(line):
+                    self._pop_heading_from_buffer_for_list(lines, i, buffer)
                     flush_text()
                     start = i
                     i += 1
@@ -775,6 +777,33 @@ class SemanticUnitChunker(AbstractChunker):
                 return ""
             return candidate
         return ""
+
+    @staticmethod
+    def _is_markdown_header(line: str) -> bool:
+        if not isinstance(line, str):
+            return False
+        return bool(SemanticUnitChunker._HEADER_RE.match(line))
+
+    @staticmethod
+    def _pop_heading_from_buffer_for_list(lines: List[str], list_start_index: int, buffer: List[str]) -> None:
+        if not buffer:
+            return
+        j = list_start_index - 1
+        while j >= 0 and not (lines[j] or "").strip():
+            j -= 1
+        if j < 0:
+            return
+        header_line = lines[j]
+        if not SemanticUnitChunker._is_markdown_header(header_line):
+            return
+        k = len(buffer) - 1
+        while k >= 0 and not (buffer[k] or "").strip():
+            k -= 1
+        if k < 0:
+            return
+        if buffer[k] != header_line:
+            return
+        del buffer[k:]
 
     @staticmethod
     def _is_math_block_start(line: str) -> bool:

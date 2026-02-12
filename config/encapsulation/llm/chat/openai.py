@@ -28,7 +28,9 @@ def _default_api_key() -> str:
 
 
 def _default_base_url() -> str:
-    return os.getenv("CHAT_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
+    # Treat empty component-specific env vars as unset so OPENAI_* can act as a shared default.
+    # This matches the .env convention where per-component overrides are often left blank.
+    return os.getenv("CHAT_API_BASE_URL") or os.getenv("OPENAI_BASE_URL", "")
 
 
 def _default_timeout() -> float:

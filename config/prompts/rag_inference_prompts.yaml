@@ -5,6 +5,7 @@
 #
 # - cli (debug): base only (ignores style/domain layers by default)
 # - rag_inference (user-facing): base + citations addon + (style_prompt?) + (domain_prompt?)
+# - system prompt always includes a runtime date hint ("今天是 YYYY-MM-DD。").
 #
 # Backward compatibility:
 # - You may still specify `system_prompt` to override the entire system prompt for a user_type,
@@ -32,4 +33,3 @@ prompts:
     # Domain layer: plug-in persona / domain hints (optional).
     # Use a repo-relative path so deployments can swap domains without editing code.
     domain_prompt_path: config/prompts/finance_insurance/rag_domain_prompt_en.txt
-

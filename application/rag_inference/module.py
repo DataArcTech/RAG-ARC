@@ -25,7 +25,7 @@ from config.output_limits import CHAT_MAX_IMAGE_INPUTS, RAG_RETRIEVAL_OBSERVABIL
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
 from core.utils.chunk_dedupe import dedupe_chunks
-from encapsulation.web_search import TavilySearchClient
+from encapsulation.web_search import TavilySearchClient, aggregate_tavily_results
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 from config.rag_intent_routing import (
     rag_evidence_consistency_enabled,
@@ -427,6 +427,8 @@ class RAGInference(AbstractModule):
         user_type: Optional[int] = None,
         include_share: bool = False,
         share_owner_id: uuid.UUID | None = None,
+        debug_state: dict[str, Any] | None = None,
+        disable_intent_routing: bool = False,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
             metadata = getattr(chunk, "metadata", None) or {}
@@ -496,12 +498,95 @@ class RAGInference(AbstractModule):
                 top.append({"source_file_id": fid, "count": int(count), "filename": name_by_id.get(fid)})
             return top
 
+        debug_enabled = isinstance(debug_state, dict)
+
+        def _debug_section(name: str) -> dict[str, Any] | None:
+            if not debug_enabled:
+                return None
+            section = debug_state.setdefault(name, {})
+            if not isinstance(section, dict):
+                section = {}
+                debug_state[name] = section
+            return section
+
+        def _debug_stage(name: str) -> dict[str, Any] | None:
+            if not debug_enabled:
+                return None
+            stages = debug_state.setdefault("stages", {})
+            if not isinstance(stages, dict):
+                stages = {}
+                debug_state["stages"] = stages
+            section = stages.setdefault(name, {})
+            if not isinstance(section, dict):
+                section = {}
+                stages[name] = section
+            return section
+
+        def _chunk_debug(chunk: Chunk) -> dict[str, Any]:
+            metadata = dict(getattr(chunk, "metadata", None) or {})
+            content = getattr(chunk, "content", None)
+            if isinstance(content, dict):
+                content = content.get("text") or content.get("content") or content
+            graph = getattr(chunk, "graph", None)
+            graph_payload = None
+            if graph is not None:
+                try:
+                    if hasattr(graph, "is_empty") and graph.is_empty():
+                        graph_payload = None
+                    elif hasattr(graph, "to_dict"):
+                        graph_payload = graph.to_dict()
+                    else:
+                        graph_payload = graph
+                except Exception:  # noqa: BLE001
+                    graph_payload = None
+            payload: dict[str, Any] = {
+                "id": str(getattr(chunk, "id", "") or ""),
+                "content": content,
+                "metadata": metadata,
+            }
+            if graph_payload:
+                payload["graph"] = graph_payload
+            return payload
+
+        def _chunks_debug_list(items: list[Chunk]) -> list[dict[str, Any]]:
+            return [_chunk_debug(chunk) for chunk in items]
+
+        if debug_enabled:
+            debug_state.setdefault(
+                "request",
+                {
+                    "query": str(query or ""),
+                    "owner_id": str(owner_id),
+                    "return_subgraph": bool(return_subgraph),
+                    "enable_web_search": bool(enable_web_search),
+                    "session_id": str(session_id) if session_id is not None else None,
+                    "include_share": bool(include_share),
+                    "share_owner_id": str(share_owner_id) if share_owner_id is not None else None,
+                    "disable_intent_routing": bool(disable_intent_routing),
+                },
+            )
+
         routing_intent: str | None = None
         routing_action: str = "rag"
         routed_history_text: str | None = None
         # Some tests construct RAGInference via object.__new__ (skipping __init__),
         # so guard against missing attributes.
         intent_router = getattr(self, "_intent_routing", None)
+        if disable_intent_routing:
+            intent_debug = _debug_section("intent_routing")
+            if intent_debug is not None:
+                intent_debug.update(
+                    {
+                        "enabled": False,
+                        "disabled_reason": "force_disabled",
+                    }
+                )
+            intent_router = None
+        elif intent_router is None:
+            intent_debug = _debug_section("intent_routing")
+            if intent_debug is not None:
+                intent_debug.update({"enabled": False, "disabled_reason": "not_configured"})
+
         if intent_router is not None:
             self._emit_progress(progress_callback, {"stage": "intent_routing", "status": "start"})
             routing_start = time.perf_counter()
@@ -530,6 +615,21 @@ class RAGInference(AbstractModule):
                         **({"topic": result.topic.__dict__} if getattr(result, "topic", None) else {}),
                     },
                 )
+                intent_debug = _debug_section("intent_routing")
+                if intent_debug is not None:
+                    intent_debug.update(
+                        {
+                            "enabled": True,
+                            "status": "ok",
+                            "duration_ms": int((time.perf_counter() - routing_start) * 1000),
+                            "intent": routing_intent,
+                            "action": routing_action,
+                            "score": float(getattr(result, "score", 0.0) or 0.0),
+                            "topic": (result.topic.__dict__ if getattr(result, "topic", None) else None),
+                            "debug": getattr(result, "debug", None),
+                            "scoped_history_text": routed_history_text,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Intent routing failed; defaulting to RAG: %s", exc)
                 self._emit_progress(
@@ -541,10 +641,21 @@ class RAGInference(AbstractModule):
                         "error": str(exc) or exc.__class__.__name__,
                     },
                 )
+                intent_debug = _debug_section("intent_routing")
+                if intent_debug is not None:
+                    intent_debug.update(
+                        {
+                            "enabled": True,
+                            "status": "error",
+                            "duration_ms": int((time.perf_counter() - routing_start) * 1000),
+                            "error": str(exc) or exc.__class__.__name__,
+                        }
+                    )
 
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
         rewrite_kwargs: dict[str, Any] = {}
+        rewrite_debug = _debug_section("rewrite")
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
         bm25_query: str | None = None
@@ -559,6 +670,8 @@ class RAGInference(AbstractModule):
             if accepts_var_kw or "history_text" in sig.parameters:
                 # Only pass history_text when supported to keep compatibility with simple stubs/lambdas.
                 rewrite_kwargs["history_text"] = history_text
+            if rewrite_debug is not None and (accepts_var_kw or "debug_info" in sig.parameters):
+                rewrite_kwargs["debug_info"] = rewrite_debug
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to inspect query_rewriter.rewrite_query signature: %s", exc, exc_info=True)
 
@@ -575,6 +688,8 @@ class RAGInference(AbstractModule):
                 call_kwargs = dict(rewrite_kwargs)
                 if not accepts_var_kw and "history_text" not in sig.parameters:
                     call_kwargs.pop("history_text", None)
+                if not accepts_var_kw and "debug_info" not in sig.parameters:
+                    call_kwargs.pop("debug_info", None)
                 rewritten_query, retrieval_ratios, bm25_query = fn(query, **call_kwargs)  # type: ignore[misc]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
@@ -599,6 +714,14 @@ class RAGInference(AbstractModule):
                 **({"bm25_query": bm25_query} if bm25_query else {}),
             },
         )
+        if rewrite_debug is not None:
+            rewrite_debug.setdefault("duration_ms", int((time.perf_counter() - rewrite_start) * 1000))
+            rewrite_debug.setdefault("rewritten_query", rewritten_query)
+            rewrite_debug.setdefault("retrieval_ratios", retrieval_ratios)
+            rewrite_debug.setdefault("bm25_query", bm25_query)
+            rewrite_debug.setdefault("routing_intent", routing_intent)
+            rewrite_debug.setdefault("routing_action", routing_action)
+            rewrite_debug.setdefault("skip_retrieval", bool(skip_retrieval))
 
         if skip_retrieval:
             # Conversation-only mode: we still build messages (using history), but avoid retrieval/rerank.
@@ -635,6 +758,19 @@ class RAGInference(AbstractModule):
                     if role in ("user", "assistant") and content:
                         messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": str(query or "").strip()})
+            debug_stage = _debug_stage("no_retrieval")
+            if debug_stage is not None:
+                debug_stage.update(
+                    {
+                        "reason": "routing_action_no_retrieval",
+                        "messages": list(messages),
+                        "chunks": [],
+                        "subgraph_info": subgraph_info,
+                    }
+                )
+            debug_response = _debug_section("response")
+            if debug_response is not None:
+                debug_response.update({"messages": list(messages), "chunks": []})
             return (messages, chunks, None, subgraph_info)
 
         do_internal_retrieval = routing_action == "rag"
@@ -662,14 +798,34 @@ class RAGInference(AbstractModule):
                 {"stage": "web_search", "status": "start", "provider": "tavily", "max_results": web_candidates_k},
             )
 
-            def _run_web_search() -> list[dict]:
+            def _run_web_search() -> dict[str, Any]:
                 try:
                     logger.info(f"Executing Tavily search for query: {rewritten_query}")
                     results = self._tavily_client.search(query=rewritten_query, max_results=web_candidates_k)
                     logger.info(f"Tavily search returned {len(results)} results")
+                    agg_stats = None
+                    web_agg_enabled = bool(getattr(web_cfg, 'aggregate_enabled', True))
+                    if web_agg_enabled:
+                        group_by = str(getattr(web_cfg, 'aggregate_group_by', 'domain') or 'domain')
+                        max_groups = int(getattr(web_cfg, 'aggregate_max_groups', 3))
+                        max_per_group = int(getattr(web_cfg, 'aggregate_max_results_per_group', 2))
+                        agg_results, agg_stats = aggregate_tavily_results(
+                            results,
+                            group_by=group_by,
+                            max_groups=max_groups,
+                            max_items_per_group=max_per_group,
+                        )
+                        logger.info(
+                            'Web search aggregation applied: group_by=%s in=%d out=%d groups=%d',
+                            agg_stats.group_by,
+                            agg_stats.total_in,
+                            agg_stats.total_out,
+                            len(agg_stats.groups),
+                        )
+                        results = agg_results
                     evidence_chunks = self._tavily_client.to_evidence_chunks(results=results, step_id=web_step_id, query=rewritten_query)
                     logger.info(f"Converted to {len(evidence_chunks)} evidence chunks")
-                    return evidence_chunks
+                    return {"evidences": evidence_chunks, "aggregation": (agg_stats.__dict__ if agg_stats is not None else None)}
                 except Exception as e:
                     logger.error(f"Error in web search: {e}", exc_info=True)
                     raise
@@ -689,6 +845,12 @@ class RAGInference(AbstractModule):
                 share_owner_id=share_owner_id,
                 label=("me+share" if include_share else "me"),
             )
+            retrieve_stage = _debug_stage("retrieve")
+            if retrieve_stage is not None:
+                retrieve_stage["owner_visibility"] = {
+                    "label": visibility.label,
+                    "owner_ids": list(visibility.owner_ids),
+                }
             self._emit_progress(
                 progress_callback,
                 {
@@ -763,6 +925,17 @@ class RAGInference(AbstractModule):
                     ),
                 },
             )
+            retrieve_stage = _debug_stage("retrieve")
+            if retrieve_stage is not None:
+                retrieve_stage.update(
+                    {
+                        "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                        "chunks": _chunks_debug_list(chunks),
+                        "chunks_count": len(chunks),
+                        "retriever": retriever_info,
+                        "pageindex_section_scores": dict(pageindex_section_scores),
+                    }
+                )
         else:
             # Web-only mode: skip internal retrieval and wait for (optional) web search.
             self._emit_progress(
@@ -775,6 +948,16 @@ class RAGInference(AbstractModule):
                     "skipped_internal_retrieval": True,
                 },
             )
+            retrieve_stage = _debug_stage("retrieve")
+            if retrieve_stage is not None:
+                retrieve_stage.update(
+                    {
+                        "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                        "chunks": [],
+                        "chunks_count": 0,
+                        "skipped_internal_retrieval": True,
+                    }
+                )
 
         if do_internal_retrieval and owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
             logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
@@ -786,11 +969,31 @@ class RAGInference(AbstractModule):
             if graph_chunks:
                 chunks = graph_chunks
 
+        file_status_before = list(chunks) if debug_enabled else None
         chunks = self._filter_chunks_by_file_status(chunks)
+        file_status_stage = _debug_stage("file_status_filter")
+        if file_status_stage is not None:
+            file_status_stage.update(
+                {
+                    "chunks_in": _chunks_debug_list(file_status_before or []),
+                    "chunks_out": _chunks_debug_list(chunks),
+                    "chunks_in_count": len(file_status_before or []),
+                    "chunks_out_count": len(chunks),
+                }
+            )
         before = len(chunks)
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped retrieved chunks: %d -> %d", before, len(chunks))
+        dedupe_stage = _debug_stage("dedupe_after_file_status")
+        if dedupe_stage is not None:
+            dedupe_stage.update(
+                {
+                    "chunks_in_count": before,
+                    "chunks_out_count": len(chunks),
+                    "chunks": _chunks_debug_list(chunks),
+                }
+            )
 
         if pageindex_section_scores:
             chunks, info = self._filter_chunks_by_section_scores(
@@ -800,6 +1003,15 @@ class RAGInference(AbstractModule):
                 score_weight=pageindex_cfg.section_score_weight(),
             )
             logger.info("PageIndex section filter: %s", info)
+            section_stage = _debug_stage("pageindex_section_filter")
+            if section_stage is not None:
+                section_stage.update(
+                    {
+                        "info": info,
+                        "chunks": _chunks_debug_list(chunks),
+                        "chunks_count": len(chunks),
+                    }
+                )
 
         # Evidence consistency filtering (opt-in): keep chunks aligned to anchors to reduce drift.
         if rag_evidence_consistency_enabled() and rewrite_anchors:
@@ -808,6 +1020,15 @@ class RAGInference(AbstractModule):
 
                 self._emit_progress(progress_callback, {"stage": "evidence_filter", "status": "start"})
                 before = len(chunks)
+                evidence_stage = _debug_stage("evidence_filter")
+                if evidence_stage is not None:
+                    evidence_stage.update(
+                        {
+                            "chunks_in": _chunks_debug_list(chunks),
+                            "chunks_in_count": len(chunks),
+                            "anchors": list(rewrite_anchors),
+                        }
+                    )
                 chunks, info = filter_chunks_by_anchors(
                     chunks=chunks,
                     anchors=rewrite_anchors,
@@ -826,13 +1047,22 @@ class RAGInference(AbstractModule):
                         "matched_by_content": getattr(info, "matched_by_content", None),
                     },
                 )
+                if evidence_stage is not None:
+                    evidence_stage.update(
+                        {
+                            "chunks_out": _chunks_debug_list(chunks),
+                            "chunks_out_count": len(chunks),
+                            "info": info,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Evidence consistency filter failed (ignored): %s", exc)
 
+        web_chunks: list[Chunk] = []
+        web_aggregation: dict[str, Any] | None = None
         if web_future is not None:
             logger.info("Waiting for web search results...")
             web_start = time.perf_counter()
-            web_chunks: list[Chunk] = []
             try:
                 timeout_seconds = float(getattr(web_cfg, "timeout_seconds"))
                 timeout_grace_seconds = float(getattr(web_cfg, "timeout_grace_seconds"))
@@ -840,12 +1070,22 @@ class RAGInference(AbstractModule):
                 logger.info(f"Web search timeout: {total_timeout}s")
                 # Use done() to check if completed, avoid blocking indefinitely
                 if web_future.done():
-                    evidences = web_future.result()
+                    web_payload = web_future.result()
+                    if isinstance(web_payload, dict):
+                        evidences = web_payload.get("evidences") if isinstance(web_payload.get("evidences"), list) else []
+                        web_aggregation = web_payload.get("aggregation") if isinstance(web_payload.get("aggregation"), dict) else None
+                    else:
+                        evidences = web_payload if isinstance(web_payload, list) else []
                     logger.info(f"Web search already completed, got {len(evidences) if evidences else 0} evidences")
                 else:
                     # Wait with timeout, but don't block forever
                     try:
-                        evidences = web_future.result(timeout=total_timeout)
+                        web_payload = web_future.result(timeout=total_timeout)
+                        if isinstance(web_payload, dict):
+                            evidences = web_payload.get("evidences") if isinstance(web_payload.get("evidences"), list) else []
+                            web_aggregation = web_payload.get("aggregation") if isinstance(web_payload.get("aggregation"), dict) else None
+                        else:
+                            evidences = web_payload if isinstance(web_payload, list) else []
                         logger.info(f"Web search completed within timeout, got {len(evidences) if evidences else 0} evidences")
                     except TimeoutError:
                         logger.warning(f"Web search timed out after {total_timeout}s, continuing without web results")
@@ -884,8 +1124,20 @@ class RAGInference(AbstractModule):
                         "status": "end",
                         "duration_ms": int((time.perf_counter() - web_start) * 1000),
                         "results": len(web_chunks),
+                        "aggregation": web_aggregation,
                     },
                 )
+                web_stage = _debug_stage("web_search")
+                if web_stage is not None:
+                    web_stage.update(
+                        {
+                            "status": "end",
+                            "duration_ms": int((time.perf_counter() - web_start) * 1000),
+                            "results": len(web_chunks),
+                            "chunks": _chunks_debug_list(web_chunks),
+                            "aggregation": web_aggregation,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"Web search failed: {exc}", exc_info=True)
                 self._emit_progress(
@@ -897,6 +1149,15 @@ class RAGInference(AbstractModule):
                         "error": str(exc) or exc.__class__.__name__,
                     },
                 )
+                web_stage = _debug_stage("web_search")
+                if web_stage is not None:
+                    web_stage.update(
+                        {
+                            "status": "error",
+                            "duration_ms": int((time.perf_counter() - web_start) * 1000),
+                            "error": str(exc) or exc.__class__.__name__,
+                        }
+                    )
             if web_chunks:
                 logger.info(f"Adding {len(web_chunks)} web chunks to final chunks list")
                 chunks.extend(web_chunks)
@@ -907,6 +1168,17 @@ class RAGInference(AbstractModule):
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped chunks after web merge: %d -> %d", before, len(chunks))
+        web_merge_stage = _debug_stage("web_merge")
+        if web_merge_stage is not None:
+            web_merge_stage.update(
+                {
+                    "web_chunks": _chunks_debug_list(web_chunks),
+                    "web_chunks_count": len(web_chunks),
+                    "chunks_in_count": before,
+                    "chunks_out_count": len(chunks),
+                    "chunks": _chunks_debug_list(chunks),
+                }
+            )
 
         # File-level candidate pruning (file-first): keep top files then top chunks per file.
         # Keep it close to rerank so it sees the final merged candidate pool.
@@ -927,6 +1199,18 @@ class RAGInference(AbstractModule):
                     "chunks_in": len(chunks),
                 },
             )
+            prune_before = list(chunks)
+            candidate_stage = _debug_stage("candidate_prune")
+            if candidate_stage is not None:
+                candidate_stage.update(
+                    {
+                        "enabled": enabled,
+                        "max_files": max_files,
+                        "max_chunks_per_file": max_chunks_per_file,
+                        "chunks_in": _chunks_debug_list(prune_before),
+                        "chunks_in_count": len(prune_before),
+                    }
+                )
             pruned, info = prune_chunks_by_file(
                 chunks,
                 enabled=enabled,
@@ -947,6 +1231,14 @@ class RAGInference(AbstractModule):
                     "top_files": getattr(info, "top_files", None),
                 },
             )
+            if candidate_stage is not None:
+                candidate_stage.update(
+                    {
+                        "chunks_out": _chunks_debug_list(chunks),
+                        "chunks_out_count": len(chunks),
+                        "info": info,
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Candidate prune failed (ignored): %s", exc)
 
@@ -969,6 +1261,16 @@ class RAGInference(AbstractModule):
             progress_callback,
             {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
         )
+        rerank_before = list(chunks)
+        rerank_stage = _debug_stage("rerank")
+        if rerank_stage is not None:
+            rerank_stage.update(
+                {
+                    "chunks_in": _chunks_debug_list(rerank_before),
+                    "chunks_in_count": len(rerank_before),
+                    "top_k": int(rerank_keep_k),
+                }
+            )
         rerank_start = time.perf_counter()
         reranked_chunks = self.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
         
@@ -1018,6 +1320,15 @@ class RAGInference(AbstractModule):
                 ),
             },
         )
+        if rerank_stage is not None:
+            rerank_stage.update(
+                {
+                    "duration_ms": int((time.perf_counter() - rerank_start) * 1000),
+                    "chunks_out": _chunks_debug_list(chunks),
+                    "chunks_out_count": len(chunks),
+                    "reranker": reranker_info,
+                }
+            )
 
         # Note: subgraph_data is now generated in _generate_mindmap based on final answer chunks
         # We don't export subgraph here to avoid including all retrieval-stage chunks
@@ -1059,6 +1370,11 @@ class RAGInference(AbstractModule):
             # Build a contiguous, non-empty source list for the LLM.
             # This avoids gaps in Source key numbering (which can confuse citation parsing and downstream tools).
             source_items: list[tuple[Chunk, str, str]] = []
+            llm_source_stage = _debug_stage("llm_sources")
+            skipped_sources: list[dict[str, Any]] = []
+            if llm_source_stage is not None:
+                llm_source_stage["chunks_in"] = _chunks_debug_list(chunks)
+                llm_source_stage["chunks_in_count"] = len(chunks)
             for chunk in chunks:
                 metadata = getattr(chunk, "metadata", None) or {}
                 filename = str(metadata.get("filename") or "").strip() or "source"
@@ -1097,12 +1413,38 @@ class RAGInference(AbstractModule):
                         ("empty" if not index_text else f"type={type(index_text).__name__} len={len(str(index_text))}"),
                         ("empty" if not chunk_content else type(chunk_content).__name__),
                     )
+                    skipped_sources.append(
+                        {
+                            "id": str(chunk_id or ""),
+                            "filename": filename,
+                            "prompt_text_empty": not bool(prompt_text),
+                            "index_text_empty": not bool(index_text),
+                            "chunk_content_type": (None if not chunk_content else type(chunk_content).__name__),
+                        }
+                    )
                     continue
 
                 source_items.append((chunk, filename, str(chunk_text).strip()))
 
             # Replace `chunks` with the exact list used as LLM sources.
             chunks = [item[0] for item in source_items]
+            if llm_source_stage is not None:
+                llm_source_stage.update(
+                    {
+                        "sources": [
+                            {
+                                "chunk_id": str(getattr(item[0], "id", "") or ""),
+                                "filename": item[1],
+                                "text": item[2],
+                            }
+                            for item in source_items
+                        ],
+                        "sources_count": len(source_items),
+                        "chunks_out": _chunks_debug_list(chunks),
+                        "chunks_out_count": len(chunks),
+                        "skipped_sources": list(skipped_sources),
+                    }
+                )
 
             chunk_ids_for_llm = [getattr(chunk, "id", None) for chunk in chunks[:10]]
             logger.info(
@@ -1136,6 +1478,16 @@ class RAGInference(AbstractModule):
         logger.info("Prepared %d messages for LLM", len(messages))
         # Log full messages payload (debug only).
         logger.debug("Full messages sent to LLM: %s", json.dumps(messages, ensure_ascii=False, indent=2))
+        debug_response = _debug_section("response")
+        if debug_response is not None:
+            debug_response.update(
+                {
+                    "messages": list(messages),
+                    "chunks": _chunks_debug_list(chunks),
+                    "chunks_count": len(chunks),
+                    "subgraph_info": subgraph_info,
+                }
+            )
         return (messages, chunks, subgraph_data, subgraph_info)
 
     @staticmethod
@@ -1547,119 +1899,6 @@ class RAGInference(AbstractModule):
             # Return empty structure consistent with mindmap_export format
             return {"nodes": [], "edges": []}, None
 
-    def _extract_json_from_response(self, response: str) -> Dict[str, Any]:
-        """Extract JSON from LLM response with error recovery"""
-        try:
-            # Try to find JSON block in markdown code fence
-            if "```json" in response:
-                start = response.find("```json") + 7
-                end = response.find("```", start)
-                json_str = response[start:end].strip()
-            elif "```" in response:
-                start = response.find("```") + 3
-                end = response.find("```", start)
-                json_str = response[start:end].strip()
-            else:
-                # Try to parse the entire response as JSON
-                json_str = response.strip()
-
-            # Try to parse JSON
-            try:
-                parsed = json.loads(json_str)
-            except json.JSONDecodeError as parse_error:
-                # Try to fix common JSON truncation issues
-                logger.warning(f"Initial JSON parse failed: {parse_error}, attempting repair...")
-                json_str = self._repair_truncated_json(json_str)
-                try:
-                    parsed = json.loads(json_str)
-                    logger.info("Successfully repaired truncated JSON")
-                except json.JSONDecodeError:
-                    # If repair fails, try to extract partial data
-                    logger.error(f"JSON repair failed: {parse_error}")
-                    return self._extract_partial_json(json_str)
-
-            # Validate that parsed JSON has expected structure
-            if not isinstance(parsed, dict):
-                logger.warning("LLM response is not a JSON object, got: %s", type(parsed))
-                return {"nodes": [], "edges": []}
-            
-            # Ensure nodes and edges are lists
-            nodes = parsed.get("nodes", [])
-            edges = parsed.get("edges", [])
-            if not isinstance(nodes, list) or not isinstance(edges, list):
-                logger.warning("LLM response nodes/edges are not lists: nodes=%s, edges=%s", type(nodes), type(edges))
-                return {"nodes": [], "edges": []}
-            
-            logger.info("Successfully extracted mindmap JSON: %d nodes, %d edges", len(nodes), len(edges))
-            return {"nodes": nodes, "edges": edges}
-        except Exception as e:
-            logger.error(f"Unexpected error extracting JSON from response: {e}")
-            logger.debug(f"Response (first 500 chars): {response[:500]}")
-            return {"nodes": [], "edges": []}
-    
-    def _repair_truncated_json(self, json_str: str) -> str:
-        """Attempt to repair truncated JSON by closing open structures"""
-        json_str = json_str.strip()
-        
-        # Count open and close braces/brackets
-        open_braces = json_str.count('{')
-        close_braces = json_str.count('}')
-        open_brackets = json_str.count('[')
-        close_brackets = json_str.count(']')
-        
-        # Remove trailing comma if present (common in truncated JSON)
-        json_str = json_str.rstrip().rstrip(',')
-        
-        # Close open arrays first (edges, nodes)
-        while close_brackets < open_brackets:
-            json_str += ']'
-            close_brackets += 1
-        
-        # Close open objects
-        while close_braces < open_braces:
-            json_str += '}'
-            close_braces += 1
-        
-        return json_str
-    
-    def _extract_partial_json(self, json_str: str) -> Dict[str, Any]:
-        """Extract partial JSON data when full parse fails"""
-        nodes = []
-        edges = []
-        
-        # Try to extract nodes using regex or string matching
-        import re
-        # Look for node objects
-        node_pattern = r'"id"\s*:\s*"([^"]+)"[^}]*"name"\s*:\s*"([^"]+)"'
-        for match in re.finditer(node_pattern, json_str):
-            node_id = match.group(1)
-            node_name = match.group(2)
-            nodes.append({
-                "id": node_id,
-                "name": node_name,
-                "category": node_name,
-                "weight": 1
-            })
-        
-        # Look for edge objects
-        edge_pattern = r'"id"\s*:\s*"([^"]+)"[^}]*"source"\s*:\s*"([^"]+)"[^}]*"target"\s*:\s*"([^"]+)"'
-        for match in re.finditer(edge_pattern, json_str):
-            edge_id = match.group(1)
-            source = match.group(2)
-            target = match.group(3)
-            edges.append({
-                "id": edge_id,
-                "source": source,
-                "target": target,
-                "relation": "contains",
-                "weight": 0.8
-            })
-        
-        if nodes or edges:
-            logger.info(f"Extracted partial JSON: {len(nodes)} nodes, {len(edges)} edges using regex fallback")
-            return {"nodes": nodes, "edges": edges}
-        
-        return {"nodes": [], "edges": []}
 
     def _build_subgraph_data(self, chunks: list[Chunk], mindmap_json: Dict[str, Any]) -> Dict[str, Any]:
         """Build final subgraph data combining chunks and mind map structure"""

@@ -5,7 +5,11 @@ Note: Infrastructure implementations (local tool registry, MCP routing, tool man
 """
 from typing import Dict, Iterable, List
 
-from core.deepsearch.tools import builtin_tool_descriptors, llm_optional_tool_names, llm_required_tool_names
+from core.deepsearch.tooling.descriptors import (
+    builtin_tool_descriptors,
+    llm_optional_tool_names,
+    llm_required_tool_names,
+)
 
 from .registry import ToolHintRegistry
 __all__ = [

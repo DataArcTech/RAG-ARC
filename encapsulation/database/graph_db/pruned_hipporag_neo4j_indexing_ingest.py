@@ -316,6 +316,8 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
 
             # Extract source_file_id from metadata for independent storage
             source_file_id = metadata.get("source_file_id")
+            page_start = _coerce_int(metadata.get("page_start"))
+            page_end = _coerce_int(metadata.get("page_end"))
 
             # Persist business_time into Chunk.metadata so background maintenance can recover temporal fields
             # even when extractor-only fields are not available.
@@ -336,7 +338,9 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 'content': chunk.content,
                 'metadata': json.dumps(metadata) if metadata else '{}',
                 'owner_id': db_owner_id,
-                'source_file_id': source_file_id  # Store as independent property for filtering
+                'source_file_id': source_file_id,  # Store as independent property for filtering
+                'page_start': page_start,
+                'page_end': page_end,
             })
 
             section_id = str(metadata.get("section_id") or "").strip()
@@ -919,6 +923,8 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         c.metadata = chunk.metadata,
                         c.owner_id = chunk.owner_id,
                         c.source_file_id = chunk.source_file_id,
+                        c.page_start = COALESCE(chunk.page_start, c.page_start),
+                        c.page_end = COALESCE(chunk.page_end, c.page_end),
                         c.updated_at = datetime(),
                         c.created_at = COALESCE(c.created_at, datetime())
                     """

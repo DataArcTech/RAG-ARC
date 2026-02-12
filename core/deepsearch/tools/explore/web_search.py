@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from config.core.deepsearch import tool_defaults
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_WEB_SNIPPET
 from encapsulation.data_model.deepsearch import EvidenceChunk
-from encapsulation.web_search import TavilySearchClient, TavilySearchResult
+from encapsulation.web_search import TavilySearchClient, TavilySearchResult, aggregate_tavily_results
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
@@ -39,6 +39,25 @@ class WebSearchTool(GraphTool):
                     "enum": ["basic", "advanced"],
                     "description": "Tavily search depth.",
                 },
+                "aggregate_enabled": {
+                    "type": "boolean",
+                    "description": "Enable source aggregation for Tavily results.",
+                },
+                "aggregate_group_by": {
+                    "type": "string",
+                    "enum": ["domain", "url", "provider"],
+                    "description": "Optional source aggregation grouping for Tavily results.",
+                },
+                "aggregate_max_groups": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional max source groups kept after aggregation.",
+                },
+                "aggregate_max_results_per_group": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional max results retained per source group after aggregation.",
+                },
             },
             required_extra_fields=("query",),
         ),
@@ -58,10 +77,28 @@ class WebSearchTool(GraphTool):
         max_results: int = tool_defaults.WEB_SEARCH_DEFAULT_MAX_RESULTS,
         timeout_seconds: float = tool_defaults.WEB_SEARCH_DEFAULT_TIMEOUT_SECONDS,
         search_depth: str = tool_defaults.WEB_SEARCH_DEFAULT_SEARCH_DEPTH,
+        aggregate_enabled: bool | None = None,
+        aggregate_group_by: str | None = None,
+        aggregate_max_groups: int | None = None,
+        aggregate_max_results_per_group: int | None = None,
     ) -> None:
         self.max_results = int(max_results)
         self.timeout_seconds = float(timeout_seconds)
         self.search_depth = str(search_depth or tool_defaults.WEB_SEARCH_DEFAULT_SEARCH_DEPTH).strip().lower()
+        self.aggregate_enabled = bool(
+            tool_defaults.WEB_SEARCH_AGGREGATE_ENABLED if aggregate_enabled is None else aggregate_enabled
+        )
+        self.aggregate_group_by = str(
+            aggregate_group_by or tool_defaults.WEB_SEARCH_AGGREGATE_GROUP_BY or "domain"
+        ).strip().lower()
+        self.aggregate_max_groups = int(
+            tool_defaults.WEB_SEARCH_AGGREGATE_MAX_GROUPS if aggregate_max_groups is None else aggregate_max_groups
+        )
+        self.aggregate_max_results_per_group = int(
+            tool_defaults.WEB_SEARCH_AGGREGATE_MAX_RESULTS_PER_GROUP
+            if aggregate_max_results_per_group is None
+            else aggregate_max_results_per_group
+        )
         self._client_override = client is not None
         self.api_key = str(api_key or os.getenv("TAVILY_API_KEY") or "").strip() or None
         self.endpoint_url = str(endpoint_url or os.getenv("TAVILY_ENDPOINT_URL") or "").strip() or None
@@ -105,6 +142,23 @@ class WebSearchTool(GraphTool):
                 diagnostics={"reason": "provider_error", "error": str(exc), "query": query},
             )
 
+        aggregation = None
+        agg_enabled = self._resolve_bool(extra.get("aggregate_enabled"), self.aggregate_enabled)
+        if agg_enabled:
+            agg_group_by = str(extra.get("aggregate_group_by") or self.aggregate_group_by).strip().lower()
+            agg_max_groups = self._resolve_positive_int(extra.get("aggregate_max_groups"), self.aggregate_max_groups)
+            agg_max_per_group = self._resolve_positive_int(
+                extra.get("aggregate_max_results_per_group"),
+                self.aggregate_max_results_per_group,
+            )
+            results, agg_stats = aggregate_tavily_results(
+                results,
+                group_by=agg_group_by,
+                max_groups=agg_max_groups,
+                max_items_per_group=agg_max_per_group,
+            )
+            aggregation = agg_stats.__dict__
+
         evidences: List[EvidenceChunk] = []
         results_payload: List[Dict[str, Any]] = []
         max_chars = int(tool_defaults.WEB_SEARCH_SNIPPET_MAX_CHARS)
@@ -144,6 +198,7 @@ class WebSearchTool(GraphTool):
             "max_results": max_results,
             "search_depth": search_depth,
             "results": results_payload,
+            "aggregation": aggregation,
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
@@ -155,3 +210,28 @@ class WebSearchTool(GraphTool):
             value = int(tool_defaults.WEB_SEARCH_DEFAULT_MAX_RESULTS)
         value = max(1, value)
         return min(value, int(tool_defaults.WEB_SEARCH_MAX_RESULTS))
+
+    @staticmethod
+    def _resolve_positive_int(raw: Any, default: int) -> int:
+        try:
+            value = int(raw) if raw is not None else int(default)
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(1, value)
+
+    @staticmethod
+    def _resolve_bool(raw: Any, default: bool) -> bool:
+        if raw is None:
+            return bool(default)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        if isinstance(raw, str):
+            token = raw.strip().lower()
+            if token in {"1", "true", "yes", "y", "on"}:
+                return True
+            if token in {"0", "false", "no", "n", "off"}:
+                return False
+        return bool(raw)
+

@@ -250,6 +250,8 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
             "CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)",
             "CREATE INDEX chunk_source_file_id IF NOT EXISTS FOR (c:Chunk) ON (c.source_file_id)",
+            "CREATE INDEX chunk_owner_source_page_start IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id, c.source_file_id, c.page_start)",
+            "CREATE INDEX chunk_owner_source_page_end IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id, c.source_file_id, c.page_end)",
             # Entity nodes
             "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
             # Legacy constraint (owner_id, entity_name) prevented representing same-name different-type entities.

@@ -6,6 +6,7 @@ import re
 
 from core.utils.json_extract import extract_last_json_array_from_text
 from core.prompts import LISTWISE_RERANK_DEFAULT_PROMPT_TEMPLATE
+from core.utils.llm_json import call_llm_json_with_retry_sync
 
 if TYPE_CHECKING:
     from encapsulation.data_model.schema import Chunk
@@ -55,7 +56,7 @@ def _normalize_ranked_indices(raw: object, *, num_chunks: int, top_k: int) -> Li
     return out
 
 
-def _parse_ranked_indices(output_str: str, *, num_chunks: int, top_k: int) -> List[int]:
+def _parse_ranked_indices(output_str: object, *, num_chunks: int, top_k: int) -> List[int]:
     """Parse LLM output to ranked indices; always returns k indices (k=min(top_k,num_chunks))."""
     k = min(int(top_k), int(num_chunks))
     if k <= 0:
@@ -64,6 +65,9 @@ def _parse_ranked_indices(output_str: str, *, num_chunks: int, top_k: int) -> Li
     if output_str is None or output_str == "error":
         logger.warning("Invalid output, using default ranking")
         return list(range(k))
+
+    if isinstance(output_str, list):
+        return _normalize_ranked_indices(output_str, num_chunks=num_chunks, top_k=top_k)
 
     try:
         text = str(output_str)
@@ -203,8 +207,16 @@ class ListwiseRerankLLM(RerankLLMBase):
         try:
             # Use chat LLM's chat method
             messages = [{"role": "user", "content": prompt}]
-            result = self.chat_llm.chat(messages=messages)
-            return result
+            payload = call_llm_json_with_retry_sync(
+                llm_connector=self.chat_llm,
+                messages=messages,
+                expected="list",
+                return_raw=True,
+            )
+            if isinstance(payload, tuple):
+                parsed, raw = payload
+                return parsed if parsed is not None else raw
+            return payload
         except Exception as e:
             logger.error(f"LLM call failed: {str(e)}")
             return "error"

@@ -91,6 +91,10 @@ def section_summary_leaf_chunk_max_chars(default: int = 1200) -> int:
     return _env_int("SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS", default, minimum=0)
 
 
+def section_summary_retry_attempts(default: int = 2) -> int:
+    return _env_int("SECTION_SUMMARY_RETRY_ATTEMPTS", default, minimum=1)
+
+
 def section_top_k(default: int = 6) -> int:
     return _env_int("SECTION_TOP_K", default, minimum=0)
 
@@ -264,6 +268,29 @@ def section_page_match_snippet_chars(default: int = 160) -> int:
 def section_page_match_max_pages(default: int = 20) -> int:
     return _env_int("SECTION_PAGE_MATCH_MAX_PAGES", default, minimum=0)
 
+
+def strict_page_chunking_mode(default: str = "auto") -> str:
+    """Control strict page-aware chunking behavior.
+
+    - off: disable strict page chunking
+    - auto: enable when content_list is available; fallback otherwise (with warning)
+    - require: fail indexing when content_list is missing
+    """
+    raw = os.getenv("PAGEINDEX_STRICT_PAGE_CHUNKING_MODE", default)
+    token = str(raw or "").strip().lower()
+    if token in {"off", "auto", "require"}:
+        return token
+    logger.warning(
+        "Invalid PAGEINDEX_STRICT_PAGE_CHUNKING_MODE=%s; expected off/auto/require. Falling back to %s.",
+        raw,
+        default,
+    )
+    return default
+
+
+def strict_page_chunking_enabled() -> bool:
+    return strict_page_chunking_mode() != "off"
+
 def toc_check_page_num(default: int = 20) -> int:
     return _env_int("PAGEINDEX_TOC_CHECK_PAGE_NUM", default, minimum=1)
 
@@ -306,6 +333,8 @@ __all__ = [
     "section_chunk_match_snippet_chars",
     "section_page_match_snippet_chars",
     "section_page_match_max_pages",
+    "strict_page_chunking_mode",
+    "strict_page_chunking_enabled",
     "toc_check_page_num",
     "max_page_num_each_node",
     "max_token_num_each_node",

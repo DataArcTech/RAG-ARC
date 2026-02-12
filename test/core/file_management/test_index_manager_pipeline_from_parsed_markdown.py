@@ -88,7 +88,7 @@ class _DummyIndexer:
 
 
 @pytest.mark.asyncio
-async def test_process_file_from_parsed_markdown_smoke():
+async def test_process_file_from_parsed_markdown_smoke(caplog):
     from core.file_management.index_manager_pipeline import _IndexManagerPipelineMixin
 
     class _Mgr(_IndexManagerPipelineMixin):
@@ -113,11 +113,12 @@ async def test_process_file_from_parsed_markdown_smoke():
             return len(chunk_ids)
 
     mgr = _Mgr()
-    out = await mgr.process_file_from_parsed_markdown(file_id="f_1", parsed_markdown="# hello")
+    with caplog.at_level("WARNING"):
+        out = await mgr.process_file_from_parsed_markdown(file_id="f_1", parsed_markdown="# hello")
     assert out["success"] is True
     assert out["parsed_content_id"] == "pc_1"
     assert len(out["chunk_ids"]) == 2
     assert out["metadata"]["parser_type"] == "preparsed_markdown"
     assert out["metadata"]["chunker_type"] == "dummy"
     assert out["metadata"]["timings_s"]["total"] >= 0
-
+    assert not any("Anchor chunk id backfill failed" in rec.message for rec in caplog.records)

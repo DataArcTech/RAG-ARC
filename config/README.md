@@ -4,6 +4,7 @@ RAG-ARC uses a single-source-of-truth configuration flow:
 
 - **Runtime secrets / deployment-specific values** live in environment variables (`.env`, see `.env.example`).
 - **Tunable knobs** (thresholds, budgets, tool selection, paths, feature gates) live in JSON under `config/json_configs/`.
+- Global JSON-output retry defaults for LLM calls live in `config/core/llm_json_retry_defaults.py` (env overrides available; see `config/env-*.md`).
 
 ## Entry Points
 

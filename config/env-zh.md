@@ -203,6 +203,7 @@ Benchmark/实验模式：
 | `SECTION_CHUNK_MATCH_SNIPPET_CHARS` | `200` | chunk→章节定位的文本片段长度（字符）。 |
 | `SECTION_PAGE_MATCH_SNIPPET_CHARS` | `160` | chunk→页码匹配的文本片段长度（字符）。 |
 | `SECTION_PAGE_MATCH_MAX_PAGES` | `20` | 页码匹配时最多扫描的页数（离线）。 |
+| `PAGEINDEX_STRICT_PAGE_CHUNKING_MODE` | `auto` | 严格页级切块模式：`off` 关闭；`auto` 有 MinerU content_list 时按页切块（缺失时回退）；`require` 缺页文本时直接失败。 |
 | `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | 章节树 JSON 文件名。 |
 | `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | 章节节点 JSONL 文件名。 |
 | `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | 文档描述 JSON 文件名。 |
@@ -219,6 +220,7 @@ Benchmark/实验模式：
 | `CHATBOT_LLM_TOP_SOURCES` | `10` | Chatbot 接口用于传给 LLM 的 Sources 上限（可大于前端展示的 `CHATBOT_TOP_SOURCES`，用于提升“特点/优势/功能”等泛问覆盖度）。 |
 | `USER_TYPE` | `0` | `rag_inference` 的提示词风格/领域选择开关（读取 `config/prompts/rag_inference_prompts.yaml` 做分层拼接）。 |
 | `RAG_INFERENCE_PROMPTS_YAML_PATH` | (空) | 覆盖 `config/prompts/rag_inference_prompts.yaml` 的路径；为空则使用仓库默认路径。 |
+| `（内置行为）` | - | RAG Chat 与 DeepSearch 的系统提示词会在运行时自动追加日期上下文首行：`今天是 YYYY-MM-DD。`（用于“今天/昨日/明日”等时态问题对齐）。 |
 | `RAGARC_CITATION_STREAM_MODE` | `appearance` | `rag_inference` SSE 流式引用模式：`appearance` 表示边流式边按首次出现顺序重编号（不再发送 `final_text` 刷新），`final` 表示流式期间保持原编号并在结束时发送 `final_text`。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |
@@ -230,6 +232,10 @@ Benchmark/实验模式：
 | `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。由低成本模型生成 JSON `{lang: rewritten_query}`。若只填写 `zh-Hans` 可禁用其他变体。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
+| `LLM_JSON_RETRY_DEFAULT_ATTEMPTS` | `2` | LLM JSON 输出的全局默认重试次数（含首次生成）。DeepSearch 与非 DeepSearch 的 JSON 解析流程会复用该默认值，除非模块另行覆盖。 |
+| `LLM_JSON_RETRY_MAX_ATTEMPTS` | `8` | JSON 重试的全局上限，防止异常情况下无限重试。 |
+| `LLM_JSON_RETRY_DEFAULT_TEMPERATURE` | `0.0` | 修复 JSON 输出时使用的默认温度。 |
+| `LLM_JSON_RETRY_DEFAULT_MAX_RAW_CHARS` | `2000` | 回注给模型修复的“上一轮无效输出”最大字符数。 |
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath 的 RRF 融合权重：graph 路径。设为 `0` 表示在**普通 RAG**中禁用图检索（可显著提速）；设为正值（如 `1.0`）可启用。注意这并不影响离线入库/索引阶段的图谱构建，DeepSearch 仍可在其专用流程中使用图信号。 |
@@ -483,7 +489,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
-| `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试）。 |
+| `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试），覆盖启动时 OpenAPI 校验与 parse/status/download 请求。 |
 | `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | 可选：MinerU HTTP 重试的基础退避秒数。 |
 | `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | 可选：MinerU HTTP 重试的最大退避秒数。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
@@ -617,6 +623,15 @@ RAG-ARC 采用单一可信配置流：
 - 知识库流水线：`config/json_configs/knowledge.json`
 
 DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
+
+- `tool_manager.enabled_tools["web.search"].params` 用于覆盖 DeepSearch 的 Tavily 参数。
+- `aggregate_enabled` 控制是否做来源聚合；`aggregate_group_by` 支持 `domain`/`url`/`provider`。
+- `aggregate_max_groups` 与 `aggregate_max_results_per_group` 用于限制来源数量（打分公式 sum(score)/sqrt(n+1)）。
+
+HippoRAG Q&A Web 搜索策略（位于 `config/json_configs/rag_inference.json`）：
+
+- `web_search.aggregate_*` 控制 Tavily 结果的来源聚合。
+- `candidate_selection.web_candidates_k` 设置聚合前请求的 web 结果数。
 
 
 DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：

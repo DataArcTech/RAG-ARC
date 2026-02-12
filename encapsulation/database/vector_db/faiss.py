@@ -779,7 +779,10 @@ class FaissVectorDB(VectorDB):
                 faiss.write_index(self.index, faiss_path)
                 logger.info(f"FAISS index saved: {faiss_path} ({self.index.ntotal} vectors)")
             else:
-                logger.warning("No FAISS index to save")
+                if not self.docstore:
+                    logger.info("No FAISS index to save (empty docstore)")
+                else:
+                    logger.warning("No FAISS index to save")
 
             # Save other data
             data = {

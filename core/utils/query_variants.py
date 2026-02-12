@@ -7,9 +7,9 @@ Design note:
   `llm_connector` is provided.
 """
 import logging
-import json
 import functools
 import hashlib
+import json
 from typing import Optional
 
 from config.query_variants import (
@@ -27,6 +27,7 @@ from core.prompts.query_variants import (
     QUERY_VARIANTS_SYSTEM_PROMPT,
     QUERY_VARIANTS_USER_PROMPT_TEMPLATE,
 )
+from core.utils.llm_json import call_llm_json_with_retry_sync
 
 logger = logging.getLogger(__name__)
 
@@ -80,21 +81,6 @@ def _low_cost_model_name(llm_connector) -> Optional[str]:
     return token or None
 
 
-def _extract_json_object(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    snippet = text[start : end + 1]
-    try:
-        payload = json.loads(snippet)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _llm_rewrite_variants(llm_connector, query: str, langs: list[str], *, cache_scope: str | None = None) -> dict[str, str]:
     if llm_connector is None:
         return {}
@@ -121,20 +107,22 @@ def _llm_rewrite_variants(llm_connector, query: str, langs: list[str], *, cache_
         {"role": "system", "content": QUERY_VARIANTS_SYSTEM_PROMPT},
         {"role": "user", "content": QUERY_VARIANTS_USER_PROMPT_TEMPLATE.format(payload=json.dumps(payload, ensure_ascii=False))},
     ]
-    kwargs = {"temperature": float(QUERY_VARIANTS_LLM_TEMPERATURE), "max_tokens": int(QUERY_VARIANTS_LLM_MAX_TOKENS)}
-    if low_cost:
-        kwargs["model"] = low_cost
     try:
         chat = getattr(llm_connector, "chat", None)
-        if callable(chat):
-            response = chat(messages, **kwargs)
-        else:
+        if not callable(chat):
             # Async-only connectors are ignored here (keep it deterministic + offline-safe).
             return {}
+        parsed = call_llm_json_with_retry_sync(
+            llm_connector=llm_connector,
+            messages=messages,
+            expected="dict",
+            temperature=float(QUERY_VARIANTS_LLM_TEMPERATURE),
+            max_tokens=int(QUERY_VARIANTS_LLM_MAX_TOKENS),
+            llm_kwargs={"model": low_cost} if low_cost else None,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Query variants LLM call failed; using base query only. error=%s", exc)
         return {}
-    parsed = _extract_json_object(str(response or "").strip())
     if not parsed:
         return {}
     out: dict[str, str] = {}

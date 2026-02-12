@@ -113,3 +113,25 @@ def test_candidate_base_url_prefers_raw_then_ipv4_then_ipv6(monkeypatch):
 
     client._ensure_valid_base_url()
     assert client.base_url == "http://localhost:8899"
+
+
+def test_openapi_validation_retries_on_transient_errors(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+
+    client = MinerUServiceClient(
+        base_url="http://127.0.0.1:8899",
+        timeout_s=1,
+        http_max_retries=2,
+        http_retry_backoff_s=0.01,
+        http_retry_max_backoff_s=0.01,
+    )
+    client.session = _FakeSession(
+        [
+            requests.ConnectionError("openapi boom"),
+            _FakeResponse(200, _mineru_openapi_payload()),
+        ]
+    )
+
+    client._ensure_valid_base_url()
+    assert client._validated_base_url is True
+    assert len(client.session.calls) == 2

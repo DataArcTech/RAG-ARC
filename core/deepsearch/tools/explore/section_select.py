@@ -37,9 +37,6 @@ from ..base import (
     ToolResult,
     ToolRunRequest,
     build_input_schema,
-    call_llm_async,
-    extract_json_from_text,
-    safe_json_loads,
 )
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 from core.deepsearch.utils.llm_json import call_llm_json_with_retry
@@ -1179,8 +1176,13 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             {"role": "system", "content": SECTION_TREE_SEARCH_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-        parsed = safe_json_loads(response, expected="dict")
+        parsed = await call_llm_json_with_retry(
+            llm_connector=self.llm_connector,
+            messages=messages,
+            expected="dict",
+            temperature=self.temperature,
+            max_tokens=None,
+        )
         node_list, parse_diag = self._parse_tree_search_output(parsed, section_map)
         diagnostics = {"parse": parse_diag}
         return node_list, diagnostics
@@ -1349,8 +1351,13 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             {"role": "system", "content": SECTION_SELECT_CONSUMER_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-        parsed = safe_json_loads(response, expected="dict")
+        parsed = await call_llm_json_with_retry(
+            llm_connector=self.llm_connector,
+            messages=messages,
+            expected="dict",
+            temperature=self.temperature,
+            max_tokens=None,
+        )
         return self._parse_consumer_output(parsed, section_map)
 
     async def _consume_queue(
