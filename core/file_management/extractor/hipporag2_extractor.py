@@ -69,7 +69,8 @@ from core.prompts.hipporag2_extractor_prompt_json import (
 from core.knowledge_graph.schema import load_schema_from_yaml, normalize_relation_token
 from core.knowledge_graph.sdf import hs_to_sdf_schema, parse_hs_blocks
 from core.knowledge_graph.extraction_models import ExtractedEntities, ExtractedEdges, ExtractedEntity
-from core.utils.structured_output import StructuredOutputError, parse_pydantic_json_from_llm_text
+from core.utils.structured_output import StructuredOutputError, call_pydantic_json_with_retry
+from core.utils.llm_json import call_llm_json_with_retry
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -350,9 +351,13 @@ class HippoRAG2Extractor(ExtractorBase):
             example_output=HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_ZH if language == "zh" else HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_EN,
             passage=text,
         )
-        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
         try:
-            model = parse_pydantic_json_from_llm_text(response, ExtractedEntities)
+            model = await call_pydantic_json_with_retry(
+                llm_connector=self.llm,
+                messages=messages,
+                model_cls=ExtractedEntities,
+            )
         except StructuredOutputError as exc:
             raise ValueError(f"NER(JSON) structured output invalid: {exc}") from exc
         self.logger.info("Extracted %s entities (json)", len(model.extracted_entities))
@@ -369,9 +374,13 @@ class HippoRAG2Extractor(ExtractorBase):
             reference_time=reference_time,
             passage=text,
         )
-        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
         try:
-            model = parse_pydantic_json_from_llm_text(response, ExtractedEdges)
+            model = await call_pydantic_json_with_retry(
+                llm_connector=self.llm,
+                messages=messages,
+                model_cls=ExtractedEdges,
+            )
         except StructuredOutputError as exc:
             raise ValueError(f"Edges(JSON) structured output invalid: {exc}") from exc
         self.logger.info("Extracted %s edges (json)", len(model.edges))
@@ -565,8 +574,12 @@ class HippoRAG2Extractor(ExtractorBase):
         - Returns {} when unknown or unparseable (no silent swallowing of exceptions at caller).
         """
         prompt = self.build_temporal_prompt(text)
-        response = await self.llm.achat([{"role": "user", "content": prompt}])
-        payload = self._parse_json_object(str(response or ""))
+        messages = [{"role": "user", "content": prompt}]
+        payload = await call_llm_json_with_retry(
+            llm_connector=self.llm,
+            messages=messages,
+            expected="dict",
+        )
         if not isinstance(payload, dict):
             return {}
 
@@ -665,18 +678,3 @@ class HippoRAG2Extractor(ExtractorBase):
         raw = Path(token).read_text(encoding="utf-8")
         self._prompt_cache[token] = raw
         return raw
-
-    @staticmethod
-    def _parse_json_object(raw: str) -> dict | None:
-        text = str(raw or "").strip()
-        if not text:
-            return None
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        snippet = text[start : end + 1]
-        try:
-            return json.loads(snippet)
-        except Exception:
-            return None

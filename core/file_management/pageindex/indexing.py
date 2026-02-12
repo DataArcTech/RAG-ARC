@@ -54,14 +54,18 @@ def _clone_bm25_config(base: Optional[BM25BuilderConfig], *, index_path: str) ->
 def resolve_base_faiss_config(indexers: Iterable[Any]) -> Optional[FaissVectorDBConfig]:
     for indexer in indexers or []:
         if isinstance(indexer, FaissIndexer):
-            return getattr(indexer.faiss_db, "config", None)
+            if getattr(indexer, "faiss_db", None) is not None:
+                return getattr(indexer.faiss_db, "config", None)
+            return getattr(indexer, "_template_cfg", None)
     return None
 
 
 def resolve_base_bm25_config(indexers: Iterable[Any]) -> Optional[BM25BuilderConfig]:
     for indexer in indexers or []:
         if isinstance(indexer, BM25Indexer):
-            return getattr(indexer.bm25_builder, "config", None)
+            if getattr(indexer, "bm25_builder", None) is not None:
+                return getattr(indexer.bm25_builder, "config", None)
+            return getattr(indexer, "_template_cfg", None)
     return None
 
 

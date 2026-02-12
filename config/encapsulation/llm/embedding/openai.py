@@ -34,11 +34,13 @@ def _default_embedding_model_name() -> str:
 
 
 def _default_embedding_api_key() -> str:
-    return os.getenv("EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    # Treat empty component-specific env vars as unset so OPENAI_* can act as a shared default.
+    return os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 
 
 def _default_embedding_base_url() -> str:
-    return os.getenv("EMBEDDING_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
+    # Treat empty component-specific env vars as unset so OPENAI_* can act as a shared default.
+    return os.getenv("EMBEDDING_API_BASE_URL") or os.getenv("OPENAI_BASE_URL", "")
 
 def _env_int(name: str) -> Optional[int]:
     raw = os.getenv(name)

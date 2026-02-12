@@ -10,6 +10,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.file_scope import resolve_file_scope
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.evidence_cards import evidence_cards
+from core.utils.llm_json import repair_json_from_raw_with_retry
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
@@ -120,12 +121,23 @@ class LLMChainExplorerTool(GraphTool):
             },
             {"role": "user", "content": prompt},
         ]
-        response = await call_llm_async(
+        raw = await call_llm_async(
             self.llm_connector,
             messages,
             temperature=self.temperature,
         )
-        plan = self._parse_response(response)
+        plan = self._parse_response(raw)
+        if not plan:
+            repaired = await repair_json_from_raw_with_retry(
+                llm_connector=self.llm_connector,
+                messages=messages,
+                raw=str(raw or ""),
+                expected=None,
+                temperature=self.temperature,
+                max_tokens=None,
+                include_today_line=True,
+            )
+            plan = self._parse_response(repaired)
         if not plan:
             fallback_query = (request.extra.get("focus_query") or request.question or "").strip()
             if not fallback_query:
@@ -161,8 +173,10 @@ class LLMChainExplorerTool(GraphTool):
         )
 
     @staticmethod
-    def _parse_response(response: str) -> List[Dict[str, Any]]:
-        data = safe_json_loads(response)
+    def _parse_response(response: Any) -> List[Dict[str, Any]]:
+        data = response
+        if isinstance(response, str):
+            data = safe_json_loads(response)
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
         if isinstance(data, dict) and "steps" in data:

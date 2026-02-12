@@ -46,7 +46,11 @@ class MinerUServiceClient:
     def _get_openapi(self, base_url: str) -> Optional[Dict[str, Any]]:
         url = f"{str(base_url).rstrip('/')}/openapi.json"
         try:
-            resp = self.session.get(url, timeout=min(max(self.timeout_s, 1), 8))
+            resp = self._request_with_retry(
+                "GET",
+                url,
+                timeout=min(max(self.timeout_s, 1), 8),
+            )
             resp.raise_for_status()
             data = resp.json()
             return data if isinstance(data, dict) else None

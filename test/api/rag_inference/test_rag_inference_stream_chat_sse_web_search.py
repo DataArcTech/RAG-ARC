@@ -156,6 +156,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
 
     saw_web_search_start = False
     saw_web_search_end = False
+    web_search_end = None
     payload = None
     for raw_line in resp.text.splitlines():
         line = raw_line.strip("\r")
@@ -180,6 +181,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
                     saw_web_search_start = True
                 if progress.get("stage") == "web_search" and progress.get("status") == "end":
                     saw_web_search_end = True
+                    web_search_end = progress
             if fn.get("name") == "rag_arc_payload":
                 payload = json.loads(fn.get("arguments") or "{}")
 
@@ -188,8 +190,12 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     assert payload is not None
     assert "chunks" in payload and isinstance(payload["chunks"], list)
     assert len(payload["chunks"]) == 5
-    # Payload chunk metadata is intentionally minimized; use content shape to detect web chunks.
-    assert any(str(item.get("content") or "").startswith("Web ") for item in payload["chunks"])
+    web_chunks = [item for item in payload["chunks"] if str(item.get("content") or "").startswith("Web ")]
+    assert len(web_chunks) == 2
+    assert web_search_end is not None
+    aggregation = web_search_end.get("aggregation") or {}
+    assert aggregation.get("total_in") == 5
+    assert aggregation.get("total_out") == 2
 
     # sources event should include an external URL and keep UUID-like chunk_id for web sources
     sources_event = None

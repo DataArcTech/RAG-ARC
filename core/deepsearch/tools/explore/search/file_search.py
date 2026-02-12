@@ -27,11 +27,9 @@ from ...base import (
     ToolResult,
     ToolRunRequest,
     build_input_schema,
-    call_llm_async,
-    extract_json_from_text,
-    safe_json_loads,
 )
 from ...governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
+from core.deepsearch.utils.llm_json import call_llm_json_with_retry
 from .base import _SearchToolBase
 from .bm25 import _Bm25Channel
 from .faiss import _FaissChannel
@@ -426,24 +424,25 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
                 ),
             },
         ]
-        kwargs: Dict[str, Any] = {
-            "temperature": float(tool_defaults.FILE_SEARCH_RERANK_TEMPERATURE),
-        }
         model_name = getattr(getattr(self.llm_connector, "config", None), "model_name", None)
         if model_name:
             diagnostics["model"] = model_name
 
         try:
-            response = await call_llm_async(self.llm_connector, messages, **kwargs)
+            payload, raw_response = await call_llm_json_with_retry(
+                llm_connector=self.llm_connector,
+                messages=messages,
+                expected="dict",
+                temperature=float(tool_defaults.FILE_SEARCH_RERANK_TEMPERATURE),
+                max_tokens=None,
+                return_raw=True,
+            )
         except Exception as exc:  # noqa: BLE001
             diagnostics["error"] = str(exc)
             return [], diagnostics
 
-        raw_response = str(response or "")
+        raw_response = str(raw_response or "")
         diagnostics["raw_response"] = raw_response
-
-        extracted = extract_json_from_text(raw_response) or raw_response
-        payload = safe_json_loads(extracted, expected="dict") if extracted else None
         if not isinstance(payload, dict):
             diagnostics["error"] = "json_parse_failed"
             return [], diagnostics

@@ -18,7 +18,9 @@
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true,
-                    "embedding_text_prefix_keys": ["filename"],
+                    "embedding_text_prefix_keys": [
+                        "filename"
+                    ],
                     "embedding_text_filename_root": "RAG-ARC",
                     "embedding_text_separator": "\n",
                     "embedding_config": {
@@ -36,7 +38,9 @@
                 "index_config": {
                     "type": "bm25_builder",
                     "index_path": "${BM25_INDEX_PATH}",
-                    "token_text_prefix_keys": ["filename"],
+                    "token_text_prefix_keys": [
+                        "filename"
+                    ],
                     "token_text_filename_root": "RAG-ARC",
                     "token_text_separator": "\n"
                 }
@@ -64,7 +68,9 @@
                     "synonymy_edge_sim_threshold": 0.8,
                     "use_float16_embeddings": true,
                     "normalize_chunk_embeddings": true,
-                    "chunk_embedding_text_prefix_keys": ["filename"],
+                    "chunk_embedding_text_prefix_keys": [
+                        "filename"
+                    ],
                     "chunk_embedding_filename_root": "RAG-ARC",
                     "chunk_embedding_text_separator": "\n"
                 },
@@ -83,12 +89,16 @@
                 "ppr_push_target_degree_penalty_gamma": 0.5,
                 "entity_reset_weight_aggregation": "sum_avg",
                 "dense_file_closure_enabled": true,
-                "ppr_push_epsilon": 0.000001
+                "ppr_push_epsilon": 1e-06
             }
         ],
         "fusion_method": "rrf",
         "rrf_k": 60,
-        "weights": ["${RAG_RETRIEVAL_WEIGHT_DENSE}", "${RAG_RETRIEVAL_WEIGHT_BM25}", "${RAG_RETRIEVAL_WEIGHT_GRAPH}"],
+        "weights": [
+            "${RAG_RETRIEVAL_WEIGHT_DENSE}",
+            "${RAG_RETRIEVAL_WEIGHT_BM25}",
+            "${RAG_RETRIEVAL_WEIGHT_GRAPH}"
+        ],
         "search_kwargs": {
             "k": 30,
             "with_score": true,
@@ -116,7 +126,11 @@
         "search_depth": "advanced",
         "timeout_seconds": 20.0,
         "timeout_grace_seconds": 2.0,
-        "max_results": 5
+        "max_results": 5,
+        "aggregate_enabled": true,
+        "aggregate_group_by": "domain",
+        "aggregate_max_groups": 3,
+        "aggregate_max_results_per_group": 2
     },
     "candidate_selection": {
         "graph_candidates_k": 30,

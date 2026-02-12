@@ -28,6 +28,29 @@ class TavilyWebSearchConfig(BaseModel):
         description="Extra time budget for thread scheduling/serialization around Tavily calls.",
     )
     max_results: int = Field(5, ge=1, le=20, description="Maximum Tavily results to return.")
+    aggregate_enabled: bool = Field(
+        True,
+        description=(
+            "Apply source-level web result aggregation before downstream rerank/LLM steps "
+            "(FileScore = sum(score) / sqrt(n+1))."
+        ),
+    )
+    aggregate_group_by: Literal["domain", "url", "provider"] = Field(
+        "domain",
+        description="Grouping key used by Tavily aggregation.",
+    )
+    aggregate_max_groups: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="Maximum source groups kept after aggregation.",
+    )
+    aggregate_max_results_per_group: int = Field(
+        2,
+        ge=1,
+        le=20,
+        description="Maximum Tavily results retained per source group.",
+    )
 
 
 class RAGCandidateSelectionConfig(BaseModel):

@@ -29,6 +29,7 @@ from core.retrieval.graph_retrieveal.query_executor import GraphQueryExecutor, b
 from core.retrieval.graph_retrieveal.similarity_edges import filter_similarity_neighbors
 from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
 from core.prompts.graph_retrieval import SEED_ENTITY_FILTER_USER_PROMPT
+from core.utils.llm_json import call_llm_json_with_retry_sync
 
 if TYPE_CHECKING:
     from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
@@ -453,14 +454,24 @@ class GraphRetrieval(BaseGraphRetriever):
                 )
                 prompt = SEED_ENTITY_FILTER_USER_PROMPT.format(query=str(query), entities_text=entities_text)
 
-                # Get LLM response
+                # Get LLM response with centralized JSON retry.
                 messages = [{"role": "user", "content": prompt}]
-                response = self.llm.chat(messages)
+                payload = call_llm_json_with_retry_sync(
+                    llm_connector=self.llm,
+                    messages=messages,
+                    expected=None,
+                    return_raw=True,
+                )
+                if isinstance(payload, tuple):
+                    parsed_payload, raw_response = payload
+                    response_obj = parsed_payload if parsed_payload is not None else raw_response
+                else:
+                    response_obj = payload
 
                 # Parse LLM response to get selected entity indices
                 try:
                     parsed = parse_ranked_choice_indices(
-                        str(response or ""),
+                        response_obj,
                         candidate_count=len(entity_candidates),
                         k=5,
                         one_based=True,

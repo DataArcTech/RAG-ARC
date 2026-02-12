@@ -11,11 +11,92 @@ from core.file_management.parser_artifact_paths import (
     relativize_under_base,
     resolve_under_base,
 )
+from core.file_management.pageindex.strict_page_chunking import (
+    attach_page_chunking_diagnostics,
+    build_page_markdown_from_content_list,
+    load_page_markdown,
+    strict_page_chunk,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class _IndexManagerPipelineMixin:
+    def _chunk_with_optional_strict_page(
+        self,
+        *,
+        text: str,
+        chunk_metadata: Dict[str, Any],
+        pageindex_context: Any,
+        md_path: str | None,
+        output_dir: str | None,
+        pageindex_info: Dict[str, Any],
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        from config import pageindex as pageindex_cfg
+
+        mode = pageindex_cfg.strict_page_chunking_mode()
+        if mode == "off":
+            return self.chunker.chunk_text(text=text, metadata=chunk_metadata, **kwargs)
+
+        page_texts: Dict[int, str] = {}
+        diagnostics: Dict[str, Any] = {
+            "mode": mode,
+            "source": None,
+        }
+
+        if pageindex_context is not None:
+            tree = getattr(pageindex_context, "tree", None)
+            content_list = getattr(tree, "content_list", None) if tree is not None else None
+            if isinstance(content_list, list) and content_list:
+                page_texts = build_page_markdown_from_content_list(content_list)
+                if page_texts:
+                    diagnostics["source"] = "pageindex_content_list"
+
+        if not page_texts:
+            loaded_page_texts, load_diag = load_page_markdown(md_path=md_path, output_dir=output_dir)
+            diagnostics.update(load_diag)
+            if loaded_page_texts:
+                page_texts = loaded_page_texts
+                diagnostics["source"] = diagnostics.get("source") or "content_list"
+
+        if not page_texts:
+            diagnostics["reason"] = diagnostics.get("reason") or "page_text_missing"
+            if mode == "require":
+                pageindex_info.update(attach_page_chunking_diagnostics(pageindex_info, diagnostics))
+                raise ValueError("Strict page chunking requires MinerU content_list page text, but none was found")
+            logger.warning(
+                "Strict page chunking requested (mode=%s) but no page text was found for file_id=%s; falling back to default chunking",
+                mode,
+                chunk_metadata.get("source_file_id"),
+            )
+            pageindex_info.update(attach_page_chunking_diagnostics(pageindex_info, diagnostics))
+            return self.chunker.chunk_text(text=text, metadata=chunk_metadata, **kwargs)
+
+        chunks = strict_page_chunk(
+            chunker=self.chunker,
+            chunk_metadata=chunk_metadata,
+            page_texts=page_texts,
+            **kwargs,
+        )
+        diagnostics["pages_used"] = len(page_texts)
+        diagnostics["strict_chunk_count"] = len(chunks)
+        diagnostics["reason"] = "ok" if chunks else "strict_chunker_empty"
+
+        if not chunks:
+            if mode == "require":
+                pageindex_info.update(attach_page_chunking_diagnostics(pageindex_info, diagnostics))
+                raise ValueError("Strict page chunking produced no chunks")
+            logger.warning(
+                "Strict page chunking produced no chunks for file_id=%s; falling back to default chunking",
+                chunk_metadata.get("source_file_id"),
+            )
+            pageindex_info.update(attach_page_chunking_diagnostics(pageindex_info, diagnostics))
+            return self.chunker.chunk_text(text=text, metadata=chunk_metadata, **kwargs)
+
+        pageindex_info.update(attach_page_chunking_diagnostics(pageindex_info, diagnostics))
+        return chunks
+
     async def process_file_from_parsed_markdown(
         self,
         *,
@@ -99,6 +180,8 @@ class _IndexManagerPipelineMixin:
             base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
             md_path_rel = relativize_under_base(md_path, base_dir=str(base_output_dir) if base_output_dir else None)
             output_dir_rel = relativize_under_base(output_dir, base_dir=str(base_output_dir) if base_output_dir else None)
+            md_path_abs = resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None)
+            output_dir_abs = resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None)
 
             parsed_text = parsed_markdown
             _emit("parsed_ready", 15, {"file_id": file_id, "filename": effective_filename, "chars": len(parsed_text)})
@@ -115,8 +198,8 @@ class _IndexManagerPipelineMixin:
                             file_id=file_id,
                             filename=effective_filename,
                             markdown=parsed_text,
-                            md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
-                            output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            md_path=md_path_abs,
+                            output_dir=output_dir_abs,
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -171,7 +254,15 @@ class _IndexManagerPipelineMixin:
                 "owner_id": str(getattr(file_metadata, "owner_id", "")),
             }
 
-            chunks = self.chunker.chunk_text(text=parsed_text, metadata=chunk_metadata, **kwargs)
+            chunks = self._chunk_with_optional_strict_page(
+                text=parsed_text,
+                chunk_metadata=chunk_metadata,
+                pageindex_context=pageindex_context,
+                md_path=md_path_abs,
+                output_dir=output_dir_abs,
+                pageindex_info=pageindex_info,
+                **kwargs,
+            )
             if not chunks:
                 raise ValueError("Chunker returned no chunks")
 
@@ -254,7 +345,7 @@ class _IndexManagerPipelineMixin:
                 overwrite = getattr(self.chunk_storage, "overwrite_chunk_json", None)
                 if callable(overwrite):
                     await get_thread_pool().run_blocking(
-                        self._overwrite_chunk_json_batch,
+                        self._persist_backfilled_anchor_chunk_ids,
                         self.chunk_storage,
                         stored_chunks,
                         chunk_ids,
@@ -588,6 +679,8 @@ class _IndexManagerPipelineMixin:
             base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
             md_path_rel = str(getattr(parsed_meta, "md_path", "") or "").strip() or None
             output_dir_rel = str(getattr(parsed_meta, "output_dir", "") or "").strip() or None
+            md_path_abs = resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None)
+            output_dir_abs = resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None)
 
             pageindex_context = None
             pageindex_info: Dict[str, Any] = {}
@@ -600,8 +693,8 @@ class _IndexManagerPipelineMixin:
                             file_id=file_id,
                             filename=filename,
                             markdown=parsed_text,
-                            md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
-                            output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            md_path=md_path_abs,
+                            output_dir=output_dir_abs,
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -628,7 +721,15 @@ class _IndexManagerPipelineMixin:
                 "owner_id": str(getattr(file_metadata, "owner_id", "")),
             }
 
-            chunks = self.chunker.chunk_text(text=parsed_text, metadata=chunk_metadata, **kwargs)
+            chunks = self._chunk_with_optional_strict_page(
+                text=parsed_text,
+                chunk_metadata=chunk_metadata,
+                pageindex_context=pageindex_context,
+                md_path=md_path_abs,
+                output_dir=output_dir_abs,
+                pageindex_info=pageindex_info,
+                **kwargs,
+            )
             if not chunks:
                 raise ValueError("Chunker returned no chunks")
 
@@ -711,7 +812,7 @@ class _IndexManagerPipelineMixin:
                 overwrite = getattr(self.chunk_storage, "overwrite_chunk_json", None)
                 if callable(overwrite):
                     await get_thread_pool().run_blocking(
-                        self._overwrite_chunk_json_batch,
+                        self._persist_backfilled_anchor_chunk_ids,
                         self.chunk_storage,
                         stored_chunks,
                         chunk_ids,
@@ -1059,9 +1160,13 @@ class _IndexManagerPipelineMixin:
                 "owner_id": str(file_metadata.owner_id),  # Will be extracted as Chunk.owner_id field
             }
 
-            chunks = self.chunker.chunk_text(
+            chunks = self._chunk_with_optional_strict_page(
                 text=parsed_text,
-                metadata=chunk_metadata,
+                chunk_metadata=chunk_metadata,
+                pageindex_context=pageindex_context,
+                md_path=md_path_abs,
+                output_dir=output_dir_abs,
+                pageindex_info=pageindex_info,
                 **kwargs,
             )
 

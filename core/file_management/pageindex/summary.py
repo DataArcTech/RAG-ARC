@@ -31,6 +31,7 @@ class SectionSummaryGenerator:
         self.top_k = pageindex_cfg.section_summary_top_k()
         self.max_concurrency = pageindex_cfg.section_summary_max_concurrency()
         self.leaf_chunk_max_chars = pageindex_cfg.section_summary_leaf_chunk_max_chars()
+        self.retry_attempts = pageindex_cfg.section_summary_retry_attempts()
 
     def _resolve_model(self) -> Optional[str]:
         if self.model_override:
@@ -83,12 +84,19 @@ class SectionSummaryGenerator:
         ]
         model = self._resolve_model()
         kwargs = {"model": model} if model else {}
-        try:
-            response = await _call_llm_async(self.llm, messages, **kwargs)
-            return str(response or "").strip() or None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Section summary failed for %s: %s", node.section_id, exc)
-            return None
+        attempts = max(1, int(self.retry_attempts or 1))
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = await _call_llm_async(self.llm, messages, **kwargs)
+                return str(response or "").strip() or None
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < attempts - 1:
+                    await asyncio.sleep(0.2 * (attempt + 1))
+                    continue
+        logger.warning("Section summary failed for %s: %s", node.section_id, last_exc)
+        return None
 
     async def summarize(
         self,

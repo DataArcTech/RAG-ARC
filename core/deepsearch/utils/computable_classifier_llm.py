@@ -11,7 +11,7 @@ from core.prompts.deepsearch.computable_classifier import (
     COMPUTABLE_CLASSIFIER_SYSTEM_PROMPT_V1_EN,
     COMPUTABLE_CLASSIFIER_USER_PROMPT_V1_EN,
 )
-from core.utils.json_extract import safe_json_loads
+from core.utils.llm_json import call_llm_json_with_retry
 
 
 class ComputableLLMClassification(BaseModel):
@@ -41,16 +41,16 @@ async def aclassify_computable_question(
         {"role": "user", "content": COMPUTABLE_CLASSIFIER_USER_PROMPT_V1_EN.format(question=normalized)},
     ]
 
-    async_chat = getattr(llm, "achat", None)
-    if callable(async_chat):
-        raw = await async_chat(messages, temperature=float(temperature), model=model) if model else await async_chat(messages, temperature=float(temperature))
-    else:
-        chat = getattr(llm, "chat", None)
-        if not callable(chat):
-            raise RuntimeError("LLM connector does not expose chat/achat methods.")
-        raw = chat(messages, temperature=float(temperature), model=model) if model else chat(messages, temperature=float(temperature))
-
-    payload = safe_json_loads(raw or "", expected="dict")
+    llm_kwargs: Dict[str, Any] = {}
+    if model:
+        llm_kwargs["model"] = model
+    payload = await call_llm_json_with_retry(
+        llm_connector=llm,
+        messages=messages,
+        expected="dict",
+        temperature=float(temperature),
+        llm_kwargs=llm_kwargs or None,
+    )
     if not isinstance(payload, dict):
         raise ValueError("Computable classifier returned non-JSON output.")
     try:

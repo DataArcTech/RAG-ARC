@@ -4,7 +4,7 @@ from typing import Any, List, Mapping, Optional
 
 from core.deepsearch.utils.file_scope import FileScope
 from core.prompts import build_file_scope_xlang_rewrite_prompt
-from core.utils.json_extract import safe_json_loads
+from core.utils.llm_json import call_llm_json_with_retry_sync
 from config.core.deepsearch.file_scope_xlang_defaults import load_file_scope_xlang_thresholds
 from config.benchmark_mode import benchmark_mode_enabled
 
@@ -59,11 +59,13 @@ def maybe_rewrite_query_for_scope(*, llm_client: Any, query: str) -> str | None:
 
     prompt = build_file_scope_xlang_rewrite_prompt(query=text)
     try:
-        raw = chat([{"role": "user", "content": prompt}])
+        payload = call_llm_json_with_retry_sync(
+            llm_connector=llm_client,
+            messages=[{"role": "user", "content": prompt}],
+            expected="dict",
+        )
     except Exception:
         return None
-
-    payload = safe_json_loads(str(raw or ""), expected="dict")
     if not isinstance(payload, dict):
         return None
 

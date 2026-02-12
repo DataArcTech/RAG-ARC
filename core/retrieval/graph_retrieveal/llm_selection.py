@@ -9,7 +9,7 @@ from core.utils.json_extract import safe_json_loads
 
 
 def parse_ranked_choice_indices(
-    raw: str,
+    raw: Any,
     *,
     candidate_count: int,
     k: int,
@@ -43,13 +43,13 @@ def parse_ranked_choice_indices(
                 break
         return indices
 
-    parsed = safe_json_loads(raw, expected="list")
+    parsed = raw if isinstance(raw, list) else safe_json_loads(str(raw or ""), expected="list")
     if isinstance(parsed, list):
         indices = _normalize(parsed)
         if indices:
             return indices
 
-    parsed_obj = safe_json_loads(raw, expected="dict")
+    parsed_obj = raw if isinstance(raw, dict) else safe_json_loads(str(raw or ""), expected="dict")
     if isinstance(parsed_obj, dict):
         for key in ("indices", "selected", "choices", "ranks", "ranked"):
             value = parsed_obj.get(key)

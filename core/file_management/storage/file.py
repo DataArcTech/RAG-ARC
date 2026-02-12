@@ -123,6 +123,72 @@ class FileStorage(AbstractModule):
             # Fallback: use raw file hash
             return hashlib.sha256(file_data).hexdigest()
 
+    def _find_active_duplicates(
+        self,
+        *,
+        filename: str,
+        owner_id: uuid.UUID,
+        content_hash: str,
+    ) -> tuple[list[FileMetadata], list[FileMetadata]]:
+        """Return active duplicate records by name and content hash for the same owner."""
+
+        if not hasattr(self.metadata_store, "SessionMaker"):
+            return [], []
+
+        with self.metadata_store.SessionMaker() as session:
+            same_name_files = (
+                session.query(FileMetadata)
+                .filter_by(filename=filename, owner_id=owner_id)
+                .filter(FileMetadata.status != FileStatus.DELETED)
+                .order_by(FileMetadata.updated_at.desc())
+                .all()
+            )
+
+            same_content_files = (
+                session.query(FileMetadata)
+                .filter_by(content_hash=content_hash, owner_id=owner_id)
+                .filter(FileMetadata.status != FileStatus.DELETED)
+                .order_by(FileMetadata.updated_at.desc())
+                .all()
+            )
+
+        return list(same_name_files), list(same_content_files)
+
+    def find_duplicate_file_ids(
+        self,
+        *,
+        filename: str,
+        file_data: bytes,
+        owner_id: uuid.UUID,
+    ) -> list[str]:
+        """
+        Find active duplicate file IDs for a would-be upload.
+
+        Duplicates follow the same rules as upload validation: same owner + (same filename or same content hash),
+        excluding files already marked as DELETED.
+        """
+
+        normalized_filename = normalize_project_filename(filename)
+        self._validate_file_upload(normalized_filename, file_data)
+        content_hash = self._normalize_content_hash(file_data, normalized_filename)
+
+        same_name_files, same_content_files = self._find_active_duplicates(
+            filename=normalized_filename,
+            owner_id=owner_id,
+            content_hash=content_hash,
+        )
+
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for metadata in [*same_name_files, *same_content_files]:
+            file_id = str(metadata.file_id)
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            ordered_ids.append(file_id)
+
+        return ordered_ids
+
     def _validate_file_upload(
         self,
         filename: str,
@@ -249,30 +315,22 @@ class FileStorage(AbstractModule):
             content_hash = self._normalize_content_hash(file_data, filename)
             
             # Check for duplicates
-            if hasattr(self.metadata_store, 'SessionMaker'):
-                try:
-                    with self.metadata_store.SessionMaker() as session:
-                        # Check by filename first (exclude DELETED files)
-                        same_name_file = session.query(FileMetadata).filter_by(
-                            filename=filename,
-                            owner_id=owner_id
-                        ).filter(FileMetadata.status != FileStatus.DELETED).first()
-                        
-                        if same_name_file:
-                            raise FileValidationError(f"File with name '{filename}' already exists")
-                        
-                        # Check by content hash (same content, different filename, exclude DELETED files)
-                        same_content_file = session.query(FileMetadata).filter_by(
-                            content_hash=content_hash,
-                            owner_id=owner_id
-                        ).filter(FileMetadata.status != FileStatus.DELETED).first()
-                        
-                        if same_content_file:
-                            raise FileValidationError(f"File with same content already exists: '{same_content_file.filename}'")
-                except FileValidationError:
-                    raise
-                except Exception as e:
-                    logger.warning(f"Failed to check duplicates, proceeding with upload: {e}")
+            try:
+                same_name_files, same_content_files = self._find_active_duplicates(
+                    filename=filename,
+                    owner_id=owner_id,
+                    content_hash=content_hash,
+                )
+                if same_name_files:
+                    raise FileValidationError(f"File with name '{filename}' already exists")
+                if same_content_files:
+                    raise FileValidationError(
+                        f"File with same content already exists: '{same_content_files[0].filename}'"
+                    )
+            except FileValidationError:
+                raise
+            except Exception as e:
+                logger.warning(f"Failed to check duplicates, proceeding with upload: {e}")
 
             # Calculate file properties
             file_size = len(file_data)
