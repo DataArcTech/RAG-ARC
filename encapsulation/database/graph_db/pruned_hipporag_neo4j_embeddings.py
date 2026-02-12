@@ -152,7 +152,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                 should_warn = warned_key not in warned
                 if should_warn:
                     warned.add(warned_key)
-                    logger.warning(
+                    logger.info(
                         "%s FAISS index artifacts not found for owner=%s under %s (expected index.faiss + index.pkl)",
                         kind,
                         owner_id,

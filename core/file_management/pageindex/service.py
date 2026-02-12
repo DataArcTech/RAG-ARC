@@ -194,9 +194,15 @@ class PageIndexService:
         snippet_chars = pageindex_cfg.section_chunk_match_snippet_chars()
         page_snippet_chars = pageindex_cfg.section_page_match_snippet_chars()
         max_page_scan = pageindex_cfg.section_page_match_max_pages()
+        strict_page_chunking = pageindex_cfg.strict_page_chunking_enabled()
 
         for chunk in chunks:
             content = str(chunk.get("content") or "")
+            meta = chunk.get("metadata") or {}
+            has_strict_page = bool(meta.get("page_strict")) and (
+                meta.get("page_start") is not None or meta.get("page_end") is not None
+            )
+            has_strict_page = bool(strict_page_chunking and has_strict_page)
             pos = self._chunk_offset(context.markdown, content, cursor=cursor, snippet_chars=snippet_chars)
             if pos is not None:
                 cursor = max(pos + len(content), cursor)
@@ -211,18 +217,17 @@ class PageIndexService:
             if node is None:
                 # 未匹配到 section 时仍尝试赋予第一页，避免 page_start/page_end 恒为 null
                 if context.tree.nodes and context.normalized_page_texts:
-                    meta = chunk.get("metadata") or {}
                     first_node = context.tree.nodes[0]
                     meta["section_id"] = first_node.section_id
                     meta["section_path"] = first_node.path
                     meta["section_level"] = first_node.level
-                    first_page = min(context.normalized_page_texts.keys())
-                    meta["page_start"] = first_page
-                    meta["page_end"] = first_page
+                    if not has_strict_page:
+                        first_page = min(context.normalized_page_texts.keys())
+                        meta["page_start"] = first_page
+                        meta["page_end"] = first_page
                     chunk["metadata"] = meta
                 continue
 
-            meta = chunk.get("metadata") or {}
             meta["section_id"] = node.section_id
             meta["section_path"] = node.path
             meta["section_title"] = node.title
@@ -230,12 +235,13 @@ class PageIndexService:
             meta["section_parent_id"] = node.parent_id
             meta["section_page_start"] = node.page_start
             meta["section_page_end"] = node.page_end
-            meta["page_start"] = node.page_start
-            meta["page_end"] = node.page_end
+            if not has_strict_page:
+                meta["page_start"] = node.page_start
+                meta["page_end"] = node.page_end
             chunk["metadata"] = meta
             matched_sections += 1
 
-            if context.normalized_page_texts:
+            if context.normalized_page_texts and not has_strict_page:
                 page_candidates: List[int] = []
                 if node.page_start is not None:
                     end = node.page_end if node.page_end is not None else node.page_start
@@ -260,7 +266,12 @@ class PageIndexService:
 
             # 若 section 有匹配但 page 仍为 None（content_list 无 page_idx 或 _match_page 未命中），
             # 且有页面文本，则用第一页作为回退，避免 SSE 返回 page_start/page_end 恒为 null
-            if meta.get("page_start") is None and meta.get("page_end") is None and context.normalized_page_texts:
+            if (
+                not has_strict_page
+                and meta.get("page_start") is None
+                and meta.get("page_end") is None
+                and context.normalized_page_texts
+            ):
                 first_page = min(context.normalized_page_texts.keys())
                 meta["page_start"] = first_page
                 meta["page_end"] = first_page
