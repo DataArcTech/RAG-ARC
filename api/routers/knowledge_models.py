@@ -47,6 +47,19 @@ class TaskRunStatusResponse(BaseModel):
     updated_at_ms: Optional[int] = None
 
 
+class QueueStatusResponse(BaseModel):
+    """调试用：Celery 与 RedisTaskQueue 的队列/任务状态概览。"""
+
+    celery: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Celery inspect 与 broker 队列长度（仅当 TASK_QUEUE_MODE=celery 时有值）",
+    )
+    redis_task_queue: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="RedisTaskQueue 最近任务（从 stream 读取）",
+    )
+
+
 class IndexTriggerRequest(BaseModel):
     """Request model for triggering indexing."""
 

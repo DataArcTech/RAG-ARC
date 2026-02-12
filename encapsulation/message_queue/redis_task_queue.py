@@ -353,6 +353,74 @@ class RedisTaskQueue:
             logger.warning("RedisTaskQueue get resource pointer failed: %s", exc)
             return None
 
+    def list_recent_task_runs(self, *, limit: int = 50) -> list[Dict[str, Any]]:
+        """
+        从 task_runs stream 读取最近 N 条记录，用于调试。
+        返回按时间倒序的 task run 摘要（task_run_id, task_type, state, resource_id, created_at_ms, updated_at_ms）。
+        """
+        client = self._client()
+        if client is None:
+            return []
+        stream = self._settings.stream_task_runs()
+        try:
+            entries = client.xrevrange(stream, max="+", min="-", count=min(500, max(1, limit)))
+        except Exception as exc:
+            logger.warning("RedisTaskQueue list_recent_task_runs xrevrange failed: %s", exc)
+            return []
+        result: list[Dict[str, Any]] = []
+        seen: set[str] = set()  # 按 task_run_id 去重，保留最新状态
+        for _, fields in entries:
+            payload = fields.get("payload")
+            if not payload:
+                continue
+            try:
+                record = json.loads(payload) if isinstance(payload, str) else payload
+            except Exception:
+                continue
+            if not isinstance(record, dict):
+                continue
+            tid = str(record.get("task_run_id") or "")
+            if tid in seen:
+                continue
+            seen.add(tid)
+            result.append({
+                "task_run_id": tid,
+                "task_type": record.get("task_type"),
+                "state": record.get("state"),
+                "resource_id": record.get("resource_id"),
+                "owner_id": record.get("owner_id"),
+                "progress_percent": record.get("progress_percent"),
+                "created_at_ms": record.get("created_at_ms"),
+                "updated_at_ms": record.get("updated_at_ms"),
+            })
+            if len(result) >= limit:
+                break
+        return result
+
+    def get_broker_queue_lengths(self, queue_names: Optional[list[str]] = None) -> Dict[str, int]:
+        """
+        读取 Redis broker 中各队列的长度（用于 Celery 调试）。
+        Celery 使用 Redis 时，队列名即为 Redis list 的 key。
+        """
+        if queue_names is None:
+            queue_names = [
+                os.getenv("CELERY_QUEUE_INDEXING", "indexing"),
+                os.getenv("CELERY_QUEUE_DEEPSEARCH", "deepsearch"),
+                os.getenv("CELERY_QUEUE_EXPORT") or os.getenv("CELERY_QUEUE_INDEXING", "indexing"),
+                "celery",  # default queue
+            ]
+            queue_names = list(dict.fromkeys(queue_names))  # 去重保序
+        client = self._client()
+        if client is None:
+            return {q: 0 for q in queue_names}
+        result: Dict[str, int] = {}
+        for q in queue_names:
+            try:
+                result[q] = int(client.llen(q) or 0)
+            except Exception:
+                result[q] = 0
+        return result
+
     def update_task_run(
         self,
         task_run_id: str,

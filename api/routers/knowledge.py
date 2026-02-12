@@ -60,6 +60,7 @@ from api.routers.knowledge_models import (
     KGMaintenanceL2Response,
     PermissionInfo,
     PermissionListResponse,
+    QueueStatusResponse,
     RevokePermissionRequest,
     TaskRunStatusResponse,
     UserInfo,
@@ -212,6 +213,50 @@ async def get_task_run(
         resource_id=task_run.get("resource_id"),
         updated_at_ms=task_run.get("updated_at_ms"),
     )
+
+
+@router.get("/queue_status", response_model=QueueStatusResponse, status_code=status.HTTP_200_OK)
+async def get_queue_status(
+    user: Annotated[User | None, Depends(get_current_user)],
+    limit: int = Query(default=30, ge=1, le=200, description="RedisTaskQueue 最近任务条数"),
+):
+    """调试用：查询 Celery 与 RedisTaskQueue 的队列/任务状态。"""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    task_queue = get_task_queue()
+
+    celery_data: Dict[str, Any] | None = None
+    if use_celery():
+        try:
+            from encapsulation.message_queue.celery_app import app as celery_app
+
+            def _inspect() -> Dict[str, Any]:
+                out: Dict[str, Any] = {}
+                insp = celery_app.control.inspect()
+                out["active"] = insp.active() or {}
+                out["reserved"] = insp.reserved() or {}
+                out["scheduled"] = insp.scheduled() or {}
+                out["queue_lengths"] = task_queue.get_broker_queue_lengths()
+                return out
+
+            celery_data = await asyncio.to_thread(_inspect)
+        except Exception as exc:
+            celery_data = {"error": str(exc)}
+
+    redis_data: Dict[str, Any] = {}
+    try:
+        recent = await asyncio.to_thread(task_queue.list_recent_task_runs, limit=limit)
+        redis_data["recent_task_runs"] = recent
+        # 按 state 聚合计数
+        by_state: Dict[str, int] = {}
+        for r in recent:
+            s = str(r.get("state") or "unknown")
+            by_state[s] = by_state.get(s, 0) + 1
+        redis_data["by_state"] = by_state
+    except Exception as exc:
+        redis_data["error"] = str(exc)
+
+    return QueueStatusResponse(celery=celery_data, redis_task_queue=redis_data)
 
 
 @router.get("/result/{run_id}", status_code=status.HTTP_200_OK)
