@@ -150,6 +150,7 @@ Benchmark/实验模式：
 | `FILE_STORE_BASE_PATH` | `io://file_store` | 原始文件虚拟路径前缀（io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | 解析结果 blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
 | `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Chunk blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
+| `IO_STORE_BACKEND` | `localdb` | `io://...` 的后端选择器。Phase 1 支持 `localdb`；`minio` 用于 Docker 本地 MinIO 的脚手架，后续阶段会完整接入。 |
 | `IO_STORE_BASE_PATH` | `./data/localdb` | io:// 映射的物理 LocalDB 根目录（Phase 1）。 |
 | `IO_STORE_DEFAULT_NAMESPACE` | `io` | IOManager 默认 namespace（key 前缀）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
@@ -519,15 +520,15 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `MINIO_USERNAME` | `ROOTNAME` | MinIO 用户名/Access Key（仅在启用 MinIO 集成时使用）。 |
-| `MINIO_PASSWORD` | `CHANGEME123` | MinIO 密码/Secret Key。 |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint（`host:port`）。当使用 `./start.sh` 且 `IO_STORE_BACKEND=minio` 时，容器内可通过 `rag-arc-minio:9000` 访问。 |
+| `MINIO_BUCKET` | `test-bucket` | MinIO bucket 名称（用于 blob 存取）。 |
+| `MINIO_SECURE` | `false` | 连接 MinIO 时是否使用 HTTPS（`true`/`false`）。 |
+| `MINIO_USERNAME` | `root` | MinIO 用户名/Access Key（server bootstrap + client 的兜底凭据）。 |
+| `MINIO_PASSWORD` | `12345678` | MinIO 密码/Secret Key（长度需 ≥ 8）。 |
+| `MINIO_ROOT_USER` | _(空)_ | 可选：MinIO 官方 root 用户名（server 侧推荐）。设置后优先于 `MINIO_USERNAME`。 |
+| `MINIO_ROOT_PASSWORD` | _(空)_ | 可选：MinIO 官方 root 密码。设置后优先于 `MINIO_PASSWORD`。 |
 
-MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
-- `MINIO_ENDPOINT`
-- `MINIO_BUCKET`
-- `MINIO_SECURE`
-
-默认本地/Docker 部署不需要配置这些项。
+默认本地/Docker 部署（LocalDB 映射）不需要配置这些项。
 
 ## 11. 构建 / 高级运行参数
 

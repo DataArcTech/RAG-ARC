@@ -150,6 +150,7 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `FILE_STORE_BASE_PATH` | `io://file_store` | Virtual base path (io://...) for original files (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | Virtual base path (io://...) for parsed content blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
 | `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Virtual base path (io://...) for chunk blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
+| `IO_STORE_BACKEND` | `localdb` | IO backend selector for `io://...` paths. Phase 1 supports `localdb`; `minio` is used for Docker-local MinIO scaffolding and will be fully wired in the next phase. |
 | `IO_STORE_BASE_PATH` | `./data/localdb` | Physical LocalDB root directory for io:// mapping (Phase 1). |
 | `IO_STORE_DEFAULT_NAMESPACE` | `io` | Default namespace (key prefix) for IOManager. |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
@@ -521,15 +522,15 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MINIO_USERNAME` | `ROOTNAME` | MinIO access key / username (used only when MinIO integration is enabled). |
-| `MINIO_PASSWORD` | `CHANGEME123` | MinIO secret key / password. |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint (`host:port`). When using `./start.sh` with `IO_STORE_BACKEND=minio`, containers can reach MinIO at `rag-arc-minio:9000`. |
+| `MINIO_BUCKET` | `test-bucket` | Bucket name for MinIO-backed blob operations. |
+| `MINIO_SECURE` | `false` | Use HTTPS when connecting to MinIO (`true`/`false`). |
+| `MINIO_USERNAME` | `root` | MinIO access key / username (fallback credentials for both server bootstrap + client config). |
+| `MINIO_PASSWORD` | `12345678` | MinIO secret key / password (>= 8 chars). |
+| `MINIO_ROOT_USER` | _(empty)_ | Optional: official MinIO root username (preferred by MinIO server). Overrides `MINIO_USERNAME` when set. |
+| `MINIO_ROOT_PASSWORD` | _(empty)_ | Optional: official MinIO root password. Overrides `MINIO_PASSWORD` when set. |
 
-Common MinIO variables (set them only when enabling object storage integration):
-- `MINIO_ENDPOINT`
-- `MINIO_BUCKET`
-- `MINIO_SECURE`
-
-These are not required for the default local/Docker setup.
+These are not required for the default local/Docker setup (LocalDB mapping).
 
 ## 11. Build / Advanced Runtime
 
