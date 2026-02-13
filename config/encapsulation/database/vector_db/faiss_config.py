@@ -9,7 +9,7 @@ from pydantic import Field
 class FaissVectorDBConfig(AbstractConfig):
     type: Literal["faiss"] = "faiss"
 
-    index_path: str = Field(default_factory=lambda: os.getenv("FAISS_INDEX_PATH", "./data/unified_faiss_index"))
+    index_path: str = Field(default_factory=lambda: os.getenv("FAISS_INDEX_PATH", "io://unified_faiss_index"))
     index_name: str = "index"
 
     owner_scoped_enabled: bool = Field(

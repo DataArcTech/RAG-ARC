@@ -1,9 +1,9 @@
 {
     "type": "dense",
-    "index_path": "./data/unified_faiss_index",
+    "index_path": "io://unified_faiss_index",
     "index_config": {
         "type": "faiss",
-        "index_path": "./data/unified_faiss_index",
+        "index_path": "io://unified_faiss_index",
         "metric": "cosine",
         "index_type": "flat",
         "normalize_L2": true,

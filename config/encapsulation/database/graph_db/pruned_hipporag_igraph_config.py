@@ -27,8 +27,8 @@ class PrunedHippoRAGIGraphConfig(AbstractConfig):
 
     # Storage configuration
     storage_path: str = Field(
-        default="./data/graph_index",
-        description="Directory path for storing graph index files"
+        default="io://graph_index",
+        description="Virtual directory (io://...) for storing graph index files"
     )
     index_name: str = Field(
         default="index",

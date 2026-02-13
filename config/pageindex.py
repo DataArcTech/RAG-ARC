@@ -115,7 +115,7 @@ def section_score_weight(default: float = 0.1) -> float:
     return _env_float("SECTION_SCORE_WEIGHT", default, minimum=0.0)
 
 
-def section_faiss_index_path(default: str = "./data/section_faiss_index") -> str:
+def section_faiss_index_path(default: str = "io://section_faiss_index") -> str:
     return str(os.getenv("SECTION_FAISS_INDEX_PATH", default))
 
 def section_faiss_index_type() -> Optional[str]:
@@ -166,7 +166,7 @@ def section_faiss_two_stage_prefetch_k() -> Optional[int]:
     return value
 
 
-def section_bm25_index_path(default: str = "./data/section_bm25_index") -> str:
+def section_bm25_index_path(default: str = "io://section_bm25_index") -> str:
     return str(os.getenv("SECTION_BM25_INDEX_PATH", default))
 
 
@@ -212,11 +212,11 @@ def doc_rrf_k(default: int = 60) -> int:
     return 0
 
 
-def doc_routing_faiss_index_path(default: str = "./data/doc_routing_faiss_index") -> str:
+def doc_routing_faiss_index_path(default: str = "io://doc_routing_faiss_index") -> str:
     return default
 
 
-def doc_routing_bm25_index_path(default: str = "./data/doc_routing_bm25_index") -> str:
+def doc_routing_bm25_index_path(default: str = "io://doc_routing_bm25_index") -> str:
     return default
 
 

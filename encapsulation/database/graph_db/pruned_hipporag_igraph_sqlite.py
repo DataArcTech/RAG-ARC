@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from encapsulation.database.utils.sqlite_threadlocal import ThreadLocalSQLiteConnection
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,9 @@ class _PrunedHippoRAGIGraphSQLiteMixin:
         - chunk_entity_relations: Links between chunks and entities
         - synonymy_edges: Similarity-based edges between entities
         """
-        storage_path = getattr(self.config, 'storage_path', './data/graph_index')
+        storage_path = getattr(self, "storage_path", None) or getattr(self.config, "storage_path", "io://graph_index")
+        if is_io_path(storage_path):
+            storage_path = str(resolve_io_to_local_path(storage_path))
         os.makedirs(storage_path, exist_ok=True)
 
         self.db_path = os.path.join(storage_path, 'metadata.db')
@@ -305,5 +308,4 @@ class _PrunedHippoRAGIGraphSQLiteMixin:
         result = self._add_graph_data_no_commit(graph_data, chunk_id, owner_id=owner_str)
         self.conn.commit()
         return result
-
 

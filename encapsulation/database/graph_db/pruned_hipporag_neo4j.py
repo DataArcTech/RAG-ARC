@@ -151,7 +151,7 @@ class PrunedHippoRAGNeo4jStore(
         # Ensure storage path is writable
         storage_path = config.storage_path
         fallback_storage = os.path.join(
-            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            os.getenv("RAGARC_RUNTIME_DIR", "io://runtime"),
             "graph_index_neo4j"
         )
         resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
