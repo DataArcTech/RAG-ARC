@@ -18,11 +18,20 @@ Policy:
 
 ENV_DEFAULTS: dict[str, str] = {
     # Knowledge / storage paths (three distinct stores; cannot be inferred from LocalDBConfig alone).
-    "FILE_STORE_BASE_PATH": "./data/file_store",
-    "PARSED_CONTENT_STORE_BASE_PATH": "./data/parsed_content_store",
-    "CHUNK_STORE_BASE_PATH": "./data/chunk_store",
+    "FILE_STORE_BASE_PATH": "io://file_store",
+    "PARSED_CONTENT_STORE_BASE_PATH": "io://parsed_content_store",
+    "CHUNK_STORE_BASE_PATH": "io://chunk_store",
     # Parser output root (controls native/dots_ocr/vlm_ocr/mineru subfolders).
-    "PARSER_OUTPUT_DIR": "./data/parsed_files",
+    "PARSER_OUTPUT_DIR": "io://parsed_files",
+    # DeepSearch local artifacts (mapped via IOManager).
+    "DEEPSEARCH_PLAN_OUTPUT_DIR": "io://deepsearch_runs",
+    "DEEPSEARCH_TOOL_ARTIFACT_DIR": "io://deepsearch_artifacts",
+    # Runtime/log dirs (mapped via IOManager).
+    "RAGARC_RUNTIME_DIR": "io://runtime",
+    "RAGARC_LOG_DIR": "io://logs",
+    # IO manager store base path (Phase 1: LocalDB-backed; later can point to an object store adapter).
+    "IO_STORE_BASE_PATH": "./data/localdb",
+    "IO_STORE_DEFAULT_NAMESPACE": "io",
     # MultiPath fusion weights (RAG inference).
     # Order aligns with `config/json_configs/rag_inference*.json` retrievers: [dense, bm25, graph].
     "RAG_RETRIEVAL_WEIGHT_DENSE": "1.0",
