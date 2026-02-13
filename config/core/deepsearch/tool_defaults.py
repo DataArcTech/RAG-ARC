@@ -129,6 +129,15 @@ THINK_DEFAULT_MAX_TOKENS = 1200
 # Including the entire `extra` dict is redundant and can bloat prompts significantly.
 THINK_INCLUDE_EXTRA_IN_PROMPT = False
 
+# Prompt-variant + budget-status policies for think orchestration.
+THINK_PROMPT_VARIANTS_ENABLED = True
+THINK_BUDGET_STATUS_ENABLED = True
+# Phase classification thresholds (used only to guide tool selection; does NOT bypass evidence gates).
+THINK_BUDGET_LOW_REMAINING_CALLS = 3
+THINK_BUDGET_CRITICAL_REMAINING_CALLS = 1
+THINK_BUDGET_LOW_REMAINING_RATIO = 0.15
+THINK_BUDGET_CRITICAL_REMAINING_RATIO = 0.05
+
 # -----------------------------
 # file-scope propagation policy
 # -----------------------------
