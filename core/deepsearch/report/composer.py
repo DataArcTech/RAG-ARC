@@ -30,6 +30,7 @@ from core.deepsearch.report.composer_helpers import (
     _rank_evidences_for_question,
     _slim_diagnostics,
     _split_authoritative_evidences,
+    stable_sort_authoritative_evidences,
     _trim_text,
 )
 from core.utils.stopwords import get_stopwords
@@ -117,6 +118,8 @@ class DeepSearchReporter:
         question_scope_diag: Dict[str, Any] = {}
         if authoritative_evidences:
             authoritative_evidences, question_scope_diag = _filter_evidences_by_question_scope(question, authoritative_evidences)
+        # Prompt stability: do not let async arrival order leak into the report prompt bundle.
+        authoritative_evidences = stable_sort_authoritative_evidences(authoritative_evidences)
         if not authoritative_evidences:
             msg = "No reliable evidence was retrieved for this question."
             if file_scope.enabled:
