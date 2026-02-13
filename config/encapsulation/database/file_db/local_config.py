@@ -8,7 +8,10 @@ from typing import Literal
 from pydantic import Field
 
 from core.utils.filename_guard import project_root_dir
-from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path, io_key
+
+from config.encapsulation.database.file_db.minio_config import MinIOConfig
+from encapsulation.database.file_db.prefixed import PrefixedFileDB
 
 
 class LocalDBConfig(AbstractConfig):
@@ -24,6 +27,13 @@ class LocalDBConfig(AbstractConfig):
     cleanup_empty_dirs: bool = False  # Whether to remove empty directories on cleanup
 
     def build(self) -> LocalDB:
+        backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
+        if backend == "minio":
+            raw = str(self.base_path or "").strip()
+            prefix = io_key(raw) if is_io_path(raw) else ""
+            blob = MinIOConfig().build()
+            return PrefixedFileDB(config=self, inner=blob, key_prefix=prefix)  # type: ignore[return-value]
+
         raw = str(self.base_path or "").strip()
         if is_io_path(raw):
             base = resolve_io_to_local_path(raw)
