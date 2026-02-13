@@ -10,7 +10,12 @@ from typing import Any, Dict, Optional
 
 from config.encapsulation.database.cache_db.redis_config import RedisConfig
 from encapsulation.database.cache_db.redis_db import RedisDB
-from encapsulation.message_queue.result_store import ResultStore, ResultStoreError, build_result_store
+from encapsulation.io.io_manager import IOManager
+from encapsulation.message_queue.result_store import (
+    ResultStore,
+    ResultStoreError,
+    build_result_store_with_io_manager,
+)
 
 logger = logging.getLogger(__name__)
 _RESULT_ENVELOPE_KEY = "__ragarc_result__"
@@ -99,8 +104,8 @@ class RedisTaskQueueSettings:
     progress_ttl_seconds: int = 24 * 3600
     result_ttl_seconds: int = 24 * 3600
     result_max_inline_bytes: int = 256 * 1024
-    result_store_backend: str = "local"
-    result_store_local_dir: str = "local/mq_results"
+    result_store_backend: str = "io"
+    result_store_local_dir: str = "io://mq_results"
     result_store_minio_endpoint: str | None = None
     result_store_minio_bucket: str | None = None
     stream_maxlen: int = 20000
@@ -147,11 +152,12 @@ class RedisTaskQueue:
     - Optional resource->latest task pointer at `...:resource_latest:<task_type>:<resource_id>`
     """
 
-    def __init__(self, redis_config: RedisConfig, settings: RedisTaskQueueSettings):
+    def __init__(self, redis_config: RedisConfig, settings: RedisTaskQueueSettings, *, io_manager: IOManager | None = None):
         self._redis_config = redis_config
         self._settings = settings
         self._redis_db: RedisDB | None = None
         self._result_store: ResultStore | None = None
+        self._io_manager = io_manager
 
     @staticmethod
     def _fail_fast_on_unavailable_redis() -> bool:
@@ -171,8 +177,8 @@ class RedisTaskQueue:
             progress_ttl_seconds=int(os.getenv("MQ_PROGRESS_TTL_SECONDS", str(24 * 3600))),
             result_ttl_seconds=int(os.getenv("MQ_RESULT_TTL_SECONDS", str(24 * 3600))),
             result_max_inline_bytes=int(os.getenv("MQ_RESULT_MAX_INLINE_BYTES", str(256 * 1024))),
-            result_store_backend=os.getenv("MQ_RESULT_STORE", "local"),
-            result_store_local_dir=os.getenv("MQ_RESULT_LOCAL_DIR", "local/mq_results"),
+            result_store_backend=os.getenv("MQ_RESULT_STORE", "io"),
+            result_store_local_dir=os.getenv("MQ_RESULT_LOCAL_DIR", "io://mq_results"),
             result_store_minio_endpoint=os.getenv("MQ_RESULT_MINIO_ENDPOINT") or None,
             result_store_minio_bucket=os.getenv("MQ_RESULT_MINIO_BUCKET") or None,
             stream_maxlen=int(os.getenv("MQ_STREAM_MAXLEN", "20000")),
@@ -180,7 +186,14 @@ class RedisTaskQueue:
             progress_payload_max_list_items=int(os.getenv("MQ_PROGRESS_MAX_LIST_ITEMS", "200")),
             progress_payload_max_depth=int(os.getenv("MQ_PROGRESS_MAX_DEPTH", "6")),
         )
-        return cls(RedisConfig(), settings)
+        io_manager = None
+        try:
+            from framework.register import Register
+
+            io_manager = Register().get_object("io_manager")
+        except Exception:
+            io_manager = None
+        return cls(RedisConfig(), settings, io_manager=io_manager)
 
     @property
     def settings(self) -> RedisTaskQueueSettings:
@@ -202,11 +215,15 @@ class RedisTaskQueue:
     def _get_result_store(self) -> ResultStore:
         if self._result_store is not None:
             return self._result_store
-        self._result_store = build_result_store(
+        io_manager = self._io_manager
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for MQ result store")
+        self._result_store = build_result_store_with_io_manager(
             backend=self._settings.result_store_backend,
             local_dir=self._settings.result_store_local_dir,
             minio_endpoint=self._settings.result_store_minio_endpoint,
             minio_bucket=self._settings.result_store_minio_bucket,
+            io_manager=io_manager,
         )
         return self._result_store
 

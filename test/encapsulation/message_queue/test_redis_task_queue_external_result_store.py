@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from config.encapsulation.database.cache_db.redis_config import RedisConfig
+from config.encapsulation.database.file_db.local_config import LocalDBConfig
+from config.encapsulation.io.io_manager_config import IOManagerConfig
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, RedisTaskQueueSettings, TaskState
 
 
@@ -62,22 +64,24 @@ class _FakeRedis:
         return entry_id
 
 
-def _build_queue(tmp_path: Path) -> tuple[RedisTaskQueue, _FakeRedis, RedisTaskQueueSettings]:
+def _build_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("IO_STORE_BASE_PATH", str(tmp_path))
+    io_manager = IOManagerConfig(file_db_config=LocalDBConfig(base_path=str(tmp_path))).build()
     settings = RedisTaskQueueSettings(
         namespace=f"test:mq:{uuid.uuid4().hex}",
         stream_maxlen=100,
         result_max_inline_bytes=64,
-        result_store_backend="local",
-        result_store_local_dir=str(tmp_path),
+        result_store_backend="io",
+        result_store_local_dir="io://mq_results",
     )
-    queue = RedisTaskQueue(RedisConfig(), settings)
+    queue = RedisTaskQueue(RedisConfig(), settings, io_manager=io_manager)
     fake = _FakeRedis()
     queue._redis_db = SimpleNamespace(client=fake)  # type: ignore[attr-defined]
-    return queue, fake, settings
+    return queue, fake, settings, io_manager
 
 
-def test_finalize_run_externalizes_large_results_and_get_reads_back(tmp_path: Path):
-    queue, fake, settings = _build_queue(tmp_path)
+def test_finalize_run_externalizes_large_results_and_get_reads_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue, fake, settings, io_manager = _build_queue(tmp_path, monkeypatch)
     run_id = "run_external_1"
     owner = uuid.UUID(int=0)
     queue.create_task_run(task_run_id=run_id, task_type="t", owner_id=owner, resource_id="r1")
@@ -95,7 +99,7 @@ def test_finalize_run_externalizes_large_results_and_get_reads_back(tmp_path: Pa
     assert task_run is not None
     assert task_run.get("state") == TaskState.SUCCESS.value
     assert isinstance(task_run.get("result_ref"), str)
-    assert task_run["result_ref"].startswith("local://")
+    assert task_run["result_ref"].startswith("io://")
 
     stored = fake.get(settings.key_task_result(run_id))
     assert stored is not None
@@ -104,16 +108,16 @@ def test_finalize_run_externalizes_large_results_and_get_reads_back(tmp_path: Pa
     assert set(parsed.keys()) == {"__ragarc_result__"}
     assert parsed["__ragarc_result__"]["kind"] == "external"
 
-    # Local file should exist and be readable.
-    rel = parsed["__ragarc_result__"]["ref"].replace("local://", "", 1)
-    assert (tmp_path / rel).exists()
+    # Local file should exist and be readable (LocalDB mapping).
+    ref = parsed["__ragarc_result__"]["ref"]
+    assert io_manager.resolve_local_path(ref).exists()
 
     fetched = queue.get_task_result(run_id)
     assert fetched == large_result
 
 
-def test_finalize_run_exec_failure_cleans_up_external_result_file(tmp_path: Path):
-    queue, fake, settings = _build_queue(tmp_path)
+def test_finalize_run_exec_failure_cleans_up_external_result_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue, fake, settings, io_manager = _build_queue(tmp_path, monkeypatch)
     run_id = "run_external_2"
     owner = uuid.UUID(int=0)
     queue.create_task_run(task_run_id=run_id, task_type="t", owner_id=owner, resource_id="r1")
@@ -134,7 +138,4 @@ def test_finalize_run_exec_failure_cleans_up_external_result_file(tmp_path: Path
     assert queue.get_task_result(run_id) is None
 
     # No external file should remain.
-    ns_dir = tmp_path / settings.namespace.replace(":", "_")
-    if ns_dir.exists():
-        assert list(ns_dir.glob("*.json")) == []
-
+    assert list(tmp_path.rglob("*.json")) == []
