@@ -133,6 +133,30 @@ def _strategy_config(*, think_overrides: dict | None = None) -> dict:
     return base
 
 
+class _ReadPagesAwareToolManager(_StubToolManager):
+    async def invoke(self, tool_name: str, *, payload: dict) -> ToolResultPayload:
+        if tool_name != "explore":
+            return await super().invoke(tool_name, payload=payload)
+
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        actions = extra.get("actions") if isinstance(extra.get("actions"), list) else []
+        wants_pages = any(isinstance(a, dict) and a.get("tool") == "read.pages" for a in actions)
+        if wants_pages:
+            chunk = EvidenceChunk(chunk_id="p1", source="read.pages", content="page 1")
+            return ToolResultPayload(
+                tool_name="explore",
+                namespace="stub::explore",
+                channel="graph",
+                profile="X",
+                determinism="hybrid",
+                summary="read.pages ok",
+                evidences=[chunk],
+                diagnostics={},
+                think_notes=[],
+            )
+        return await super().invoke(tool_name, payload=payload)
+
+
 @pytest.mark.asyncio
 async def test_think_loop_executes_tool_calls_and_updates_plan() -> None:
     think_payloads = [
@@ -217,6 +241,94 @@ async def test_think_loop_skips_unknown_tools() -> None:
     assert "search" not in tool_names
     failures = [step for step in result.get("reasoning_steps") or [] if step.get("status") == "failed"]
     assert any(step.get("diagnostics", {}).get("reason") == "unknown_tool" for step in failures)
+
+
+@pytest.mark.asyncio
+async def test_think_loop_honors_is_final_stop_signal_and_skips_tool_calls() -> None:
+    think_payloads = [
+        {
+            "reasoning": "We already have enough evidence; stop now.",
+            "tool_calls": [
+                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search"}]}, "rationale": "should be skipped", "parallelizable": True}
+            ],
+            "plan": [],
+            "is_final": True,
+        },
+    ]
+    tool_manager = _StubToolManager(think_payloads)
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config=_strategy_config(
+            think_overrides={
+                "max_rounds_per_checkpoint": 1,
+                "tool_call_concurrency": 1,
+            }
+        ),
+        tool_manager=tool_manager,
+    )
+    context = GraphQueryContext(
+        adapter_name="stub",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="owner"),
+        metadata={"report_needed": True, "report_style": "deepsearch"},
+    )
+    seed = [EvidenceChunk(chunk_id="seed_p", source="read.pages", content="seed page")]
+
+    await loop.run_think_loop("Q", graph_context=context, seed_evidences=seed)
+
+    tool_names = [name for name, _ in tool_manager.calls]
+    assert tool_names == ["think"]
+
+
+@pytest.mark.asyncio
+async def test_think_loop_final_signal_requires_read_pages_evidence() -> None:
+    think_payloads = [
+        {
+            "reasoning": "Stop now (but we have no page evidence yet).",
+            "tool_calls": [],
+            "plan": [],
+            "is_final": True,
+        },
+        {
+            "reasoning": "Need page evidence; will read pages.",
+            "tool_calls": [
+                {
+                    "tool_name": "explore",
+                    "tool_args": {"actions": [{"tool": "read.pages", "args": {"file_id": "f1", "page_start": 1, "page_end": 1}}]},
+                    "rationale": "collect citeable evidence",
+                    "parallelizable": False,
+                }
+            ],
+            "plan": [],
+        },
+        {
+            "reasoning": "Now we can stop.",
+            "tool_calls": [],
+            "plan": [],
+            "is_final": True,
+        },
+    ]
+    tool_manager = _ReadPagesAwareToolManager(think_payloads)
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config=_strategy_config(
+            think_overrides={
+                "max_rounds_per_checkpoint": 3,
+                "tool_call_concurrency": 1,
+            }
+        ),
+        tool_manager=tool_manager,
+    )
+    context = GraphQueryContext(
+        adapter_name="stub",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="owner"),
+        metadata={"report_needed": True, "report_style": "deepsearch"},
+    )
+    result = await loop.run_think_loop("Q", graph_context=context)
+    assert any(ev.get("source") == "read.pages" for ev in result.get("evidences") or [])
 
 
 class _InflightToolManager(_StubToolManager):
