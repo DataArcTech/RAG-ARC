@@ -147,16 +147,18 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files (relative paths are resolved against the repo root). |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path (relative paths are resolved against the repo root). |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path (relative paths are resolved against the repo root). |
-| `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
-| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Base FAISS index directory. When owner-scoped indexing is enabled (default), the actual artifacts live under `FAISS_INDEX_PATH/owners/<owner_id>/`. |
+| `FILE_STORE_BASE_PATH` | `io://file_store` | Virtual base path (io://...) for original files (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | Virtual base path (io://...) for parsed content blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
+| `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Virtual base path (io://...) for chunk blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
+| `IO_STORE_BASE_PATH` | `./data/localdb` | Physical LocalDB root directory for io:// mapping (Phase 1). |
+| `IO_STORE_DEFAULT_NAMESPACE` | `io` | Default namespace (key prefix) for IOManager. |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
+| `FAISS_INDEX_PATH` | `io://unified_faiss_index` | Virtual base directory (io://...) for FAISS indexes (mapped to LocalDB). Owner-scoped artifacts live under `.../owners/<owner_id>/`. |
 | `FAISS_TWO_STAGE_ENABLED` | `false` | Enable two-stage retrieval for FAISS HNSW: ANN prefetch then exact rescoring on candidates. Applies only when the FAISS index uses `index_type=hnsw`. |
 | `FAISS_TWO_STAGE_PREFETCH_K` | `200` | Candidate pool size for two-stage HNSW prefetch. If smaller than `k`, `k` is used. |
 | `FAISS_MIN_TRAIN_SIZE` | `100` | IVF training guard (only relevant when `index_type=ivf`). Minimum number of vectors required to train IVF; also must be >= `nlist`. |
-| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Base BM25 index directory. When owner-scoped indexing is enabled (default), the actual artifacts live under `BM25_INDEX_PATH/owners/<owner_id>/`. |
-| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). Chunk-embedding persistence is owner-sharded by default under `GRAPH_STORAGE_PATH/chunk_embeddings/` (one shard per owner). Fact/entity FAISS artifacts are already owner-scoped under `GRAPH_STORAGE_PATH/{fact_index,entity_index}/<owner_id>/`. Graph-indexing embedding cache (sqlite, enabled by default) is stored under `GRAPH_STORAGE_PATH/embedding_cache/<owner_id>/embeddings.sqlite3`. |
+| `BM25_INDEX_PATH` | `io://unified_bm25_index` | Virtual base directory (io://...) for BM25 indexes (mapped to LocalDB). Owner-scoped artifacts live under `.../owners/<owner_id>/`. |
+| `GRAPH_STORAGE_PATH` | `io://graph_index_neo4j` | Virtual base directory (io://...) for graph index / embedding cache (mapped to LocalDB). Owner sharding remains under `.../chunk_embeddings/` and `.../embedding_cache/`. |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). Optional: `./fin_kg_schema.yml` for finance/insurance deployments. |
 | `GRAPH_INDEX_EMBED_FAILURE_POLICY` | `zero` | Graph-index embedding failure policy: `zero` (fill a small number of failed items with zero vectors and log) / `raise` (fail the indexing task on any failure). |
@@ -168,7 +170,7 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
 - **Path consistency (important)**: indexing and online retrieval must use the same `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`. In owner-scoped mode, this means you must keep the same *base* path (the system will resolve `.../owners/<owner_id>/` automatically). If you index into directory A but serve from directory B, you may see “the target file/chunks exist in Neo4j + chunk_store, but retrieval hits unrelated files”.
-- **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
+- **E2E isolation**: for real-service tests, set `IO_STORE_BASE_PATH` to an isolated directory to avoid polluting the default LocalDB root (`./data/localdb`).
 - **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
 - **HippoRAG PPR directionality (important)**: for general-purpose retrieval stability, `pruned_hipporag_neo4j_retrieval.ppr_directed_mode` defaults to `off` (undirected PPR). `direction_sensitive_relations` in `KG_SCHEMA_PATH` is still used by DeepSearch / fast graph tools for directional constraints and validation; to enable directed PPR at retrieval time, explicitly set `ppr_directed_mode=auto/on` in `config/json_configs/rag_inference*.json` or `config/json_configs/deepsearch_service.json` under `retriever_config`.
 
@@ -178,11 +180,11 @@ Notes:
 | --- | --- | --- |
 | `PAGEINDEX_ENABLED` | `true` | Enable PageIndex section tree build and retrieval filtering (offline ingest). |
 | `SECTION_INDEX_ENABLED` | `true` | Enable section index ingestion. |
-| `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | Section FAISS index path (separate from main FAISS). |
+| `SECTION_FAISS_INDEX_PATH` | `io://section_faiss_index` | Virtual base directory (io://...) for the PageIndex section FAISS index (mapped to LocalDB). |
 | `SECTION_FAISS_INDEX_TYPE` | `flat` | FAISS `index_type` for the PageIndex **section** index only (does not affect `FAISS_INDEX_PATH`). Allowed: `flat` / `ivf` / `hnsw`. |
 | `SECTION_FAISS_TWO_STAGE_ENABLED` | _(empty/inherit)_ | Override `two_stage_enabled` for the PageIndex **section** FAISS index only. Applies only when the section index uses `index_type=hnsw`. Allowed: `true` / `false`. |
 | `SECTION_FAISS_TWO_STAGE_PREFETCH_K` | _(empty/inherit)_ | Override `two_stage_prefetch_k` for the PageIndex **section** FAISS index only. Must be >= 1. |
-| `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | Section BM25 index path (separate from main BM25). |
+| `SECTION_BM25_INDEX_PATH` | `io://section_bm25_index` | Virtual base directory (io://...) for the PageIndex section BM25 index (mapped to LocalDB). |
 | `SECTION_PATH_DELIMITER` | `" > "` | Delimiter used when building PageIndex section paths. |
 | `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index). |
 | `SECTION_SUMMARY_MODEL` | _(empty)_ | Summary model override; falls back to `LOW_COST_MODEL` then chat model. |
@@ -355,8 +357,8 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
 | `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, payloads are stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). Applies to both task results and large progress/trace payloads. |
-| `MQ_RESULT_STORE` | `local` | External result store backend: `local` or `minio`. |
-| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | Base directory for `local` external results. |
+| `MQ_RESULT_STORE` | `io` | External result store backend: `io` (IOManager-backed, Phase 1 LocalDB mapping) or `minio` (TODO). |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | Virtual base directory (io://...) for external results when `MQ_RESULT_STORE=io`. |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
 | `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
 | `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
@@ -410,7 +412,8 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | Graph reasoning strategy label. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts (also used as the default run artifact root in `config/json_configs/deepsearch_service.json`). |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | Virtual directory (io://...) for DeepSearch artifacts (runs + tools), mapped to LocalDB under `IO_STORE_BASE_PATH`. |
+| `DEEPSEARCH_LLM_DUMP_PATH` | _(empty)_ | Optional debug dump root. When set to an `io://...` virtual directory, DeepSearch writes one JSON object per LLM event via IOManager (request/response/error). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
@@ -460,12 +463,13 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | _(empty)_ | JWT signing secret. If empty, the API auto-generates one and persists it under `RAGARC_RUNTIME_DIR` (default: `./local/runtime/jwt_secret_key`). Set explicitly in production. |
+| `JWT_SECRET_KEY` | _(empty)_ | JWT signing secret. If empty, the API auto-generates one and persists it under `RAGARC_RUNTIME_DIR` (default: `io://runtime/jwt_secret_key`, mapped to LocalDB). Set explicitly in production. |
 | `JWT_DEFAULT_TENANT_ID` | `default` | Default tenant_id for multi-tenant deployments (used when auth/JWT does not provide a tenant_id). Single-tenant deployments can keep the default. |
 | `RAGARC_DEFAULT_TENANT_ID` | `default` | Legacy alias for `JWT_DEFAULT_TENANT_ID` (lower precedence). |
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
+| `RAGARC_LOG_DIR` | `io://logs` | Virtual directory (io://...) for log files, mapped to LocalDB under `IO_STORE_BASE_PATH`. |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | Dependency check mode for app startup (Postgres/Redis/Neo4j): `off`/`warn`/`strict`. Note: the API startup currently defaults to `strict` when this env var is unset. |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | Dependency check mode for knowledge indexing tasks (used by `/knowledge/*` indexing and Celery tasks): `off`/`warn`/`strict`. Unit tests set this to `off` for hermetic runs. |
 | `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | Whether `Knowledge.is_file_active` also checks that the underlying blob exists (prevents returning citations that later 404 in file download flows). |
@@ -475,7 +479,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/image parse mode: `native` (no OCR; PDF text extraction only), `dotsocr` (local OCR), `mineru` (remote MinerU service). |
-| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | Unified base directory for parser outputs (native/dots_ocr/vlm_ocr subfolders). |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Unified virtual base directory (io://...) for parser outputs (native/dots_ocr/vlm_ocr/mineru subfolders), mapped to LocalDB. |
 | `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory. |
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
@@ -498,8 +502,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `TOKEN_CHUNK_OVERLAP` | `100` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL atomic protection: keep this many tokens before/after each URL together (applies to `token_chunker` and semantic-unit fallback). |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
-| `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided (relative paths are resolved against the repo root). |
+| `RAGARC_RUNTIME_DIR` | `io://runtime` | Virtual runtime root (io://...) mapped to LocalDB (used for persisted JWT secret and misc runtime probes). |
+| `LOCAL_FILE_STORAGE_PATH` | `io://files` | Default virtual root for `local_blob_store` when JSON `base_path` is not provided (mapped to LocalDB). |
 
 ## 9. Neo4j Graph Database
 
@@ -552,7 +556,7 @@ These are not required for the default local/Docker setup.
 | --- | --- | --- |
 | `QUICK_START_OWNER_ID` | _(empty)_ | Optional: owner id used by quick-start scripts/examples. |
 | `RAG_OUTPUT_DIR` | _(empty)_ | Optional: output directory for RAG pipeline artifacts. |
-| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(empty)_ | Optional: output directory for DeepSearch experiment artifacts. |
+| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(empty)_ | Optional: DeepSearch experiment snapshot root. Must be an `io://...` virtual directory; snapshots are persisted via IOManager (LocalDB mapping in Phase 1). |
 | `DEEPSEARCH_CITATION_ALIASES` | _(empty)_ | Optional: JSON mapping for citation aliases. |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(empty)_ | Optional: label attached to tool audit records. |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(empty)_ | Optional: label attached to MCP tool audit records. |
