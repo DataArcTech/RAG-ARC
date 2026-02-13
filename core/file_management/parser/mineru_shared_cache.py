@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from core.utils.path_guard import require_writable_dir
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,6 +47,10 @@ def resolve_shared_cache_dir(*, base_dir: str | None) -> Optional[Path]:
     raw = str(base_dir or "").strip()
     if not raw:
         return None
+    if is_io_path(raw):
+        # Ensure the underlying local directory exists and is writable.
+        require_writable_dir(raw)
+        return resolve_io_to_local_path(raw)
     return Path(raw).expanduser()
 
 

@@ -70,10 +70,14 @@ class MinerUParser(AbstractParser):
         output_dir = getattr(self.config, "output_dir", None)
         if not isinstance(output_dir, str) or not output_dir.strip():
             raise ValueError("MinerUParser requires config.output_dir (no implicit env defaults).")
-        output_dir = require_writable_dir(output_dir)
+        output_dir_virtual = str(output_dir).strip()
+        if not output_dir_virtual.startswith("io://"):
+            raise ValueError("MinerUParser config.output_dir must be an io:// virtual path")
+        output_dir_local = require_writable_dir(output_dir_virtual)
         source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
         doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
-        doc_dir = Path(output_dir) / doc_key
+        doc_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{doc_key}"
+        doc_dir = Path(output_dir_local) / doc_key
         # If a previous run materialized shared cache via symlink, `force_reparse` needs a real folder.
         if force_reparse and doc_dir.exists() and doc_dir.is_symlink():
             try:
@@ -92,12 +96,12 @@ class MinerUParser(AbstractParser):
                 logger.info("Reusing cached MinerU markdown: %s", md_local_path)
                 return [
                     {
-                        "md_content_path": str(md_local_path),
+                        "md_content_path": f"{doc_dir_virtual}/{base_filename}.md",
                         "text": md_text,
                         "metadata": {
                             "source_file_name": filename,
                             "mineru_cache_reused": True,
-                            "output_dir": str(doc_dir),
+                            "output_dir": doc_dir_virtual,
                         },
                     }
                 ]
@@ -112,12 +116,12 @@ class MinerUParser(AbstractParser):
                     logger.info("Reusing cached MinerU markdown (fallback): %s", candidate)
                     return [
                         {
-                            "md_content_path": str(candidate),
+                            "md_content_path": f"{doc_dir_virtual}/{candidate.name}",
                             "text": md_text,
                             "metadata": {
                                 "source_file_name": filename,
                                 "mineru_cache_reused": True,
-                                "output_dir": str(doc_dir),
+                                "output_dir": doc_dir_virtual,
                             },
                         }
                     ]
@@ -165,7 +169,7 @@ class MinerUParser(AbstractParser):
                                 logger.info("Reusing shared MinerU artifacts: %s -> %s", shared_dir, doc_dir)
                                 return [
                                     {
-                                        "md_content_path": str(md_candidates[0]),
+                                        "md_content_path": f"{doc_dir_virtual}/{md_candidates[0].name}",
                                         "text": md_text,
                                         "metadata": {
                                             "source_file_name": filename,
@@ -173,7 +177,7 @@ class MinerUParser(AbstractParser):
                                             "mineru_shared_cache_sha256": bytes_sha,
                                             "mineru_shared_cache_fingerprint": fp,
                                             "mineru_shared_cache_mode": mat.get("mode"),
-                                            "output_dir": str(doc_dir),
+                                            "output_dir": doc_dir_virtual,
                                         },
                                     }
                                 ]
@@ -283,7 +287,7 @@ class MinerUParser(AbstractParser):
                 pass
         return [
             {
-                "md_content_path": str(md_local_path),
+                "md_content_path": f"{doc_dir_virtual}/{base_filename}.md",
                 "text": md_text,
                 "metadata": {
                     "source_file_name": filename,
@@ -292,7 +296,7 @@ class MinerUParser(AbstractParser):
                     "parse_method": parse_method,
                     "lang": lang,
                     "output_format": output_format,
-                    "output_dir": str(doc_dir),
+                    "output_dir": doc_dir_virtual,
                 },
             }
         ]

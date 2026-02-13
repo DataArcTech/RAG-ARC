@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from core.file_management.atomic_units.markdown_image import extract_image_urls
 from core.utils.path_guard import safe_leaf_name
+from core.utils.path_guard import require_writable_dir
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,10 @@ def resolve_local_image_paths_for_mineru(
     parser_output_dir: str | None = None,
 ) -> List[Path]:
     """Resolve MinerU relative image URLs (images/...) into local file paths under PARSER_OUTPUT_DIR."""
-    base = (parser_output_dir or os.getenv("PARSER_OUTPUT_DIR") or "./data/parsed_files").strip() or "./data/parsed_files"
-    base_dir = Path(base).expanduser().resolve()
+    base = (parser_output_dir or os.getenv("PARSER_OUTPUT_DIR") or "io://parsed_files").strip() or "io://parsed_files"
+    if not base.startswith("io://"):
+        raise ValueError("PARSER_OUTPUT_DIR must be an io:// virtual path")
+    base_dir = Path(require_writable_dir(base)).expanduser().resolve()
     stem = Path(filename).stem or "document"
     stem_dir = (base_dir / "mineru" / safe_leaf_name(stem, default="document")).resolve()
     file_dir = None

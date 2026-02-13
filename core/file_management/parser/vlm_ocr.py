@@ -79,9 +79,13 @@ class VLMOcrParser(AbstractParser):
         output_dir = getattr(self.config, "output_dir", None)
         if not isinstance(output_dir, str) or not output_dir.strip():
             raise ValueError("VLMOcrParser requires config.output_dir (no implicit env defaults).")
-        output_dir = require_writable_dir(output_dir)
-        save_dir = os.path.join(output_dir, base_filename)
-        os.makedirs(save_dir, exist_ok=True)
+        output_dir_virtual = str(output_dir).strip()
+        if not output_dir_virtual.startswith("io://"):
+            raise ValueError("VLMOcrParser config.output_dir must be an io:// virtual path")
+        output_dir_local = require_writable_dir(output_dir_virtual)
+        save_dir_local = os.path.join(output_dir_local, base_filename)
+        os.makedirs(save_dir_local, exist_ok=True)
+        save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
         # Run parsing in thread pool to avoid blocking the event loop
         # PDF parsing involves heavy I/O (LLM API calls) that can take a long time
@@ -90,7 +94,7 @@ class VLMOcrParser(AbstractParser):
                 self._parse_pdf,
                 file_data,
                 base_filename,
-                save_dir,
+                save_dir_local,
                 **kwargs
             )
         elif file_ext in image_extensions:
@@ -98,13 +102,32 @@ class VLMOcrParser(AbstractParser):
                 self._parse_image,
                 file_data,
                 base_filename,
-                save_dir,
+                save_dir_local,
                 **kwargs
             )
 
-        logger.info(f"Parsing finished, results saved to {save_dir}")
+        def _to_virtual_path(value: Any) -> Any:
+            if not isinstance(value, str) or not value.strip():
+                return value
+            normalized = value.replace("\\", "/")
+            local_prefix = save_dir_local.replace("\\", "/").rstrip("/")
+            if normalized == local_prefix:
+                return save_dir_virtual
+            if normalized.startswith(local_prefix + "/"):
+                suffix = normalized[len(local_prefix) + 1 :]
+                return f"{save_dir_virtual.rstrip('/')}/{suffix}"
+            return value
 
-        jsonl_path = os.path.join(output_dir, f"{base_filename}.jsonl")
+        for item in results or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("md_content_path", "layout_info_path", "layout_image_path"):
+                if key in item:
+                    item[key] = _to_virtual_path(item.get(key))
+
+        logger.info("Parsing finished, results saved to %s", save_dir_virtual)
+
+        jsonl_path = os.path.join(output_dir_local, f"{base_filename}.jsonl")
         os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
         with open(jsonl_path, 'w', encoding="utf-8") as w:
             for result in results:

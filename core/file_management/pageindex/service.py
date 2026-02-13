@@ -16,6 +16,7 @@ from core.file_management.pageindex.types import SectionNode
 from core.file_management.pageindex.utils import normalize_for_match
 from core.utils.path_guard import require_writable_dir
 from encapsulation.data_model.schema import Chunk
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,30 @@ class PageIndexService:
         )
 
     def _resolve_artifact_dir(self, context: PageIndexContext) -> Optional[Path]:
-        if context.md_path:
-            return Path(context.md_path).parent
-        if context.output_dir:
-            return Path(context.output_dir)
+        token = str(context.md_path or "").strip()
+        if token:
+            try:
+                if is_io_path(token):
+                    key = io_key(token)
+                    parent = "/".join(key.split("/")[:-1])
+                    if not parent:
+                        logger.warning("PageIndex: md_path=%r has no parent directory; skipping artifacts", token)
+                        return None
+                    return Path(require_writable_dir(f"{IO_PATH_PREFIX}{parent}"))
+                return Path(token).expanduser().resolve().parent
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex: failed to resolve artifact dir from md_path=%r: %s", token, exc)
+                return None
+
+        token = str(context.output_dir or "").strip()
+        if token:
+            try:
+                if is_io_path(token):
+                    return Path(require_writable_dir(token))
+                return Path(token).expanduser().resolve()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex: failed to resolve artifact dir from output_dir=%r: %s", token, exc)
+                return None
         return None
 
     def _write_artifacts(self, context: PageIndexContext) -> None:
@@ -121,10 +142,8 @@ class PageIndexService:
         artifact_dir = self._resolve_artifact_dir(context)
         if artifact_dir is None:
             return
-        try:
-            artifact_dir = Path(require_writable_dir(str(artifact_dir)))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("PageIndex artifact dir not writable: %s", exc)
+        if not isinstance(artifact_dir, Path):
+            logger.warning("PageIndex artifact dir is invalid: %r", artifact_dir)
             return
 
         tree_path = artifact_dir / pageindex_cfg.pageindex_tree_filename()

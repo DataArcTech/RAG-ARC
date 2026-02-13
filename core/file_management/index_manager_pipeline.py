@@ -1505,7 +1505,15 @@ class _IndexManagerPipelineMixin:
                 markdown_path = output_paths["markdown"]
                 if markdown_path:
                     try:
-                        with open(markdown_path, "r", encoding="utf-8") as f:
+                        from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+                        from pathlib import Path
+
+                        local_path = (
+                            resolve_io_to_local_path(markdown_path)
+                            if is_io_path(markdown_path)
+                            else Path(str(markdown_path)).expanduser().resolve()
+                        )
+                        with open(local_path, "r", encoding="utf-8") as f:
                             return f.read()
                     except Exception as e:
                         logger.warning(f"Failed to read markdown file {markdown_path}: {e}")
@@ -1515,7 +1523,13 @@ class _IndexManagerPipelineMixin:
             md_path = parse_result["md_content_path"]
             if md_path:
                 try:
-                    with open(md_path, "r", encoding="utf-8") as f:
+                    from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+                    from pathlib import Path
+
+                    local_path = (
+                        resolve_io_to_local_path(md_path) if is_io_path(md_path) else Path(str(md_path)).expanduser().resolve()
+                    )
+                    with open(local_path, "r", encoding="utf-8") as f:
                         return f.read()
                 except Exception as e:
                     logger.warning(f"Failed to read markdown file {md_path}: {e}")

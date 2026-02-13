@@ -38,7 +38,12 @@ class ParserCombinator(AbstractModule):
         base_output_dir = getattr(self.config, "base_output_dir", None)
         if not isinstance(base_output_dir, str) or not base_output_dir.strip():
             raise ValueError("ParserCombinator requires config.base_output_dir")
-        self.base_output_dir = require_writable_dir(base_output_dir)
+        base_output_dir_virtual = str(base_output_dir).strip()
+        if not base_output_dir_virtual.startswith("io://"):
+            raise ValueError("ParserCombinator config.base_output_dir must be an io:// virtual path")
+        # Ensure underlying directory exists and is writable (mapped by io_manager -> LocalDB in Phase 1).
+        require_writable_dir(base_output_dir_virtual)
+        self.base_output_dir = base_output_dir_virtual
         logger.info("ParserCombinator base output directory: %s", self.base_output_dir)
 
         # Build OCR parser if configured
@@ -46,12 +51,16 @@ class ParserCombinator(AbstractModule):
         if ocr_parser_config is not None:
             logger.info(f"Building OCR parser: {ocr_parser_config.type}")
             ocr_subdir = self._resolve_ocr_output_subdir(ocr_parser_config.type)
-            resolved_output_dir = require_writable_dir(str(Path(self.base_output_dir) / ocr_subdir))
+            resolved_output_dir = f"{self.base_output_dir.rstrip('/')}/{ocr_subdir}"
+            require_writable_dir(resolved_output_dir)
             ocr_cfg_output = getattr(ocr_parser_config, "output_dir", None)
             if ocr_cfg_output is None:
                 ocr_parser_config = ocr_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             else:
-                resolved_output_dir = require_writable_dir(str(ocr_cfg_output))
+                resolved_output_dir = str(ocr_cfg_output).strip()
+                if not resolved_output_dir.startswith("io://"):
+                    raise ValueError("OCR parser config.output_dir must be an io:// virtual path")
+                require_writable_dir(resolved_output_dir)
                 ocr_parser_config = ocr_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             self.ocr_parser = ocr_parser_config.build()
         else:
@@ -65,12 +74,16 @@ class ParserCombinator(AbstractModule):
             native_subdir = getattr(self.config, "native_output_subdir", None)
             if not isinstance(native_subdir, str) or not native_subdir.strip():
                 raise ValueError("ParserCombinator config.native_output_subdir is required when native_parser is set")
-            resolved_output_dir = require_writable_dir(str(Path(self.base_output_dir) / native_subdir))
+            resolved_output_dir = f"{self.base_output_dir.rstrip('/')}/{native_subdir}"
+            require_writable_dir(resolved_output_dir)
             native_cfg_output = getattr(native_parser_config, "output_dir", None)
             if native_cfg_output is None:
                 native_parser_config = native_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             else:
-                resolved_output_dir = require_writable_dir(str(native_cfg_output))
+                resolved_output_dir = str(native_cfg_output).strip()
+                if not resolved_output_dir.startswith("io://"):
+                    raise ValueError("Native parser config.output_dir must be an io:// virtual path")
+                require_writable_dir(resolved_output_dir)
                 native_parser_config = native_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             self.native_parser = native_parser_config.build()
         else:
