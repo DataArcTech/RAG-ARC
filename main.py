@@ -1,4 +1,5 @@
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -56,8 +57,11 @@ def _configure_logging() -> None:
 
     correlation_filter = CorrelationIdFilter(uuid_length=36, default_value="NO-ID")
 
-    log_dir = Path(__file__).parent / "log"
-    log_dir.mkdir(exist_ok=True)
+    log_dir_virtual = str(os.getenv("RAGARC_LOG_DIR", "io://logs") or "").strip() or "io://logs"
+    io_manager = app_registration.registrator.get_object("io_manager")
+    if io_manager is None:
+        raise RuntimeError("io_manager is required for logging")
+    log_dir = io_manager.resolve_local_dir(log_dir_virtual, ensure=True)
 
     fmt = "%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
     formatter = BeijingFormatter(fmt)
@@ -257,47 +261,17 @@ async def validation_exception_handler(request, exc):
     )
 
 app.mount("/mcp", mcp.mcp_app)
-# Mount static file service for parsed files
+# Mount static file service for parsed files (virtual io:// path mapped to LocalDB).
 try:
-    import os
-    # Get project root directory (where main.py is located)
-    project_root = Path(__file__).parent.resolve()
-    # Get PARSER_OUTPUT_DIR from environment variable (required, no default)
-    parser_output_dir = os.getenv("PARSER_OUTPUT_DIR")
-    if not parser_output_dir:
-        logger.warning("PARSER_OUTPUT_DIR environment variable not set, skipping static file mount")
-    else:
-        parsed_files_dir = Path(parser_output_dir).resolve()
-        if parsed_files_dir.exists():
-            # Calculate relative path from project root
-            try:
-                relative_path = parsed_files_dir.relative_to(project_root)
-                # Build mount path from relative path
-                mount_path = "/" + str(relative_path).replace("\\", "/")
-            except ValueError:
-                # If parsed_files_dir is not under project_root, find common path segments
-                project_parts = project_root.parts
-                parsed_parts = parsed_files_dir.parts
-                # Find where they diverge
-                common_len = 0
-                for i in range(min(len(project_parts), len(parsed_parts))):
-                    if project_parts[i] == parsed_parts[i]:
-                        common_len += 1
-                    else:
-                        break
-                # Build relative path from divergence point
-                if common_len > 0:
-                    relative_parts = parsed_parts[common_len:]
-                    mount_path = "/" + "/".join(relative_parts)
-                else:
-                    # Fallback: use the full absolute path structure
-                    # Extract path segments and build URL path
-                    mount_path = "/" + "/".join(parsed_parts)
-            
-            app.mount(mount_path, StaticFiles(directory=str(parsed_files_dir)), name="parsed_files")
-            logger.info(f"Mounted static file service at {mount_path} -> {parsed_files_dir}")
-        else:
-            logger.warning(f"Parsed files directory not found: {parsed_files_dir}")
+    parser_output_dir_virtual = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "").strip() or "io://parsed_files"
+    if not parser_output_dir_virtual.startswith("io://"):
+        raise ValueError("PARSER_OUTPUT_DIR must be an io:// virtual path")
+    io_manager = app_registration.registrator.get_object("io_manager")
+    if io_manager is None:
+        raise RuntimeError("io_manager is required for PARSER_OUTPUT_DIR static mount")
+    parsed_files_dir = io_manager.resolve_local_dir(parser_output_dir_virtual, ensure=True)
+    app.mount("/parsed_files", StaticFiles(directory=str(parsed_files_dir)), name="parsed_files")
+    logger.info("Mounted static file service at /parsed_files -> %s", parsed_files_dir)
 except Exception as e:
     logger.warning(f"Failed to mount static file service for parsed files: {e}")
 

@@ -25,6 +25,7 @@ from application.account.user import Account
 from config.application.account_config import AccountConfig
 from api.schemas.response import StandardResponse
 from core.user_management.user import StorageOperationError
+from core.utils.path_guard import require_writable_dir
 
 
 def _get_jwt_secret_key() -> str:
@@ -40,7 +41,10 @@ def _get_jwt_secret_key() -> str:
     if value:
         return value
 
-    runtime_dir = Path(os.getenv("RAGARC_RUNTIME_DIR") or "./local/runtime")
+    runtime_dir_virtual = str(os.getenv("RAGARC_RUNTIME_DIR", "io://runtime") or "").strip() or "io://runtime"
+    if not runtime_dir_virtual.startswith("io://"):
+        raise RuntimeError("RAGARC_RUNTIME_DIR must be an io:// virtual path")
+    runtime_dir = Path(require_writable_dir(runtime_dir_virtual))
     secret_path = runtime_dir / "jwt_secret_key"
 
     try:
@@ -48,16 +52,14 @@ def _get_jwt_secret_key() -> str:
             existing = secret_path.read_text(encoding="utf-8").strip()
             if existing:
                 return existing
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to read persisted JWT secret key at {secret_path}") from exc
 
-    runtime_dir.mkdir(parents=True, exist_ok=True)
     generated = secrets.token_hex(32)
     try:
         secret_path.write_text(generated, encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        # If we cannot persist, still return a valid secret (tokens won't survive restart).
-        pass
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to persist JWT secret key at {secret_path}") from exc
     return generated
 
 

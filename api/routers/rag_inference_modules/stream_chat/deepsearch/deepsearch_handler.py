@@ -16,7 +16,9 @@ from api.sse import (
 )
 from core.deepsearch.trace import TraceEmitter, TraceEvent, set_trace_emitter, reset_trace_emitter
 from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
+from core.constants.io_namespaces import DEEPSEARCH_TRACES_NAMESPACE
 from api.routers.deepsearch_weaver_render import render_trace_payload, weaver_block
+from framework.virtual_paths import IO_PATH_PREFIX, io_key
 
 logger = logging.getLogger(__name__)
 
@@ -256,21 +258,21 @@ def _save_trace_events_to_file(
     """Save trace events to a JSON file.
 
     Returns:
-        Path to the saved file, or None if saving failed.
+        An IO reference (preferred) or filesystem path (legacy), or None if saving failed.
     """
     try:
-        # 确定存储目录
-        # 优先使用环境变量 DEEPSEARCH_TRACE_STORAGE_PATH
-        # 如果没有设置，默认使用 ./local/deepsearch_traces（与 artifacts 目录同级）
-        base_dir = os.getenv("DEEPSEARCH_TRACE_STORAGE_PATH", "./local/deepsearch_traces")
-        storage_dir = Path(base_dir).expanduser()
-        storage_dir.mkdir(parents=True, exist_ok=True)
+        def _require_io_manager():
+            from app_registration import registrator
+
+            io_manager = registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for trace storage")
+            return io_manager
 
         # 生成文件名：使用 run_id 或 request_id，加上时间戳
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_id = run_id or request_id
         filename = f"trace_{file_id}_{timestamp}.json"
-        file_path = storage_dir / filename
 
         rendered_result = deepsearch_result
         try:
@@ -351,24 +353,31 @@ def _save_trace_events_to_file(
             ]
         }
 
-        # 保存为 JSON 文件
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(
-                trace_data,
-                f,
-                ensure_ascii=False,
-                indent=2,
-                default=str,
-            )
+        io_manager = _require_io_manager()
+        trace_root = str(os.getenv("DEEPSEARCH_TRACE_STORAGE_PATH", f"{IO_PATH_PREFIX}{DEEPSEARCH_TRACES_NAMESPACE}") or "").strip()
+        if not trace_root.startswith(IO_PATH_PREFIX):
+            raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must be an io:// virtual path")
+        root_key = io_key(trace_root)
+        if not root_key:
+            raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must not be empty")
+        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+        namespace = namespace or DEEPSEARCH_TRACES_NAMESPACE
+        key = f"{prefix}/{file_id}/{filename}".lstrip("/") if prefix else f"{file_id}/{filename}"
+
+        put = io_manager.put_json(
+            namespace=namespace,
+            key=key,
+            payload=trace_data,
+        )
 
         logger.info(
             "Saved %d trace events to %s (request_id=%s, run_id=%s)",
             len(trace_events),
-            file_path,
+            put.ref,
             request_id,
-            run_id or request_id
+            run_id or request_id,
         )
-        return str(file_path)
+        return str(put.ref)
     except Exception as e:
         logger.error("Failed to save trace events to file: %s", e, exc_info=True)
         return None
@@ -384,16 +393,17 @@ def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
         Dictionary containing trace data, or None if loading failed.
     """
     try:
-        file_path = Path(trace_file_path).expanduser()
-        if not file_path.exists():
-            logger.warning("Trace file not found: %s", trace_file_path)
-            return None
+        from app_registration import registrator
 
-        with open(file_path, "r", encoding="utf-8") as f:
-            trace_data = json.load(f)
-
-        logger.debug("Loaded trace events from %s", trace_file_path)
-        return trace_data
+        io_manager = registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for trace retrieval")
+        if not isinstance(trace_file_path, str) or not trace_file_path.strip().startswith("io://"):
+            raise ValueError("trace_file_path must be an io:// virtual path")
+        payload = io_manager.get_json(trace_file_path)
+        if payload is None:
+            logger.warning("Trace ref not found: %s", trace_file_path)
+        return payload
     except Exception as e:
         logger.error("Failed to load trace events from file %s: %s", trace_file_path, e, exc_info=True)
         return None

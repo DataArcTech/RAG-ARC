@@ -367,8 +367,8 @@ class ToolManagerConfig(BaseModel):
         default_factory=dict, description="Descriptors for remote-only tools."
     )
     artifact_dir: Optional[str] = Field(
-        "./local/deepsearch_artifacts",
-        description="Directory for persisted tool artifacts.",
+        "io://deepsearch_artifacts",
+        description="Virtual directory (io://...) for persisted DeepSearch artifacts (runs + tools).",
     )
     max_remote_evidences: int = Field(
         32,
@@ -631,8 +631,11 @@ class DeepSearchServiceConfig(AbstractConfig):
         if retriever_path:
             dense, bm25 = _build_search_retrievers(retriever_path)
             _inject_search_retrievers(payload, dense=dense, bm25=bm25)
-        if not payload.get("artifact_dir"):
+        artifact_dir = payload.get("artifact_dir")
+        if not str(artifact_dir or "").strip():
             raise ValueError("tool_manager.artifact_dir is required (no implicit default).")
+        if not str(artifact_dir).strip().startswith("io://"):
+            raise ValueError("tool_manager.artifact_dir must be an io:// virtual path")
         return DeepSearchToolManager(
             tool_configs=payload,
             telemetry_client=telemetry_client,
