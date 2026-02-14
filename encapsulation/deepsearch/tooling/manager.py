@@ -29,6 +29,7 @@ from core.deepsearch.tooling.errors import ToolErrorKind, ToolInvocationError, w
 from core.deepsearch.tooling.budget import ToolBudgetExceededError, attach_tool_budget_metadata, get_tool_budget
 from core.constants.io_namespaces import DEEPSEARCH_ARTIFACTS_NAMESPACE
 from framework.virtual_paths import IO_PATH_PREFIX, io_key
+from config.benchmark_mode import benchmark_mode_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +427,74 @@ class DeepSearchToolManager:
         """Invoke a tool through MCP and/or local registries according to the routing policy."""
 
         call_id = uuid.uuid4().hex
+        if benchmark_mode_enabled() and (str(tool_name or "") == "web.search" or str(tool_name or "").startswith("web.search.")):
+            descriptor = self._resolve_descriptor(tool_name)
+            request = self._build_request(payload)
+            summary = (
+                "web.search is disabled in benchmark/experiment mode (bench_mode=1). "
+                "Use file-grounded DeepSearch tools (search.file → toc/tree/section.select → read.pages) instead."
+            )
+            result = ToolResultPayload(
+                tool_name=str(tool_name or "web.search"),
+                namespace=(descriptor.namespace if descriptor else None),
+                channel=(descriptor.channel if descriptor else "graph"),
+                profile=(descriptor.profile if descriptor else "F"),
+                determinism=(descriptor.determinism if descriptor else "deterministic"),
+                summary=summary,
+                evidences=[],
+                diagnostics={
+                    "reason": "disabled_by_benchmark_mode",
+                    "bench_mode": True,
+                    "call_id": call_id,
+                },
+                think_notes=[],
+            )
+            await emit_trace(
+                "tool_call",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "plan_step": request.plan_step,
+                            "question": request.question,
+                            "extra": request.extra,
+                            "coverage_metrics": request.coverage_metrics,
+                            "access_scope": self._access_scope_payload(request.access_scope),
+                            "graph_context": (request.graph_context.model_dump(exclude_none=True) if request.graph_context else None),
+                            "routing": {"disabled_by_benchmark_mode": True},
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={"call_id": call_id, "tool_name": tool_name, "plan_step": request.plan_step},
+            )
+            await emit_trace(
+                "tool_response",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "route": "disabled",
+                            "result": result.model_dump(exclude_none=True),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "plan_step": request.plan_step,
+                    "ok": True,
+                    "route": "disabled",
+                },
+            )
+            return result
         descriptor = self._resolve_descriptor(tool_name)
         local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
         local_disabled = self._prefer_remote_for(tool_name)

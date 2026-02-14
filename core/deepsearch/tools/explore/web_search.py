@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
+from config.benchmark_mode import benchmark_mode_enabled
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_WEB_SNIPPET
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.web_search import TavilySearchClient, TavilySearchResult, aggregate_tavily_results
@@ -111,6 +112,11 @@ class WebSearchTool(GraphTool):
         )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
+        if benchmark_mode_enabled():
+            return ToolResult(
+                summary="web.search disabled: benchmark/experiment mode enabled (bench_mode=1).",
+                diagnostics={"reason": "disabled_by_benchmark_mode", "bench_mode": True},
+            )
         extra = request.extra or {}
         query = str(extra.get("query") or "").strip()
         if not query:
@@ -234,4 +240,3 @@ class WebSearchTool(GraphTool):
             if token in {"0", "false", "no", "n", "off"}:
                 return False
         return bool(raw)
-
