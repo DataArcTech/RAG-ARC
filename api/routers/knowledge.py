@@ -444,8 +444,31 @@ async def get_mineru_asset(
     base_output = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "io://parsed_files").strip()
     if not base_output.startswith("io://"):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="PARSER_OUTPUT_DIR must be io://")
+    backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
+    file_key = safe_leaf_name(file_id, default="document")
+    asset_ref = f"{base_output.rstrip('/')}/mineru/{file_key}/{token}"
+
+    if backend == "minio":
+        try:
+            import mimetypes
+            import app_registration
+            from io import BytesIO
+
+            io_manager = app_registration.registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for mineru asset access")
+            blob = io_manager.get_bytes(asset_ref)
+            if blob is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+            media_type, _ = mimetypes.guess_type(token)
+            return StreamingResponse(BytesIO(blob), media_type=media_type or "application/octet-stream")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to read asset: {exc}") from exc
+
     base_dir = Path(require_writable_dir(base_output)).expanduser().resolve()
-    file_dir = (base_dir / "mineru" / safe_leaf_name(file_id, default="document")).resolve()
+    file_dir = (base_dir / "mineru" / file_key).resolve()
 
     candidate = (file_dir / token).resolve()
     try:

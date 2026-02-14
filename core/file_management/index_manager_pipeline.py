@@ -1505,7 +1505,20 @@ class _IndexManagerPipelineMixin:
                 markdown_path = output_paths["markdown"]
                 if markdown_path:
                     try:
-                        from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+                        from framework.virtual_paths import is_io_path
+
+                        if is_io_path(markdown_path):
+                            try:
+                                import app_registration
+
+                                io_manager = app_registration.registrator.get_object("io_manager")
+                            except Exception:  # noqa: BLE001
+                                io_manager = None
+                            if io_manager is not None:
+                                text = io_manager.get_text_path(str(markdown_path))
+                                if text is not None:
+                                    return text
+                        from framework.virtual_paths import resolve_io_to_local_path
                         from pathlib import Path
 
                         local_path = (
@@ -1523,12 +1536,23 @@ class _IndexManagerPipelineMixin:
             md_path = parse_result["md_content_path"]
             if md_path:
                 try:
-                    from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+                    from framework.virtual_paths import is_io_path
+
+                    if is_io_path(md_path):
+                        try:
+                            import app_registration
+
+                            io_manager = app_registration.registrator.get_object("io_manager")
+                        except Exception:  # noqa: BLE001
+                            io_manager = None
+                        if io_manager is not None:
+                            text = io_manager.get_text_path(str(md_path))
+                            if text is not None:
+                                return text
+                    from framework.virtual_paths import resolve_io_to_local_path
                     from pathlib import Path
 
-                    local_path = (
-                        resolve_io_to_local_path(md_path) if is_io_path(md_path) else Path(str(md_path)).expanduser().resolve()
-                    )
+                    local_path = resolve_io_to_local_path(md_path) if is_io_path(md_path) else Path(str(md_path)).expanduser().resolve()
                     with open(local_path, "r", encoding="utf-8") as f:
                         return f.read()
                 except Exception as e:
