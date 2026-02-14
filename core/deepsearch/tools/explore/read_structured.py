@@ -323,7 +323,7 @@ class ReadPagesTool(GraphTool):
             median_chars = _median(list(page_char_counts.values()))
             median_chunks = _median([int(info.get("used_chunk_count") or 0) for info in page_diag.values() if isinstance(info, dict)])
 
-            reasons: set[str] = set()
+            page_reasons: dict[int, set[str]] = {}
             for _p, info in page_diag.items():
                 if not isinstance(info, dict):
                     continue
@@ -331,6 +331,7 @@ class ReadPagesTool(GraphTool):
                 char_count = int(info.get("char_count") or 0)
                 used_chunk_count = int(info.get("used_chunk_count") or 0)
 
+                reasons: set[str] = set()
                 if int(node_types.get("table") or 0) > 0 or int(node_types.get("equation") or 0) > 0:
                     reasons.add("table_or_equation_detected")
                 if list_min_chunks > 0 and int(node_types.get("list") or 0) >= list_min_chunks:
@@ -347,18 +348,69 @@ class ReadPagesTool(GraphTool):
                 elif median_chunks > 0 and mult > 1.0 and used_chunk_count >= int(median_chunks * mult):
                     reasons.add("dense_page_detected")
 
-            if reasons:
-                lo = max(0, int(page_start) - delta)
-                hi = int(page_end) + delta
-                if lo != page_start or hi != page_end:
+                if reasons:
+                    page_reasons[int(_p)] = reasons
+
+            # Directional continuity hint (navigation-only):
+            # - Prefer expanding only toward the boundary that shows "continuation risk"
+            #   (reduces needless reads vs symmetric expansion).
+            # - Only suggest bidirectional expansion when the evidence likely spans pages
+            #   (tables/equations on boundary pages).
+            edge_start = int(page_start)
+            edge_end = int(page_end)
+            start_reasons = page_reasons.get(edge_start, set())
+            end_reasons = page_reasons.get(edge_end, set())
+
+            def _has_table_or_equation(rs: set[str]) -> bool:
+                return "table_or_equation_detected" in rs
+
+            direction: str | None = None
+            used_reasons: set[str] = set()
+
+            if start_reasons or end_reasons:
+                if _has_table_or_equation(start_reasons) or _has_table_or_equation(end_reasons):
+                    direction = "both"
+                    used_reasons = set(start_reasons) | set(end_reasons)
+                    lo = max(0, edge_start - delta)
+                    hi = edge_end + delta
+                else:
+                    start_score = len(start_reasons)
+                    end_score = len(end_reasons)
+                    # Tie-breaker: prefer expanding forward (reading order).
+                    if end_score >= start_score:
+                        direction = "forward"
+                        used_reasons = set(end_reasons) if end_reasons else set(start_reasons)
+                        lo = edge_end + 1
+                        hi = edge_end + delta
+                    else:
+                        direction = "backward"
+                        used_reasons = set(start_reasons)
+                        lo = max(0, edge_start - delta)
+                        hi = edge_start - 1
+
+                if direction == "backward" and hi < lo:
+                    # Cannot expand backward beyond page 0; prefer a forward expansion instead.
+                    direction = "forward"
+                    used_reasons = set(end_reasons) if end_reasons else set(start_reasons)
+                    lo = edge_end + 1
+                    hi = edge_end + delta
+
+                if direction and lo <= hi:
                     suggested_expansions.append(
                         {
                             "tool": "read.pages",
-                            "args": {"file_id": file_id, "page_start": lo, "page_end": hi, "goal": "expand contiguous pages for continuity (navigation hint)"},
-                            "reason": ",".join(sorted(reasons)),
+                            "args": {
+                                "file_id": file_id,
+                                "page_start": lo,
+                                "page_end": hi,
+                                "goal": "expand contiguous pages for continuity (navigation hint)",
+                            },
+                            "direction": direction,
+                            "reason": ",".join(sorted(used_reasons)) if used_reasons else None,
                         }
                     )
-                    summary = summary.rstrip() + f" TIP: continuity hint ({','.join(sorted(reasons))}); consider expanding to p{lo}-p{hi}."
+                    reason_text = ",".join(sorted(used_reasons)) if used_reasons else "unknown"
+                    summary = summary.rstrip() + f" TIP: continuity hint (direction={direction}; {reason_text}); consider expanding to p{lo}-p{hi}."
         diagnostics = {
             **fetch_diag,
             "page_start": page_start,
