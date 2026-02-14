@@ -23,6 +23,158 @@ from . import initial as initial_mode
 from . import normal as normal_mode
 
 
+def _merge_page_ranges(ranges: List[tuple[int, int]]) -> List[tuple[int, int]]:
+    cleaned: List[tuple[int, int]] = []
+    for lo, hi in ranges:
+        try:
+            a = int(lo)
+            b = int(hi)
+        except Exception:
+            continue
+        if a < 0 or b < 0:
+            continue
+        if b < a:
+            a, b = b, a
+        cleaned.append((a, b))
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda item: (item[0], item[1]))
+    merged: List[tuple[int, int]] = [cleaned[0]]
+    for lo, hi in cleaned[1:]:
+        prev_lo, prev_hi = merged[-1]
+        if lo <= prev_hi + 1:
+            merged[-1] = (prev_lo, max(prev_hi, hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _compact_current_plan(items: Any, *, max_items: int) -> Any:
+    if max_items <= 0:
+        return items
+    if not isinstance(items, list):
+        return items
+    if len(items) <= max_items:
+        return items
+    incomplete_idx: List[int] = []
+    completed_idx: List[int] = []
+    for idx, item in enumerate(items):
+        checked = False
+        if isinstance(item, dict):
+            checked = bool(item.get("checked"))
+        else:
+            checked = bool(getattr(item, "checked", False))
+        (completed_idx if checked else incomplete_idx).append(idx)
+    keep: List[int] = list(incomplete_idx)
+    remaining = max_items - len(keep)
+    if remaining > 0 and completed_idx:
+        keep.extend(completed_idx[-remaining:])
+    keep = sorted(set(keep))[-max_items:]
+    return [items[idx] for idx in keep if 0 <= idx < len(items)]
+
+
+def _build_evidence_l0_digest(cards: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a deterministic, compact L0 digest for the evidence bank.
+
+    This is used to keep the think prompt small while preserving global awareness:
+    - L0: per-file page ranges + boundary hints (cheap)
+    - L1: recent evidence cards window (cheap)
+    - L2: full content in EvidencePool (read.pages), materialized only in report stage
+    """
+
+    max_files = int(getattr(tool_defaults, "THINK_EVIDENCE_L0_DIGEST_MAX_FILES", 0) or 0)
+    if max_files <= 0:
+        max_files = 6
+    max_ranges = int(getattr(tool_defaults, "THINK_EVIDENCE_L0_DIGEST_MAX_RANGES_PER_FILE", 0) or 0)
+    if max_ranges <= 0:
+        max_ranges = 6
+
+    file_rows: Dict[str, Dict[str, Any]] = {}
+    read_pages_cards = 0
+    other_cards = 0
+
+    for idx, card in enumerate(cards or []):
+        if not isinstance(card, dict):
+            continue
+        source = str(card.get("source") or "").strip()
+        prov = card.get("provenance") if isinstance(card.get("provenance"), dict) else {}
+        file_id = str(prov.get("source_file_id") or "").strip()
+        if not file_id:
+            other_cards += 1
+            continue
+        meta = prov.get("metadata") if isinstance(prov.get("metadata"), dict) else {}
+        filename = str(meta.get("filename") or "").strip() or None
+        page_start = prov.get("page_start")
+        page_end = prov.get("page_end")
+        try:
+            ps = int(page_start) if page_start is not None else None
+            pe = int(page_end) if page_end is not None else None
+        except Exception:
+            ps = None
+            pe = None
+
+        row = file_rows.get(file_id)
+        if row is None:
+            row = {
+                "file_id": file_id,
+                "filename": filename,
+                "read_pages_ranges": [],
+                "read_pages_cards": 0,
+                "last_seen_card_index": idx,
+                "boundary_node_types": {},
+            }
+            file_rows[file_id] = row
+        row["last_seen_card_index"] = idx
+        if filename and not row.get("filename"):
+            row["filename"] = filename
+
+        if source == "read.pages":
+            read_pages_cards += 1
+            row["read_pages_cards"] = int(row.get("read_pages_cards") or 0) + 1
+            if ps is not None and pe is not None:
+                row["read_pages_ranges"].append((ps, pe))
+            node_types = prov.get("node_types") if isinstance(prov.get("node_types"), dict) else {}
+            if node_types:
+                row["boundary_node_types"] = dict(node_types)
+        else:
+            other_cards += 1
+
+    # Order by recency (most recently seen cards first), keep a small top-N.
+    ordered = sorted(file_rows.values(), key=lambda r: int(r.get("last_seen_card_index") or 0), reverse=True)
+    ordered = ordered[:max_files]
+
+    out_files: List[Dict[str, Any]] = []
+    for row in ordered:
+        ranges = _merge_page_ranges(list(row.get("read_pages_ranges") or []))
+        # Keep only a few ranges (head + tail), but also report total range count.
+        if len(ranges) > max_ranges:
+            head = ranges[: max_ranges // 2]
+            tail = ranges[-(max_ranges - len(head)) :]
+            kept = head + tail
+        else:
+            kept = ranges
+        page_count = 0
+        for lo, hi in ranges:
+            page_count += max(0, (hi - lo + 1))
+        out_files.append(
+            {
+                "file_id": row.get("file_id"),
+                "filename": row.get("filename"),
+                "read_pages_page_count": page_count,
+                "read_pages_range_count": len(ranges),
+                "read_pages_ranges": [{"page_start": lo, "page_end": hi} for lo, hi in kept],
+                "boundary_node_types": row.get("boundary_node_types") or {},
+            }
+        )
+
+    return {
+        "total_cards": len(cards or []),
+        "read_pages_cards": int(read_pages_cards),
+        "other_cards": int(other_cards),
+        "files": out_files,
+    }
+
+
 class ThinkToolCall(BaseModel):
     tool_name: str = Field(..., min_length=1)
     tool_args: Dict[str, Any] = Field(default_factory=dict)
@@ -150,12 +302,20 @@ class ThinkTool(GraphTool):
 
         # Do not inline full evidence text in think prompts.
         # The EvidencePool/EvidenceBank stores full content; the think tool consumes metadata-only cards.
-        cards = evidence_cards(request.context_evidences or [])
+        all_cards = evidence_cards(request.context_evidences or [])
+        evidence_l0_digest = None
+        if bool(getattr(tool_defaults, "THINK_EVIDENCE_L0_DIGEST_ENABLED", True)):
+            evidence_l0_digest = _build_evidence_l0_digest(all_cards)
+        max_cards = int(getattr(tool_defaults, "THINK_CONTEXT_EVIDENCE_MAX_CARDS", 0) or 0)
+        cards = all_cards[-max_cards:] if max_cards > 0 else all_cards
         extra = request.extra or {}
         available_tools = extra.get("available_tools")
         previous_tool_call_results = extra.get("previous_tool_call_results")
         recent_tool_runs = extra.get("recent_tool_runs")
-        current_plan = extra.get("current_plan")
+        current_plan = _compact_current_plan(
+            extra.get("current_plan"),
+            max_items=int(getattr(tool_defaults, "THINK_CURRENT_PLAN_MAX_ITEMS", 0) or 0),
+        )
         tool_budget_snapshot = (
             (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None
         )
@@ -164,6 +324,8 @@ class ThinkTool(GraphTool):
             "question": request.question,
             "plan_step": request.plan_step,
             "context_evidences": cards,
+            "context_evidences_total": len(all_cards),
+            "evidence_l0_digest": evidence_l0_digest,
             "graph_context": context_snapshot,
             "tool_budget": tool_budget_snapshot,
             "budget_status": budget_status,
@@ -188,6 +350,7 @@ class ThinkTool(GraphTool):
         prompt_stats = {
             "prompt_chars": len(prompt_json),
             "evidence_cards": len(cards),
+            "evidence_cards_total": len(all_cards),
             "available_tools_count": len(available_tools) if isinstance(available_tools, list) else None,
             "previous_tool_call_results_count": len(previous_tool_call_results) if isinstance(previous_tool_call_results, list) else None,
             "recent_tool_runs_count": len(recent_tool_runs) if isinstance(recent_tool_runs, list) else None,

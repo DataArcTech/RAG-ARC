@@ -1,6 +1,7 @@
 import pytest
 
 from encapsulation.data_model.schema import Chunk
+from config.core.deepsearch import tool_defaults
 from core.deepsearch.tools import ToolRunRequest
 from core.deepsearch.tools.explore.search.file_search import FileSearchTool
 from core.graph_adapter.base import GraphAccessScope
@@ -104,6 +105,8 @@ async def test_file_search_rejects_unknown_owner(monkeypatch: pytest.MonkeyPatch
 @pytest.mark.asyncio
 async def test_file_search_llm_rerank_changes_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHARE_OWNER_ID", "share-1")
+    # This test validates the rerank mechanism itself; disable skip-by-margin for determinism.
+    monkeypatch.setattr(tool_defaults, "FILE_SEARCH_RERANK_SKIP_SCORE_MARGIN_RATIO", 0.0)
 
     dense = _StubDenseRetriever(
         {
@@ -143,6 +146,8 @@ async def test_file_search_llm_rerank_changes_order(monkeypatch: pytest.MonkeyPa
 @pytest.mark.asyncio
 async def test_file_search_llm_rerank_accepts_filename(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHARE_OWNER_ID", "share-1")
+    # This test validates the rerank mechanism itself; disable skip-by-margin for determinism.
+    monkeypatch.setattr(tool_defaults, "FILE_SEARCH_RERANK_SKIP_SCORE_MARGIN_RATIO", 0.0)
 
     dense = _StubDenseRetriever(
         {

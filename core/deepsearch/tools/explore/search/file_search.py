@@ -77,6 +77,64 @@ class _Hit:
 class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, GraphTool):
     """Relevant-file routing tool (evidence-driven)."""
 
+    @staticmethod
+    def _query_has_rerank_skip_block_cues(query: str) -> bool:
+        text = str(query or "")
+        lowered = text.lower()
+        cues = getattr(tool_defaults, "FILE_SEARCH_RERANK_SKIP_BLOCK_QUERY_CUES", ()) or ()
+        for cue in cues:
+            token = str(cue or "")
+            if not token:
+                continue
+            if token.lower() in lowered:
+                return True
+            if token in text:
+                return True
+        return False
+
+    @classmethod
+    def _should_skip_llm_rerank(cls, *, query: str, candidates: Sequence[Mapping[str, Any]]) -> tuple[bool, Dict[str, Any]]:
+        """Return (skip, diagnostics) for the rerank LLM call."""
+
+        diag: Dict[str, Any] = {"policy": "score_margin_ratio", "skip": False}
+        items = list(candidates or [])
+        if len(items) < 2:
+            diag["reason"] = "too_few_candidates"
+            return False, diag
+
+        try:
+            top1 = float(items[0].get("score") or 0.0)
+            top2 = float(items[1].get("score") or 0.0)
+        except Exception:
+            diag["reason"] = "invalid_scores"
+            return False, diag
+
+        threshold = float(getattr(tool_defaults, "FILE_SEARCH_RERANK_SKIP_SCORE_MARGIN_RATIO", 0.0) or 0.0)
+        threshold = max(0.0, threshold)
+        diag["threshold_ratio"] = threshold
+        diag["top1_score"] = top1
+        diag["top2_score"] = top2
+
+        if threshold <= 0:
+            diag["reason"] = "threshold_disabled"
+            return False, diag
+
+        if cls._query_has_rerank_skip_block_cues(query):
+            diag["reason"] = "blocked_by_query_cue"
+            return False, diag
+
+        # Skip condition: (top1 - top2) / top1 > threshold
+        # (more conservative than dividing by top2; reduces accidental skips).
+        denom = max(abs(top1), 1e-9)
+        margin_ratio = (top1 - top2) / denom
+        diag["margin_ratio"] = margin_ratio
+        if margin_ratio > threshold:
+            diag["skip"] = True
+            diag["reason"] = "confident_top1"
+            return True, diag
+        diag["reason"] = "margin_too_small"
+        return False, diag
+
     descriptor = ToolDescriptor(
         name="search.file",
         channel="graph",
@@ -287,16 +345,23 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         )
         rerank_top_k = self._resolve_top_k(request.extra.get("rerank_top_k"), tool_defaults.FILE_SEARCH_RERANK_TOP_K)
         if rerank_enabled and self.llm_connector is not None and all_results and rerank_top_k != 0:
+            skip, skip_diag = self._should_skip_llm_rerank(query=query, candidates=all_results)
+            if skip:
+                rerank_diag = {"enabled": False, **skip_diag}
+            else:
+                rerank_diag = {"enabled": True, **skip_diag}
             limited = all_results[:rerank_top_k] if rerank_top_k > 0 else all_results
-            reranked_ids, rerank_diag = await self._llm_rerank(query=query, candidates=limited)
-            if reranked_ids:
-                remaining = [row for row in all_results if row.get("file_id") not in reranked_ids]
-                order_map = {fid: idx for idx, fid in enumerate(reranked_ids)}
-                limited_sorted = sorted(
-                    [row for row in all_results if row.get("file_id") in order_map],
-                    key=lambda row: order_map.get(row.get("file_id"), 9999),
-                )
-                all_results = limited_sorted + remaining
+            if not skip:
+                reranked_ids, llm_diag = await self._llm_rerank(query=query, candidates=limited)
+                rerank_diag.update(llm_diag)
+                if reranked_ids:
+                    remaining = [row for row in all_results if row.get("file_id") not in reranked_ids]
+                    order_map = {fid: idx for idx, fid in enumerate(reranked_ids)}
+                    limited_sorted = sorted(
+                        [row for row in all_results if row.get("file_id") in order_map],
+                        key=lambda row: order_map.get(row.get("file_id"), 9999),
+                    )
+                    all_results = limited_sorted + remaining
         if rerank_diag:
             diagnostics["llm_rerank"] = rerank_diag
 

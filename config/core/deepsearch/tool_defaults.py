@@ -128,6 +128,15 @@ THINK_DEFAULT_MAX_TOKENS = 1200
 # The think prompt payload already includes structured fields (available_tools, recent_tool_runs, etc).
 # Including the entire `extra` dict is redundant and can bloat prompts significantly.
 THINK_INCLUDE_EXTRA_IN_PROMPT = False
+# Evidence cards can grow unbounded in long runs. Keep a small, recent window in the think prompt
+# and provide a deterministic L0 digest for the full evidence bank instead (OpenViking-style L0/L1/L2).
+#
+# 0 means "no truncation" (not recommended for long-doc runs).
+THINK_CONTEXT_EVIDENCE_MAX_CARDS = 64
+THINK_EVIDENCE_L0_DIGEST_ENABLED = True
+THINK_EVIDENCE_L0_DIGEST_MAX_FILES = 6
+THINK_EVIDENCE_L0_DIGEST_MAX_RANGES_PER_FILE = 6
+THINK_CURRENT_PLAN_MAX_ITEMS = 16
 
 # Prompt-variant + budget-status policies for think orchestration.
 THINK_PROMPT_VARIANTS_ENABLED = True
@@ -243,6 +252,30 @@ FILE_SEARCH_RRF_K = 60
 FILE_SEARCH_ENABLE_LLM_RERANK_DEFAULT = True
 FILE_SEARCH_RERANK_TOP_K = 10
 FILE_SEARCH_RERANK_TEMPERATURE = 0.1
+# Rerank skip rule: when the top candidate score is confidently above the runner-up,
+# we can skip the rerank LLM call to reduce latency/cost.
+#
+# IMPORTANT: this MUST be gated by query intent cues; for entity-specific existence/attribute questions
+# (e.g., "Does A have X?"), skipping rerank can route to "B has X" documents incorrectly.
+FILE_SEARCH_RERANK_SKIP_SCORE_MARGIN_RATIO = 0.3
+FILE_SEARCH_RERANK_SKIP_BLOCK_QUERY_CUES = (
+    "是否",
+    "有无",
+    "有没有",
+    "是否有",
+    "是否支持",
+    "是否包含",
+    "是否提供",
+    "does ",
+    "doesn't",
+    "does not",
+    "do ",
+    "is there",
+    "have ",
+    "has ",
+    "support",
+    "include",
+)
 # How many representative hits/snippets to show per candidate file in the human-readable summary.
 FILE_SEARCH_MAX_SNIPPETS_PER_FILE = 3
 # Hard cap for each snippet shown in the summary (diagnostics keep the full snippet returned by channel tool).
