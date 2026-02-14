@@ -35,7 +35,7 @@ from api.routers import mcp
 from api.routers import rag_inference
 from api.routers import session as session_router
 from api.routers import user as user_router
-from api.utils.logging_handler import DailySizeRotatingHandler
+from api.utils.logging_handler import IOManagerDailySizeRotatingHandler
 from asgi_correlation_id import CorrelationIdMiddleware, correlation_id
 from asgi_correlation_id.log_filters import CorrelationIdFilter
 from asgi_correlation_id.middleware import is_valid_uuid4
@@ -61,7 +61,6 @@ def _configure_logging() -> None:
     io_manager = app_registration.registrator.get_object("io_manager")
     if io_manager is None:
         raise RuntimeError("io_manager is required for logging")
-    log_dir = io_manager.resolve_local_dir(log_dir_virtual, ensure=True)
 
     fmt = "%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
     formatter = BeijingFormatter(fmt)
@@ -69,10 +68,11 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
-    handler = next((h for h in root.handlers if isinstance(h, DailySizeRotatingHandler)), None)
+    handler = next((h for h in root.handlers if isinstance(h, IOManagerDailySizeRotatingHandler)), None)
     if handler is None:
-        handler = DailySizeRotatingHandler(
-            base_dir=str(log_dir),
+        handler = IOManagerDailySizeRotatingHandler(
+            io_manager=io_manager,
+            base_dir=log_dir_virtual,
             maxBytes=10 * 1024 * 1024,
             backupCount=30,
             encoding="utf-8",
@@ -89,7 +89,7 @@ def _configure_logging() -> None:
 
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         target_logger = logging.getLogger(name)
-        if any(isinstance(h, DailySizeRotatingHandler) for h in target_logger.handlers):
+        if any(isinstance(h, IOManagerDailySizeRotatingHandler) for h in target_logger.handlers):
             continue
         target_logger.addHandler(handler)
 
