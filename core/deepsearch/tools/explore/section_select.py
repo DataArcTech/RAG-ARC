@@ -377,11 +377,17 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         # Persist queue source/scores for consumer routing decisions.
         self._attach_queue_meta(section_map, queue_items)
         if queue_ids:
-            entity_hints = await self._collect_entity_hints(
-                request=request,
-                file_id=file_id,
-                section_ids=queue_ids,
-            )
+            missing_hints = [sid for sid in queue_ids if sid not in entity_hints]
+            if missing_hints:
+                more_hints = await self._collect_entity_hints(
+                    request=request,
+                    file_id=file_id,
+                    section_ids=missing_hints,
+                )
+                if more_hints:
+                    merged = dict(entity_hints)
+                    merged.update(more_hints)
+                    entity_hints = merged
 
         consumer = await self._consume_queue(
             question=query,
@@ -455,6 +461,24 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
                 },
                 "why": "Project graph retrieval onto the selected subtree to avoid drifting across unrelated sections/files.",
             },
+            *(
+                [
+                    {
+                        "tool": "search.global.graph",
+                        "args": {
+                            "seed_entities": seed_entities,
+                            "focus_query": query,
+                            "top_k": int(getattr(tool_defaults, "SECTION_SELECT_CROSS_DOC_BRIDGE_TOP_K", 10) or 10),
+                            "use_ppr": False,
+                            "enable_llm_rerank": False,
+                            "enable_entity_fallback": False,
+                        },
+                        "why": "Cross-document graph bridging (routing only): discover other files likely related to the current subtree via shared entities; then route to the new file_id(s) and read.pages for evidence.",
+                    }
+                ]
+                if seed_entities and bool(getattr(tool_defaults, "SECTION_SELECT_CROSS_DOC_BRIDGE_SUGGEST_ENABLED", True))
+                else []
+            ),
             *suggested_reads,
         ]
         summary = self._build_summary(section_map, payload)
@@ -1117,6 +1141,60 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
 
     @staticmethod
     def _enrich_tree(tree: Dict[str, Any], section_map: Dict[str, Dict[str, Any]], entity_hints: Dict[str, List[str]]) -> Dict[str, Any]:
+        """Enrich and compact a section tree payload for LLM routing.
+
+        Goals:
+        - Preserve only fields used for routing (reduce prompt size + artifact IO).
+        - Attach summary/entity_hints from section_map when available.
+        """
+
+        def _compact_node(node: Dict[str, Any]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {}
+            section_id = str(node.get("section_id") or "").strip() or None
+            title = str(node.get("title") or "").strip() or None
+            path = node.get("path")
+            if not isinstance(path, str) or not path.strip():
+                path = node.get("section_path")
+            path = str(path or "").strip() or None
+            summary = str(node.get("summary") or "").strip() or None
+            page_start = node.get("page_start")
+            page_end = node.get("page_end")
+            node_types = node.get("node_types") if isinstance(node.get("node_types"), dict) else None
+            signals = node.get("signals") if isinstance(node.get("signals"), dict) else None
+            queue_meta = node.get("queue_meta") if isinstance(node.get("queue_meta"), dict) else None
+            entity_hint_list = node.get("entity_hints") if isinstance(node.get("entity_hints"), list) else None
+
+            if section_id is not None:
+                out["section_id"] = section_id
+            if title is not None:
+                out["title"] = title
+            if path is not None:
+                out["path"] = path
+            if summary is not None:
+                out["summary"] = summary
+            if isinstance(page_start, int):
+                out["page_start"] = page_start
+            if isinstance(page_end, int):
+                out["page_end"] = page_end
+            if node_types:
+                compact_types = {str(k): int(v) for k, v in node_types.items() if isinstance(v, int) and v > 0}
+                if compact_types:
+                    out["node_types"] = compact_types
+            if signals:
+                out["signals"] = dict(signals)
+            if queue_meta:
+                out["queue_meta"] = dict(queue_meta)
+            if entity_hint_list:
+                out["entity_hints"] = [str(x).strip() for x in entity_hint_list if str(x or "").strip()]
+            children = node.get("children") if isinstance(node.get("children"), list) else []
+            out_children: list[dict[str, Any]] = []
+            for child in children:
+                if isinstance(child, dict):
+                    out_children.append(_compact_node(child))
+            if out_children:
+                out["children"] = out_children
+            return out
+
         def _walk(node: Any) -> None:
             if not isinstance(node, dict):
                 return
@@ -1127,12 +1205,15 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
                     node["summary"] = meta.get("summary")
                 if sid in entity_hints:
                     node["entity_hints"] = entity_hints[sid]
+                if isinstance(meta.get("section_path"), str) and meta.get("section_path"):
+                    node.setdefault("path", meta.get("section_path"))
             children = node.get("children") if isinstance(node.get("children"), list) else []
             for child in children:
                 _walk(child)
 
         _walk(tree)
-        return tree
+        # Compact at the end to reduce prompt/diagnostic payload size.
+        return _compact_node(tree)
 
     @staticmethod
     def _parse_tree_search_output(payload: Any, section_map: Dict[str, Dict[str, Any]]) -> Tuple[List[str], Dict[str, Any]]:
@@ -1166,6 +1247,9 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         candidates_payload: List[Dict[str, Any]],
         section_map: Dict[str, Dict[str, Any]],
     ) -> Tuple[List[str], Dict[str, Any]]:
+        max_tokens = int(getattr(tool_defaults, "SECTION_SELECT_TREE_SEARCH_MAX_TOKENS", 0) or 0)
+        if max_tokens <= 0:
+            max_tokens = None
         prompt = SECTION_TREE_SEARCH_USER_PROMPT.format(
             question=question,
             file_id=file_id,
@@ -1181,7 +1265,7 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             messages=messages,
             expected="dict",
             temperature=self.temperature,
-            max_tokens=None,
+            max_tokens=max_tokens,
         )
         node_list, parse_diag = self._parse_tree_search_output(parsed, section_map)
         diagnostics = {"parse": parse_diag}
@@ -1341,6 +1425,9 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         selected_supplementary: List[str],
         section_map: Dict[str, Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+        max_tokens = int(getattr(tool_defaults, "SECTION_SELECT_CONSUMER_MAX_TOKENS", 0) or 0)
+        if max_tokens <= 0:
+            max_tokens = None
         prompt = SECTION_SELECT_CONSUMER_USER_PROMPT.format(
             question=question,
             primary_ids=json.dumps(selected_primary, ensure_ascii=False),
@@ -1356,7 +1443,7 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             messages=messages,
             expected="dict",
             temperature=self.temperature,
-            max_tokens=None,
+            max_tokens=max_tokens,
         )
         return self._parse_consumer_output(parsed, section_map)
 

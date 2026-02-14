@@ -283,6 +283,14 @@ SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_TOP_K_CHUNKS = 12
 # Hybrid tree search loop controls
 SECTION_SELECT_MAX_ROUNDS = 4
 SECTION_SELECT_CONSUMER_BATCH_SIZE = 6
+SECTION_SELECT_TREE_SEARCH_MAX_TOKENS = 600
+SECTION_SELECT_CONSUMER_MAX_TOKENS = 700
+
+# Cross-document bridging (suggested actions only; not auto-executed).
+# When enabled, section.select may suggest a global graph search to discover related files
+# via seed_entities; this keeps GFPE: graph for routing, read.pages for evidence.
+SECTION_SELECT_CROSS_DOC_BRIDGE_SUGGEST_ENABLED = True
+SECTION_SELECT_CROSS_DOC_BRIDGE_TOP_K = 10
 # Value-based tree search (PageIndex hybrid tree search)
 # - Use chunk-level retrieval to score sections by NodeScore = sum(scores) / sqrt(N+1)
 # - Channels default to dense+bm25 for speed; can be tuned here.
