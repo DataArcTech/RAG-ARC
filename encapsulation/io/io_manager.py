@@ -1,8 +1,5 @@
 import json
 import logging
-import os
-import threading
-import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Sequence
@@ -10,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 from encapsulation.database.file_db.base import FileDB
 from encapsulation.io.io_refs import from_io_ref, to_io_ref
 from framework.module import AbstractModule
-from framework.virtual_paths import is_io_path, localdb_root_dir, resolve_io_to_local_path
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path, resolve_io_to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +28,19 @@ def _join_key(parts: Sequence[str]) -> str:
     return "/".join(items)
 
 
+def _split_io_virtual_path(value: str) -> tuple[str, str]:
+    token = str(value or "").strip()
+    if not token.startswith(IO_PATH_PREFIX):
+        raise ValueError(f"expected an io:// path, got: {value!r}")
+    root = io_key(token)
+    parts = [p for p in root.split("/") if p]
+    if not parts:
+        raise ValueError(f"empty io:// path: {value!r}")
+    namespace = parts[0]
+    key = "/".join(parts[1:])
+    return namespace, key
+
+
 @dataclass(frozen=True)
 class IOManagerPutResult:
     ref: str
@@ -45,10 +55,8 @@ class IOManager(AbstractModule):
         super().__init__(config)
         self._blob_store: FileDB = config.file_db_config.build()
         self._default_namespace = str(getattr(config, "default_namespace", "io") or "io").strip() or "io"
-        self._mirror_thread: threading.Thread | None = None
-        self._mirror_stop = threading.Event()
-        self._mirror_state: dict[str, tuple[int, int]] = {}
-        self._maybe_start_localdb_mirror()
+        # NOTE: MinIO mode must not rely on local filesystem staging. Any legacy drain/mirror
+        # workflows should be opt-in and handled by explicit tooling, not by default runtime.
 
     @property
     def blob_store(self) -> FileDB:
@@ -57,7 +65,10 @@ class IOManager(AbstractModule):
     def resolve_local_path(self, io_path: str, *, ensure_parent: bool = False) -> Path:
         """Resolve an `io://...` virtual path into a local filesystem path.
 
-        Phase 1: maps to LocalDB root (`IO_STORE_BASE_PATH`, default `./data/localdb`).
+        Mapping behavior:
+        - `IO_STORE_BACKEND=localdb`: maps to LocalDB root (`IO_STORE_BASE_PATH`, default `./data/localdb`).
+        - `IO_STORE_BACKEND=minio`: maps to staging root (`IO_STORE_STAGE_BASE_PATH`) for most namespaces,
+          but routes selected local-persist namespaces (e.g. index dirs) to `IO_STORE_BASE_PATH`.
         """
 
         if not is_io_path(io_path):
@@ -74,135 +85,6 @@ class IOManager(AbstractModule):
         if ensure:
             path.mkdir(parents=True, exist_ok=True)
         return path
-
-    def _maybe_start_localdb_mirror(self) -> None:
-        """Mirror LocalDB filesystem artifacts into the active blob store (MinIO) when enabled.
-
-        Motivation:
-        - Some parts of the system still require filesystem directories (e.g. rotating logs,
-          certain parser artifacts, debug dumps). They write under `IO_STORE_BASE_PATH`
-          via `io://...` mapping + `require_writable_dir(...)`.
-        - In MinIO mode, we still want those files to end up in object storage.
-
-        This is a best-effort background mirror:
-        - It uploads stable files under LocalDB root to object storage keys matching their
-          relative path under `IO_STORE_BASE_PATH`.
-        - It excludes large/unsupported local-only directories (e.g., FAISS/BM25/graph indexes).
-        """
-
-        backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
-        if backend != "minio":
-            return
-
-        enabled = str(os.getenv("IO_MIRROR_LOCALDB_ENABLED", "true") or "true").strip().lower()
-        if enabled not in {"1", "true", "yes"}:
-            return
-
-        try:
-            root = localdb_root_dir()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("IOManager LocalDB mirror disabled: failed to resolve LocalDB root: %s", exc)
-            return
-
-        if self._mirror_thread is not None:
-            return
-
-        interval_s = float(os.getenv("IO_MIRROR_SYNC_INTERVAL_SECONDS", "10") or "10")
-        min_age_s = float(os.getenv("IO_MIRROR_MIN_FILE_AGE_SECONDS", "3") or "3")
-        exclude_raw = str(
-            os.getenv(
-                "IO_MIRROR_EXCLUDE_PREFIXES",
-                ",".join(
-                    [
-                        "unified_faiss_index",
-                        "section_faiss_index",
-                        "unified_bm25_index",
-                        "section_bm25_index",
-                        "graph_index_neo4j",
-                    ]
-                ),
-            )
-            or ""
-        )
-        exclude_prefixes = [p.strip().strip("/").replace("\\", "/") for p in exclude_raw.split(",") if p.strip()]
-
-        def _loop() -> None:
-            logger.info(
-                "IOManager LocalDB mirror enabled (root=%s, interval=%.1fs, min_age=%.1fs, exclude_prefixes=%s)",
-                root,
-                interval_s,
-                min_age_s,
-                exclude_prefixes,
-            )
-            while not self._mirror_stop.is_set():
-                try:
-                    self._mirror_localdb_once(root=root, exclude_prefixes=exclude_prefixes, min_age_s=min_age_s)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("IOManager LocalDB mirror tick failed: %s", exc)
-                self._mirror_stop.wait(timeout=max(interval_s, 0.5))
-
-        self._mirror_thread = threading.Thread(target=_loop, name="iomanager-localdb-mirror", daemon=True)
-        self._mirror_thread.start()
-
-    def _mirror_localdb_once(self, *, root: Path, exclude_prefixes: Sequence[str], min_age_s: float) -> None:
-        now = time.time()
-        root = Path(root).resolve()
-        if not root.exists() or not root.is_dir():
-            return
-
-        exclude_prefixes_norm = [str(p or "").strip().strip("/").replace("\\", "/") for p in exclude_prefixes if str(p or "").strip()]
-
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-            base = Path(dirpath)
-            try:
-                rel_dir = base.relative_to(root).as_posix()
-            except Exception:
-                rel_dir = ""
-            if rel_dir and any(rel_dir == p or rel_dir.startswith(p.rstrip("/") + "/") for p in exclude_prefixes_norm):
-                dirnames[:] = []
-                continue
-
-            # Prune excluded subdirectories early to avoid expensive scans.
-            pruned: list[str] = []
-            for name in list(dirnames):
-                rel_child = f"{rel_dir.rstrip('/')}/{name}".lstrip("/") if rel_dir else name
-                if any(rel_child == p or rel_child.startswith(p.rstrip("/") + "/") for p in exclude_prefixes_norm):
-                    pruned.append(name)
-                    dirnames.remove(name)
-            if pruned:
-                logger.debug("IOManager LocalDB mirror: pruned dirs under %s: %s", rel_dir or ".", pruned)
-
-            for filename in filenames:
-                full = base / filename
-                try:
-                    rel = full.relative_to(root).as_posix()
-                except Exception:
-                    continue
-                if not rel or rel.startswith("."):
-                    continue
-                if any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in exclude_prefixes_norm):
-                    continue
-
-                try:
-                    st = full.stat()
-                except OSError:
-                    continue
-
-                if min_age_s > 0 and (now - st.st_mtime) < min_age_s:
-                    continue
-
-                prev = self._mirror_state.get(rel)
-                current = (int(st.st_mtime_ns), int(st.st_size))
-                if prev == current:
-                    continue
-
-                try:
-                    payload = full.read_bytes()
-                except OSError:
-                    continue
-
-                self._blob_store.store(rel, payload, content_type=None)
-                self._mirror_state[rel] = current
 
     def _full_key(self, *, namespace: Optional[str], key: str) -> str:
         ns = str(namespace or self._default_namespace).strip() or self._default_namespace
@@ -221,6 +103,21 @@ class IOManager(AbstractModule):
         storage_key, was_overwritten = self._blob_store.store(full_key, payload, content_type=content_type, **kwargs)
         return IOManagerPutResult(ref=to_io_ref(storage_key), key=str(storage_key), overwritten=bool(was_overwritten))
 
+    def put_bytes_path(
+        self,
+        io_path: str,
+        *,
+        payload: bytes,
+        content_type: Optional[str] = None,
+        **kwargs: Any,
+    ) -> IOManagerPutResult:
+        """Store bytes to an `io://<namespace>/<key>` virtual path."""
+
+        namespace, key = _split_io_virtual_path(io_path)
+        if not key:
+            raise ValueError(f"IOManager.put_bytes_path requires a full object path, got dir-like path: {io_path!r}")
+        return self.put_bytes(namespace=namespace, key=key, payload=payload, content_type=content_type, **kwargs)
+
     def get_bytes(self, ref_or_key: str, **kwargs: Any) -> Optional[bytes]:
         key = _normalize_key(from_io_ref(ref_or_key))
         if not key:
@@ -229,6 +126,13 @@ class IOManager(AbstractModule):
             return self._blob_store.retrieve(key, **kwargs)
         except KeyError:
             return None
+
+    def get_bytes_path(self, io_path: str, **kwargs: Any) -> Optional[bytes]:
+        """Retrieve bytes from an `io://...` virtual path."""
+
+        if not is_io_path(io_path):
+            raise ValueError(f"expected an io:// path, got: {io_path!r}")
+        return self.get_bytes(io_path, **kwargs)
 
     def put_text(
         self,
@@ -242,6 +146,20 @@ class IOManager(AbstractModule):
     ) -> IOManagerPutResult:
         payload = (text or "").encode(encoding)
         return self.put_bytes(key=key, payload=payload, namespace=namespace, content_type=content_type, **kwargs)
+
+    def put_text_path(
+        self,
+        io_path: str,
+        *,
+        text: str,
+        encoding: str = "utf-8",
+        content_type: str = "text/plain; charset=utf-8",
+        **kwargs: Any,
+    ) -> IOManagerPutResult:
+        namespace, key = _split_io_virtual_path(io_path)
+        if not key:
+            raise ValueError(f"IOManager.put_text_path requires a full object path, got dir-like path: {io_path!r}")
+        return self.put_text(namespace=namespace, key=key, text=text, encoding=encoding, content_type=content_type, **kwargs)
 
     def get_text(
         self,
@@ -258,6 +176,18 @@ class IOManager(AbstractModule):
             return data.decode(encoding, errors=errors)
         except Exception:
             return data.decode("utf-8", errors="replace")
+
+    def get_text_path(
+        self,
+        io_path: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        **kwargs: Any,
+    ) -> Optional[str]:
+        if not is_io_path(io_path):
+            raise ValueError(f"expected an io:// path, got: {io_path!r}")
+        return self.get_text(io_path, encoding=encoding, errors=errors, **kwargs)
 
     def put_json(
         self,
@@ -277,6 +207,19 @@ class IOManager(AbstractModule):
             content_type="application/json; charset=utf-8",
             **kwargs,
         )
+
+    def put_json_path(
+        self,
+        io_path: str,
+        *,
+        payload: Dict[str, Any],
+        encoding: str = "utf-8",
+        **kwargs: Any,
+    ) -> IOManagerPutResult:
+        namespace, key = _split_io_virtual_path(io_path)
+        if not key:
+            raise ValueError(f"IOManager.put_json_path requires a full object path, got dir-like path: {io_path!r}")
+        return self.put_json(namespace=namespace, key=key, payload=payload, encoding=encoding, **kwargs)
 
     def get_json(self, ref_or_key: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
         text = self.get_text(ref_or_key, **kwargs)
@@ -312,6 +255,13 @@ class IOManager(AbstractModule):
         full_prefix = _join_key([ns, str(prefix or "").strip()]) if prefix else _normalize_key(ns)
         keys = self._blob_store.list_keys(prefix=full_prefix, limit=limit)
         return [to_io_ref(k) for k in keys]
+
+    def list_keys_path(self, io_dir: str, *, limit: Optional[int] = None) -> list[str]:
+        """List keys under an `io://<namespace>/<prefix>` virtual directory."""
+
+        namespace, key_prefix = _split_io_virtual_path(io_dir)
+        prefix = key_prefix.rstrip("/")
+        return self.list_keys(namespace=namespace, prefix=prefix if prefix else None, limit=limit)
 
     def iter_bytes(
         self,
