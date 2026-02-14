@@ -57,6 +57,47 @@ refresh_env_derived
 HOST_UID=${HOST_UID_OVERRIDE:-$(id -u)}
 HOST_GID=${HOST_GID_OVERRIDE:-$(id -g)}
 
+should_start_minio() {
+    load_dotenv
+    refresh_env_derived
+    local backend="${IO_STORE_BACKEND:-localdb}"
+    [[ "${backend,,}" == "minio" ]]
+}
+
+should_manage_minio_container() {
+    if ! should_start_minio; then
+        return 1
+    fi
+    local managed="${MINIO_MANAGED_BY_DOCKER:-false}"
+    [[ "${managed,,}" == "true" || "${managed}" == "1" || "${managed,,}" == "yes" ]]
+}
+
+ensure_docker_image() {
+    local image="$1"
+    if [[ -z "${image}" ]]; then
+        return 1
+    fi
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+        return 0
+    fi
+    print_message "$YELLOW" "⬇️  Pulling Docker image: ${image}"
+    docker pull "${image}"
+}
+
+minio_runtime_env_args() {
+    if ! should_start_minio; then
+        return 0
+    fi
+
+    local endpoint="${MINIO_ENDPOINT:-rag-arc-minio:9000}"
+    local bucket="${MINIO_BUCKET:-test-bucket}"
+    local secure="${MINIO_SECURE:-false}"
+    local username="${MINIO_USERNAME:-root}"
+    local password="${MINIO_PASSWORD:-12345678}"
+
+    echo "-e MINIO_ENDPOINT=${endpoint} -e MINIO_BUCKET=${bucket} -e MINIO_SECURE=${secure} -e MINIO_USERNAME=${username} -e MINIO_PASSWORD=${password}"
+}
+
 prepare_host_directories() {
     print_message "$BLUE" "🧱 Ensuring host directories (data/local/models) exist and are writable..."
     for dir in data local models; do
@@ -67,6 +108,14 @@ prepare_host_directories() {
         fi
         chmod -R ug+rwx "$dir" 2>/dev/null || true
     done
+
+    if should_manage_minio_container; then
+        mkdir -p "data/minio"
+        if command -v chown >/dev/null 2>&1; then
+            sudo -n chown -R "$HOST_UID:$HOST_GID" "data/minio" 2>/dev/null || chown -R "$HOST_UID:$HOST_GID" "data/minio" || true
+        fi
+        chmod -R ug+rwx "data/minio" 2>/dev/null || true
+    fi
     echo ""
 }
 # Color definitions
@@ -127,6 +176,11 @@ check_images() {
         if ! docker images | grep -q "rag_arc"; then
             MISSING_IMAGES+=("rag_arc:v1 or rag_arc:v1-gpu")
         fi
+    fi
+
+    if should_manage_minio_container; then
+        MINIO_IMAGE=${MINIO_IMAGE:-quay.io/minio/minio:latest}
+        ensure_docker_image "${MINIO_IMAGE}" || MISSING_IMAGES+=("${MINIO_IMAGE}")
     fi
 
     if [ ${#MISSING_IMAGES[@]} -gt 0 ]; then
@@ -227,8 +281,21 @@ stop_old_containers() {
         docker rm rag-arc-neo4j 2>/dev/null || true
         print_message "$GREEN" "✅ Old neo4j container cleaned"
     fi
+
+    # Stop and remove old MinIO container (optional, only when managed by this script)
+    if should_manage_minio_container; then
+        OLD_MINIO=$(docker ps -a -q -f name=rag-arc-minio)
+        if [ ! -z "$OLD_MINIO" ]; then
+            print_message "$YELLOW" "⚠️  Found old minio container, stopping and removing..."
+            docker stop rag-arc-minio 2>/dev/null || true
+            docker rm rag-arc-minio 2>/dev/null || true
+            print_message "$GREEN" "✅ Old minio container cleaned"
+        fi
+    else
+        OLD_MINIO=""
+    fi
     
-    if [ -z "$OLD_APP" ] && [ -z "$OLD_POSTGRES" ] && [ -z "$OLD_REDIS" ] && [ -z "$OLD_NEO4J" ]; then
+    if [ -z "$OLD_APP" ] && [ -z "$OLD_POSTGRES" ] && [ -z "$OLD_REDIS" ] && [ -z "$OLD_NEO4J" ] && [ -z "$OLD_MINIO" ]; then
         print_message "$GREEN" "✅ No old containers found"
     fi
     echo ""
@@ -335,6 +402,45 @@ start_neo4j() {
     echo ""
 }
 
+# Start MinIO container (optional; used when IO_STORE_BACKEND=minio)
+start_minio() {
+    load_dotenv
+    refresh_env_derived
+    if ! should_manage_minio_container; then
+        return 0
+    fi
+
+    print_message "$BLUE" "🪣 Starting MinIO (S3-compatible object store)..."
+
+    MINIO_IMAGE=${MINIO_IMAGE:-quay.io/minio/minio:latest}
+    MINIO_ROOT_USER=${MINIO_ROOT_USER:-${MINIO_USERNAME:-root}}
+    MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-${MINIO_PASSWORD:-12345678}}
+    MINIO_HOST_PORT=${MINIO_HOST_PORT:-9000}
+    MINIO_CONSOLE_HOST_PORT=${MINIO_CONSOLE_HOST_PORT:-9001}
+    EXPOSE_MINIO=${EXPOSE_MINIO:-false}
+
+    MINIO_PORTS=""
+    if [[ "${EXPOSE_MINIO,,}" == "true" ]]; then
+        MINIO_PORTS="-p 127.0.0.1:${MINIO_HOST_PORT}:9000 -p 127.0.0.1:${MINIO_CONSOLE_HOST_PORT}:9001"
+        print_message "$GREEN" "   Exposing MinIO on localhost:${MINIO_HOST_PORT} (console ${MINIO_CONSOLE_HOST_PORT})"
+    else
+        print_message "$YELLOW" "ℹ️  MinIO ports not exposed (set EXPOSE_MINIO=true in .env to expose)"
+    fi
+
+    docker run -d \
+        --name rag-arc-minio \
+        --network rag-arc-network \
+        --user ${HOST_UID}:${HOST_GID} \
+        ${MINIO_PORTS} \
+        -e MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
+        -e MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}" \
+        -v "$(pwd)/data/minio:/data" \
+        "${MINIO_IMAGE}" server /data --console-address ":9001"
+
+    print_message "$GREEN" "✅ MinIO started"
+    echo ""
+}
+
 # Wait for database to be ready
 wait_for_database() {
     load_dotenv
@@ -402,6 +508,8 @@ start_app() {
     fi
     
     # Build run command
+    local minio_env_args=""
+    minio_env_args="$(minio_runtime_env_args)"
     RUN_CMD="docker run -d \
         --name rag-arc-app \
         --network rag-arc-network \
@@ -420,6 +528,7 @@ start_app() {
         -e NEO4J_DATABASE=neo4j \
         -e TASK_QUEUE_MODE=${TASK_QUEUE_MODE:-celery} \
         --env-file .env \
+        ${minio_env_args} \
         -v $(pwd)/data:/rag_arc/data \
         -v $(pwd)/local:/rag_arc/local \
         -v $(pwd)/models:/rag_arc/models"
@@ -454,6 +563,9 @@ start_celery_worker() {
 
     print_message "$BLUE" "🧵 Starting Celery worker ${name} (queue=${queue})..."
 
+    local minio_env_args=""
+    minio_env_args="$(minio_runtime_env_args)"
+
     docker run -d \
         --name "${name}" \
         --network rag-arc-network \
@@ -471,6 +583,7 @@ start_celery_worker() {
         -e NEO4J_DATABASE=neo4j \
         -e TASK_QUEUE_MODE=celery \
         --env-file .env \
+        ${minio_env_args} \
         -v $(pwd)/data:/rag_arc/data \
         -v $(pwd)/local:/rag_arc/local \
         -v $(pwd)/models:/rag_arc/models \
@@ -502,6 +615,9 @@ start_mq_sync_daemon() {
 
     print_message "$BLUE" "🧾 Starting MQ Redis→Postgres sync daemon..."
 
+    local minio_env_args=""
+    minio_env_args="$(minio_runtime_env_args)"
+
     docker run -d \
         --name rag-arc-mq-sync \
         --network rag-arc-network \
@@ -515,6 +631,7 @@ start_mq_sync_daemon() {
         -e REDIS_PORT=6379 \
         -e TASK_QUEUE_MODE=celery \
         --env-file .env \
+        ${minio_env_args} \
         ${APP_IMAGE} \
         uv run python scripts/mq_tools/message_queue_sync.py \
             --daemon \
@@ -690,6 +807,11 @@ show_services_info() {
     print_message "$GREEN" "   - PostgreSQL: rag-arc-postgres:5432"
     print_message "$GREEN" "   - Redis: rag-arc-redis:6379"
     print_message "$GREEN" "   - Neo4j: bolt://rag-arc-neo4j:7687"
+    if should_manage_minio_container; then
+        print_message "$GREEN" "   - MinIO: http://rag-arc-minio:9000"
+    elif should_start_minio; then
+        print_message "$YELLOW" "   - MinIO: external (${MINIO_ENDPOINT:-<set MINIO_ENDPOINT>})"
+    fi
     echo ""
 
     if [[ "${EXPOSE_POSTGRES:-true}" == "true" ]]; then
@@ -702,6 +824,10 @@ show_services_info() {
     if [[ "${EXPOSE_NEO4J:-false}" == "true" ]]; then
         print_message "$GREEN" "   - Neo4j Browser: http://localhost:${NEO4J_HTTP_PORT:-7474}"
         print_message "$GREEN" "   - Neo4j Bolt: bolt://localhost:${NEO4J_BOLT_PORT:-7687}"
+    fi
+    if should_manage_minio_container && [[ "${EXPOSE_MINIO:-false}" == "true" ]]; then
+        print_message "$GREEN" "   - MinIO API: http://localhost:${MINIO_HOST_PORT:-9000}"
+        print_message "$GREEN" "   - MinIO Console: http://localhost:${MINIO_CONSOLE_HOST_PORT:-9001}"
     fi
     echo ""
 
@@ -760,6 +886,7 @@ main() {
     prepare_host_directories
     stop_old_containers
     create_network
+    start_minio
     start_postgres
     start_redis
     start_neo4j

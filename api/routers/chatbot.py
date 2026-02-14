@@ -562,25 +562,6 @@ def _content_disposition_inline(filename: str) -> str:
         return f"inline; filename*=UTF-8''{encoded}"
 
 
-def _resolve_local_file_path(blob_key: str) -> Path:
-    preferred = os.getenv("LOCAL_FILE_STORAGE_PATH", "./data/files")
-    runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
-    fallback = os.path.join(runtime_root, "files")
-    base_dir = Path(ensure_writable_dir(preferred, fallback))
-    safe_key = (blob_key or "").replace("..", "").lstrip("/")
-    return base_dir / safe_key
-
-
-def _localdb_path_from_instance(local_db: Any, blob_key: str) -> Path | None:
-    get_full_path = getattr(local_db, "_get_full_path", None)
-    if callable(get_full_path):
-        try:
-            return Path(get_full_path(blob_key))
-        except Exception:  # noqa: BLE001
-            return None
-    return None
-
-
 async def _stream_minio_object(minio_db: Any, blob_key: str, chunk_size: int = 1024 * 256):
     response = None
     try:
@@ -826,62 +807,21 @@ async def get_static_file(
             path = await anyio.to_thread.run_sync(blob_store._get_full_path, blob_key)
             logger.debug(f"[FILE_ACCESS] Primary path resolved: file_id={file_id}, blob_key={blob_key}, path={path}, exists={path.exists()}")
             
-            if path.exists():
-                logger.info(f"[FILE_ACCESS] File access success (primary path): file_id={file_id}, blob_key={blob_key}, path={path}")
-                return FileResponse(path, media_type=content_type, headers=headers)
-            else:
-                logger.debug(f"[FILE_ACCESS] Primary path not found, trying fallback: file_id={file_id}, path={path}")
-                # Compatibility 1: if path doesn't exist, try constructing from env base path (legacy data).
-                # Some historical files may have been stored under a different base_path.
-                base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
-                base_dir = Path(base_path).expanduser().resolve()
-                safe_key = str(blob_key).replace("..", "").lstrip("/")
-                fallback_path = base_dir / safe_key
-                logger.debug(f"[FILE_ACCESS] Fallback path: file_id={file_id}, base_path={base_path}, base_dir={base_dir}, safe_key={safe_key}, fallback_path={fallback_path}, exists={fallback_path.exists()}")
-                
-                if fallback_path.exists():
-                    logger.info(f"[FILE_ACCESS] File access success (fallback path): file_id={file_id}, blob_key={blob_key}, path={fallback_path}")
-                    return FileResponse(fallback_path, media_type=content_type, headers=headers)
-                
-                # Compatibility 2: try repairing blob_key if it contains duplicated path segments.
-                # blob_key may include paths like "RAG-ARC/local/files_chatKB_test/<filename>.pdf".
-                # We need to extract the actual filename segment.
-                logger.debug(f"[FILE_ACCESS] Fallback path not found, trying path fix: file_id={file_id}, safe_key={safe_key}")
-                key_parts = safe_key.split("/")
-                logger.debug(f"[FILE_ACCESS] Key parts: file_id={file_id}, key_parts={key_parts}, len={len(key_parts)}")
-                if len(key_parts) >= 3:  # files/{prefix}/{file_id}/...
-                    # Try using only the last segment (filename).
-                    file_id_part = key_parts[2] if len(key_parts) > 2 else ""
-                    filename_part = key_parts[-1] if key_parts else ""
-                    logger.debug(f"[FILE_ACCESS] Extracted parts: file_id={file_id}, file_id_part={file_id_part}, filename_part={filename_part}")
-                    # If filename contains separators, keep basename only.
-                    if "/" in filename_part or "\\" in filename_part:
-                        original_filename_part = filename_part
-                        filename_part = Path(filename_part).name
-                        logger.debug(f"[FILE_ACCESS] Filename contains path, extracted basename: file_id={file_id}, original={original_filename_part}, basename={filename_part}")
-                    # Rebuild blob_key: files/{prefix}/{file_id}/{basename}
-                    if file_id_part and filename_part:
-                        fixed_key = f"files/{key_parts[1]}/{file_id_part}/{filename_part}"
-                        logger.debug(f"[FILE_ACCESS] Fixed key generated: file_id={file_id}, original_blob_key={blob_key}, fixed_key={fixed_key}")
-                        # First try LocalDB resolution.
-                        fixed_path = await anyio.to_thread.run_sync(blob_store._get_full_path, fixed_key)
-                        logger.debug(f"[FILE_ACCESS] Fixed path via LocalDB: file_id={file_id}, fixed_key={fixed_key}, fixed_path={fixed_path}, exists={fixed_path.exists()}")
-                        if fixed_path.exists():
-                            logger.info(f"[FILE_ACCESS] File access success (fixed path via LocalDB): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_path}")
-                            return FileResponse(fixed_path, media_type=content_type, headers=headers)
-                        # Then try env base path concatenation.
-                        fixed_fallback_path = base_dir / fixed_key
-                        logger.debug(f"[FILE_ACCESS] Fixed path via env: file_id={file_id}, fixed_key={fixed_key}, fixed_fallback_path={fixed_fallback_path}, exists={fixed_fallback_path.exists()}")
-                        if fixed_fallback_path.exists():
-                            logger.info(f"[FILE_ACCESS] File access success (fixed path via env): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_fallback_path}")
-                            return FileResponse(fixed_fallback_path, media_type=content_type, headers=headers)
-                    else:
-                        logger.debug(f"[FILE_ACCESS] Cannot fix key: file_id={file_id}, file_id_part={file_id_part}, filename_part={filename_part}")
-                else:
-                    logger.debug(f"[FILE_ACCESS] Key parts insufficient for fixing: file_id={file_id}, key_parts={key_parts}, len={len(key_parts)}")
-                
-                logger.warning(f"[FILE_ACCESS] File access failed: all paths not found for file_id={file_id}, blob_key={blob_key}, primary_path={path}, fallback_path={fallback_path}")
+            if not path.exists():
+                logger.warning(
+                    "[FILE_ACCESS] File access failed: not found (file_id=%s, blob_key=%s, path=%s)",
+                    file_id,
+                    blob_key,
+                    path,
+                )
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+            logger.info(
+                "[FILE_ACCESS] File access success: file_id=%s blob_key=%s path=%s",
+                file_id,
+                blob_key,
+                path,
+            )
+            return FileResponse(path, media_type=content_type, headers=headers)
 
         if blob_store_type == "MinIODB":
             logger.debug(f"[FILE_ACCESS] Using MinIODB for file access: file_id={file_id}, blob_key={blob_key}")

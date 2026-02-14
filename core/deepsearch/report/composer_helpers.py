@@ -357,6 +357,71 @@ def _trim_text(value: Any) -> str | None:
     return str(value)
 
 
+def stable_sort_authoritative_evidences(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deterministically order authoritative evidences for prompt stability.
+
+    Rationale: evidence chunks can be accumulated concurrently during the agent loop. The report stage
+    should not inherit nondeterministic arrival order, otherwise prompts drift and cache hit rates drop.
+
+    Policy:
+    - read.pages first, ordered by (source_file_id, page_start, page_end, chunk_id)
+    - then other authoritative sources, ordered by (source, chunk_id)
+    """
+
+    if not items:
+        return []
+
+    def _file_id(ev: Dict[str, Any]) -> str:
+        prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+        if isinstance(prov, dict):
+            fid = prov.get("source_file_id")
+            if isinstance(fid, str) and fid.strip():
+                return fid.strip()
+            meta = prov.get("metadata") if isinstance(prov.get("metadata"), dict) else {}
+            if isinstance(meta, dict):
+                fid2 = meta.get("source_file_id")
+                if isinstance(fid2, str) and fid2.strip():
+                    return fid2.strip()
+        return ""
+
+    def _page_pair(ev: Dict[str, Any]) -> tuple[int, int]:
+        prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+        page_start = None
+        page_end = None
+        if isinstance(prov, dict):
+            page_start = prov.get("page_start")
+            page_end = prov.get("page_end")
+            meta = prov.get("metadata") if isinstance(prov.get("metadata"), dict) else {}
+            if page_start is None and isinstance(meta, dict):
+                page_start = meta.get("page_start") or meta.get("page_number") or meta.get("page")
+            if page_end is None and isinstance(meta, dict):
+                page_end = meta.get("page_end") or meta.get("page_number_end")
+        try:
+            ps = int(page_start) if page_start is not None else 0
+        except Exception:
+            ps = 0
+        try:
+            pe = int(page_end) if page_end is not None else ps
+        except Exception:
+            pe = ps
+        return ps, pe
+
+    def _chunk_id(ev: Dict[str, Any]) -> str:
+        return str(ev.get("chunk_id") or ev.get("evidence_id") or "").strip()
+
+    def _key(ev: Dict[str, Any]) -> tuple[int, str, int, int, str, str]:
+        source = str(ev.get("source") or "").strip()
+        chunk_id = _chunk_id(ev)
+        if source == "read.pages":
+            fid = _file_id(ev)
+            ps, pe = _page_pair(ev)
+            return (0, fid, ps, pe, chunk_id, source)
+        return (1, source, 0, 0, chunk_id, source)
+
+    normalized = [ev for ev in items if isinstance(ev, dict)]
+    return sorted(normalized, key=_key)
+
+
 def _slim_diagnostics(
     payload: Any,
     *,
@@ -387,4 +452,5 @@ __all__ = [
     "_slim_diagnostics",
     "_split_authoritative_evidences",
     "_trim_text",
+    "stable_sort_authoritative_evidences",
 ]

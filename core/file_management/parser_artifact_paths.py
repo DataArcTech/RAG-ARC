@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Optional, Tuple
 
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
+
 
 def _norm_posix(path: Path) -> str:
     # Persist as POSIX for cross-platform stability (API + DB).
@@ -21,6 +23,18 @@ def relativize_under_base(path: str | None, *, base_dir: str | None) -> Optional
     if not base:
         return token
 
+    if is_io_path(token) and is_io_path(base):
+        try:
+            key = io_key(token)
+            base_key = io_key(base)
+            if key == base_key:
+                return "."
+            if key.startswith(base_key.rstrip("/") + "/"):
+                return key[len(base_key.rstrip("/")) + 1 :]
+        except Exception:
+            return token
+        return token
+
     try:
         p = Path(token).expanduser().resolve()
         b = Path(base).expanduser().resolve()
@@ -39,12 +53,19 @@ def resolve_under_base(path: str | None, *, base_dir: str | None) -> Optional[st
     token = str(path or "").strip()
     if not token:
         return None
+    if is_io_path(token):
+        return token
     p = Path(token).expanduser()
     if p.is_absolute():
         return str(p)
     base = str(base_dir or "").strip()
     if not base:
         return str(p)
+    if is_io_path(base):
+        base_key = io_key(base)
+        suffix = token.lstrip("/").replace("\\", "/")
+        joined = "/".join([base_key.rstrip("/"), suffix]) if suffix else base_key
+        return f"{IO_PATH_PREFIX}{joined.lstrip('/')}"
     return str((Path(base).expanduser().resolve() / p).resolve())
 
 
@@ -58,4 +79,3 @@ def extract_md_path_and_output_dir(parse_result: object) -> Tuple[Optional[str],
     md_path = str(md_path).strip() if isinstance(md_path, str) and md_path.strip() else None
     output_dir = str(output_dir).strip() if isinstance(output_dir, str) and output_dir.strip() else None
     return md_path, output_dir
-

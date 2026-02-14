@@ -147,16 +147,20 @@ Benchmark/实验模式：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store；相对路径按项目根目录解析）。 |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录（相对路径按项目根目录解析）。 |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录（相对路径按项目根目录解析）。 |
-| `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
-| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | FAISS 索引**基目录**。启用 owner-scoped（默认开启）后，真实索引文件位于 `FAISS_INDEX_PATH/owners/<owner_id>/`。 |
+| `FILE_STORE_BASE_PATH` | `io://file_store` | 原始文件虚拟路径前缀（io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | 解析结果 blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
+| `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Chunk blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
+| `IO_STORE_BACKEND` | `localdb` | `io://...` 的后端选择器。`localdb` 会把数据落到本地文件系统（位于 `IO_STORE_BASE_PATH`）。`minio` 会把 IO 对象持久化到 MinIO；除本地专用 namespace（通常是索引）外，默认不提供本地文件系统映射。 |
+| `IO_STORE_BASE_PATH` | `./data/localdb` | io:// 的本地持久化根目录：当 `IO_STORE_BACKEND=localdb` 时所有 io:// 都映射到这里；当 `IO_STORE_BACKEND=minio` 时仅 `IO_LOCAL_PERSIST_NAMESPACES` 中的 namespace 会映射到这里（通常是索引）。 |
+| `IO_LOCAL_PERSIST_NAMESPACES` | `unified_faiss_index,section_faiss_index,unified_bm25_index,section_bm25_index,graph_index_neo4j,graph_index` | 逗号分隔的 io:// namespace 列表：即使在 `IO_STORE_BACKEND=minio` 下也仍然落到 `IO_STORE_BASE_PATH`（通常是索引目录）。 |
+| `IO_STORE_DEFAULT_NAMESPACE` | `io` | IOManager 默认 namespace（key 前缀）。 |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
+| `FAISS_INDEX_PATH` | `io://unified_faiss_index` | FAISS 索引虚拟基目录（io://...，映射到 LocalDB）。启用 owner-scoped 后真实索引位于 `.../owners/<owner_id>/`。 |
 | `FAISS_TWO_STAGE_ENABLED` | `false` | 启用 FAISS HNSW 的两阶段检索：先 ANN 预召回，再对候选做 exact 重打分（稳定排序）。仅在索引 `index_type=hnsw` 时生效。 |
 | `FAISS_TWO_STAGE_PREFETCH_K` | `200` | 两阶段 HNSW 预召回候选池大小；若小于 `k`，将自动使用 `k`。 |
 | `FAISS_MIN_TRAIN_SIZE` | `100` | IVF 训练保护（仅当 `index_type=ivf` 相关）。训练 IVF 至少需要这么多向量，同时也必须 >= `nlist`。 |
-| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | BM25 索引**基目录**。启用 owner-scoped（默认开启）后，真实索引文件位于 `BM25_INDEX_PATH/owners/<owner_id>/`。 |
-| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。Chunk embedding 的落盘默认按 owner 分片保存在 `GRAPH_STORAGE_PATH/chunk_embeddings/`（每个 owner 一份），fact/entity 的 FAISS 目录本身已按 owner 分片在 `GRAPH_STORAGE_PATH/{fact_index,entity_index}/<owner_id>/`。Graph indexing 的 embedding cache（sqlite，默认开启）存放在 `GRAPH_STORAGE_PATH/embedding_cache/<owner_id>/embeddings.sqlite3`。 |
+| `BM25_INDEX_PATH` | `io://unified_bm25_index` | BM25 索引虚拟基目录（io://...，映射到 LocalDB）。启用 owner-scoped 后真实索引位于 `.../owners/<owner_id>/`。 |
+| `GRAPH_STORAGE_PATH` | `io://graph_index_neo4j` | 图索引/向量缓存虚拟基目录（io://...，映射到 LocalDB）。owner 分片路径保持不变（`.../chunk_embeddings/`、`.../embedding_cache/`）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。可选：金融/保险部署可切换到 `./fin_kg_schema.yml`。 |
 | `GRAPH_INDEX_EMBED_FAILURE_POLICY` | `zero` | 图索引 embedding 失败处理策略：`zero`（少量失败用零向量占位并记录日志）/`raise`（任意失败直接失败任务）。 |
@@ -168,7 +172,7 @@ Benchmark/实验模式：
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
 - **路径一致性（重要）**：索引写入与在线检索必须使用同一套 `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`。在 owner-scoped 模式下，这意味着需要保持相同的**基目录**（系统会自动解析到 `.../owners/<owner_id>/`）。若索引写在 A 目录、检索读 B 目录，会出现“文件/Chunk 在 Neo4j 与 chunk_store 中存在，但召回命中的是错误文件”的现象。
-- **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
+- **E2E 隔离**：真实服务测试建议把 `IO_STORE_BASE_PATH` 指向隔离目录，避免污染默认 LocalDB 根目录（`./data/localdb`）。
 - **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
 - **HippoRAG PPR 方向性（重要）**：为了通用检索稳定性，`pruned_hipporag_neo4j_retrieval.ppr_directed_mode` 默认 `off`（无向 PPR）。`KG_SCHEMA_PATH` 中的 `direction_sensitive_relations` 仍会被 DeepSearch / fast graph tools 用于方向约束与校验；如需在“检索阶段”启用有向 PPR，请在 `config/json_configs/rag_inference*.json` 或 `config/json_configs/deepsearch_service.json` 的 `retriever_config` 中显式设置 `ppr_directed_mode=auto/on`。
 
@@ -178,11 +182,11 @@ Benchmark/实验模式：
 | --- | --- | --- |
 | `PAGEINDEX_ENABLED` | `true` | 是否启用 PageIndex 章节树构建与检索过滤（离线 ingest 生成）。 |
 | `SECTION_INDEX_ENABLED` | `true` | 是否启用章节索引（section index）入库。 |
-| `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | 章节向量索引目录（独立于主 FAISS）。 |
+| `SECTION_FAISS_INDEX_PATH` | `io://section_faiss_index` | 章节向量索引虚拟基目录（io://...，映射到 LocalDB；独立于主 FAISS）。 |
 | `SECTION_FAISS_INDEX_TYPE` | `flat` | PageIndex **章节向量索引**的 FAISS `index_type`（不影响主 `FAISS_INDEX_PATH`）。支持：`flat` / `ivf` / `hnsw`。 |
 | `SECTION_FAISS_TWO_STAGE_ENABLED` | _(空/继承)_ | 覆盖 PageIndex **章节向量索引**的 `two_stage_enabled`（仅章节索引生效）。仅在章节索引使用 `index_type=hnsw` 时生效。支持：`true` / `false`。 |
 | `SECTION_FAISS_TWO_STAGE_PREFETCH_K` | _(空/继承)_ | 覆盖 PageIndex **章节向量索引**的 `two_stage_prefetch_k`（仅章节索引生效）。要求 >= 1。 |
-| `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | 章节 BM25 索引目录（独立于主 BM25）。 |
+| `SECTION_BM25_INDEX_PATH` | `io://section_bm25_index` | 章节 BM25 索引虚拟基目录（io://...，映射到 LocalDB；独立于主 BM25）。 |
 | `SECTION_PATH_DELIMITER` | `" > "` | PageIndex 章节路径的分隔符。 |
 | `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index）。 |
 | `SECTION_SUMMARY_MODEL` | _(空)_ | 章节摘要模型；为空则优先使用 `LOW_COST_MODEL`，再回退主聊天模型。 |
@@ -352,9 +356,9 @@ Benchmark/实验模式：
 | `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TaskRun KV 的 TTL（秒）。 |
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
-| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Redis 内联存储的最大 JSON 字节数；超过后自动外置存储（local/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。该限制同时作用于任务结果与超大 progress/trace payload。 |
-| `MQ_RESULT_STORE` | `local` | 结果外置存储后端：`local` 或 `minio`。 |
-| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | `local` 外置结果的基础目录。 |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Redis 内联存储的最大 JSON 字节数；超过后自动外置存储（IOManager/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。该限制同时作用于任务结果与超大 progress/trace payload。 |
+| `MQ_RESULT_STORE` | `io` | 结果外置存储后端：`io`（IOManager，Phase 1 映射到 LocalDB）或 `minio`（TODO）。 |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | `MQ_RESULT_STORE=io` 时的外置结果虚拟目录（io://...，映射到 LocalDB）。 |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
 | `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
 | `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
@@ -408,7 +412,8 @@ Benchmark/实验模式：
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | 图推理策略。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录（在 `config/json_configs/deepsearch_service.json` 中也作为默认的 run artifacts 根目录使用）。 |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch 产物虚拟目录（runs + tools；io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
+| `DEEPSEARCH_LLM_DUMP_PATH` | _(空)_ | 可选调试输出根目录：当设置为 `io://...` 虚拟目录时，DeepSearch 会通过 IOManager 写入 LLM 调试事件（request/response/error），每个事件一个 JSON 对象。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
@@ -458,12 +463,13 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | _(空)_ | JWT 签名秘钥。留空时 API 会自动生成并写入 `RAGARC_RUNTIME_DIR`（默认：`./local/runtime/jwt_secret_key`）；生产环境建议显式配置。 |
+| `JWT_SECRET_KEY` | _(空)_ | JWT 签名秘钥。留空时 API 会自动生成并写入 `RAGARC_RUNTIME_DIR`（默认：`io://runtime/jwt_secret_key`，映射到 LocalDB）；生产环境建议显式配置。 |
 | `JWT_DEFAULT_TENANT_ID` | `default` | 多租户部署时的默认 tenant_id（当登录态/JWT 未注入 tenant_id 时使用）。单租户部署可保持默认值。 |
 | `RAGARC_DEFAULT_TENANT_ID` | `default` | `JWT_DEFAULT_TENANT_ID` 的历史别名（优先级更低）。 |
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
+| `RAGARC_LOG_DIR` | `io://logs` | 日志虚拟目录（io://...），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | 应用启动依赖检查模式（Postgres/Redis/Neo4j）：`off`/`warn`/`strict`。注意：当前 API 启动在该变量未设置时默认走 `strict`。 |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | 知识库索引任务依赖检查模式（`/knowledge/*` 索引与 Celery 任务使用）：`off`/`warn`/`strict`。单测为保持 hermetic 默认设置为 `off`。 |
 | `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | `Knowledge.is_file_active` 是否额外校验底层 blob 是否存在（避免返回“元数据存在但文件已丢失”的引用来源，前端下载会 404）。 |
@@ -473,7 +479,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/图片解析方式：`native`（不做 OCR；仅 PDF 文本抽取）、`dotsocr`（本地 DotsOCR OCR）、`mineru`（远程 MinerU 服务）。 |
-| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | 统一解析输出目录（native/dots_ocr/vlm_ocr 会落到子目录）。 |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 统一解析输出虚拟目录（io://...，native/dots_ocr/vlm_ocr/mineru 会落到子目录），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
 | `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖。 |
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
@@ -496,8 +502,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `TOKEN_CHUNK_OVERLAP` | `100` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL 不可分割保护：URL 前后保留的 token 数（`token_chunker`/`semantic_unit_chunker` fallback 生效）。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
-| `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录（相对路径按项目根目录解析）。 |
+| `RAGARC_RUNTIME_DIR` | `io://runtime` | 运行时虚拟根目录（io://...，映射到 LocalDB；用于 JWT secret 等运行期稳定文件）。 |
+| `LOCAL_FILE_STORAGE_PATH` | `io://files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认虚拟根目录（io://...，映射到 LocalDB）。 |
 
 ## 9. Neo4j 图数据库
 
@@ -515,15 +521,16 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `MINIO_USERNAME` | `ROOTNAME` | MinIO 用户名/Access Key（仅在启用 MinIO 集成时使用）。 |
-| `MINIO_PASSWORD` | `CHANGEME123` | MinIO 密码/Secret Key。 |
+| `MINIO_MANAGED_BY_DOCKER` | `false` | 当 `IO_STORE_BACKEND=minio` 时，是否由 `./start.sh` 启动本地 MinIO 容器（`true/false`）。若为 `false`，需要通过 `MINIO_ENDPOINT` 提供外部 MinIO。 |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint（`host:port`）。若使用 Docker 管理的 MinIO（`MINIO_MANAGED_BY_DOCKER=true`），容器内一般用 `rag-arc-minio:9000`（建议在 `.env` 显式设置 `MINIO_ENDPOINT=rag-arc-minio:9000`）。本地 `uv run` 进程通常是 `localhost:9000`。 |
+| `MINIO_BUCKET` | `test-bucket` | MinIO bucket 名称（用于 blob 存取）。 |
+| `MINIO_SECURE` | `false` | 连接 MinIO 时是否使用 HTTPS（`true`/`false`）。 |
+| `MINIO_USERNAME` | `root` | MinIO 用户名/Access Key（server bootstrap + client 的兜底凭据）。 |
+| `MINIO_PASSWORD` | `12345678` | MinIO 密码/Secret Key（长度需 ≥ 8）。 |
+| `MINIO_ROOT_USER` | _(空)_ | 可选：MinIO 官方 root 用户名（server 侧推荐）。设置后优先于 `MINIO_USERNAME`。 |
+| `MINIO_ROOT_PASSWORD` | _(空)_ | 可选：MinIO 官方 root 密码。设置后优先于 `MINIO_PASSWORD`。 |
 
-MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
-- `MINIO_ENDPOINT`
-- `MINIO_BUCKET`
-- `MINIO_SECURE`
-
-默认本地/Docker 部署不需要配置这些项。
+默认本地/Docker 部署（LocalDB 映射）不需要配置这些项。
 
 ## 11. 构建 / 高级运行参数
 
@@ -550,7 +557,7 @@ MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 | --- | --- | --- |
 | `QUICK_START_OWNER_ID` | _(空)_ | 可选：quick-start 示例使用的 owner id。 |
 | `RAG_OUTPUT_DIR` | _(空)_ | 可选：RAG pipeline 输出目录。 |
-| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(空)_ | 可选：DeepSearch 实验输出目录。 |
+| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(空)_ | 可选：DeepSearch 实验快照输出根目录。必须是 `io://...` 虚拟目录；通过 IOManager 持久化（Phase 1 映射到 LocalDB）。 |
 | `DEEPSEARCH_CITATION_ALIASES` | _(空)_ | 可选：引用别名映射（JSON）。 |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(空)_ | 可选：工具审计记录标签。 |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(空)_ | 可选：MCP 工具审计记录标签。 |

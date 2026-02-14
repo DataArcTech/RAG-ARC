@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+
 logger = logging.getLogger(__name__)
 
 _SAFE_LEAF_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
@@ -94,14 +96,20 @@ def ensure_writable_dir(
     When preferred_path is not writable, fall back to fallback_path (or
     ./local/runtime/<preferred_name>) and return the resolved location.
     """
-    preferred = Path(preferred_path).expanduser().resolve()
+    preferred = (
+        resolve_io_to_local_path(preferred_path)
+        if is_io_path(preferred_path)
+        else Path(preferred_path).expanduser().resolve()
+    )
     if _test_write_access(preferred) and _tree_is_writable(preferred):
         return str(preferred)
 
-    runtime_root = Path(
-        fallback_path
-        or os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
-    ).expanduser().resolve()
+    fallback_candidate = fallback_path or os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
+    runtime_root = (
+        resolve_io_to_local_path(fallback_candidate)
+        if is_io_path(fallback_candidate)
+        else Path(fallback_candidate).expanduser().resolve()
+    )
 
     fallback = runtime_root
     if fallback_path is None:
@@ -127,7 +135,7 @@ def require_writable_dir(path: str) -> str:
     Unlike `ensure_writable_dir`, this function does not attempt any fallback paths.
     """
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_io_to_local_path(path) if is_io_path(path) else Path(path).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.NamedTemporaryFile(dir=target, prefix=".perm_probe_", delete=True) as handle:

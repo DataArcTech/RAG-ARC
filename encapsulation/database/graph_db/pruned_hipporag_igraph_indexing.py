@@ -11,6 +11,7 @@ import igraph as ig
 
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,9 @@ class _PrunedHippoRAGIGraphIndexingMixin:
         """
         from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 
-        storage_path = getattr(self.config, 'storage_path', './data/graph_index')
+        storage_path = getattr(self, "storage_path", None) or getattr(self.config, "storage_path", "io://graph_index")
+        if is_io_path(storage_path):
+            storage_path = str(resolve_io_to_local_path(storage_path))
         os.makedirs(storage_path, exist_ok=True)
 
         # Initialize fact index (FAISS Flat for exact search)
@@ -783,4 +786,3 @@ class _PrunedHippoRAGIGraphIndexingMixin:
             'chunk_index_size': len(self.chunk_embeddings),
             'synonymy_edges_enabled': self.add_synonymy_edges
         }
-

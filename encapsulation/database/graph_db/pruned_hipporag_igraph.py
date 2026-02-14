@@ -31,6 +31,7 @@ from encapsulation.database.utils.sqlite_threadlocal import ThreadLocalSQLiteCon
 from core.utils.path_guard import ensure_writable_dir
 from core.utils.rwlock import RWLock
 from framework.shared_module_decorator import shared_module
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
 
 if TYPE_CHECKING:
     from config.encapsulation.database.graph_db.pruned_hipporag_igraph_config import PrunedHippoRAGIGraphConfig
@@ -109,6 +110,19 @@ class PrunedHippoRAGIGraphStore(
         # Initialize undirected graph
         self.graph = ig.Graph(directed=False)
 
+        # Storage configuration (resolve virtual io:// into a local directory early).
+        storage_path = getattr(config, "storage_path", "io://graph_index")
+        if is_io_path(storage_path):
+            storage_path = str(resolve_io_to_local_path(storage_path))
+        fallback_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
+        if is_io_path(fallback_root):
+            fallback_root = str(resolve_io_to_local_path(fallback_root))
+        fallback_storage = os.path.join(str(fallback_root), "graph_index")
+        resolved_storage = ensure_writable_dir(str(storage_path), fallback_storage)
+        self.storage_path = resolved_storage
+        setattr(self.config, "storage_path", resolved_storage)
+        self.index_name = getattr(config, "index_name", "index")
+
         # Initialize FAISS indices for facts and entities
         self._init_faiss_indices()
 
@@ -124,17 +138,6 @@ class PrunedHippoRAGIGraphStore(
         self.node_to_idx = {}  # node_id -> graph_index
         self.idx_to_node = {}  # graph_index -> node_id
         self.node_to_node_stats = defaultdict(float)  # (node_id, node_id) -> edge_weight
-
-        # Storage configuration
-        storage_path = getattr(config, 'storage_path', './data/graph_index')
-        fallback_storage = os.path.join(
-            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
-            "graph_index"
-        )
-        resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
-        self.storage_path = resolved_storage
-        setattr(self.config, 'storage_path', resolved_storage)
-        self.index_name = getattr(config, 'index_name', 'index')
 
         # Synonymy edge configuration
         self.add_synonymy_edges = getattr(config, 'add_synonymy_edges', False)

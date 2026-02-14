@@ -7,6 +7,7 @@ from config.application.rag_inference_config import RAGInferenceConfig
 from config.application.deepsearch_config import DeepSearchServiceConfig
 from config.application.session_config import ChatSessionConfig
 from config.application.chat_message_config import ChatMessageManagerConfig
+from config.encapsulation.io.io_manager_config import IOManagerConfig
 from framework.register import Register
 
 # 日志配置已在main.py中完成，这里不再重复配置
@@ -68,6 +69,12 @@ def _register_app(app_name: str, config_path: str, config_type):
 
 
 def initialize():
+    _register_app(
+        "io_manager",
+        _resolve_config_path("IO_MANAGER_CONFIG_PATH", "config/json_configs/io_manager.json"),
+        IOManagerConfig,
+    )
+
     rag_config_path = _resolve_config_path(
         "RAG_INFERENCE_CONFIG_PATH",
         "config/json_configs/rag_inference.json",

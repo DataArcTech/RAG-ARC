@@ -243,3 +243,19 @@ class MinerUServiceClient:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     out.write(chunk)
+
+    def download_task_file_bytes(self, task_id: str, rel_path: str) -> bytes:
+        """Download a MinerU task artifact as bytes (no local filesystem writes)."""
+
+        if not self.base_url:
+            raise ValueError("MinerU base_url is empty (set MINERU_SERVER_URL).")
+        self._ensure_valid_base_url()
+        rel_path = str(rel_path).lstrip("/")
+        resp = self._request_with_retry(
+            "GET",
+            f"{self.base_url}/task/{task_id}/file/{rel_path}",
+            timeout=self.timeout_s,
+            stream=False,
+        )
+        resp.raise_for_status()
+        return resp.content

@@ -27,6 +27,8 @@ from core.deepsearch.utils.file_scope import filter_evidences, resolve_file_scop
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.tooling.errors import ToolErrorKind, ToolInvocationError, wrap_tool_exception
 from core.deepsearch.tooling.budget import ToolBudgetExceededError, attach_tool_budget_metadata, get_tool_budget
+from core.constants.io_namespaces import DEEPSEARCH_ARTIFACTS_NAMESPACE
+from framework.virtual_paths import IO_PATH_PREFIX, io_key
 
 logger = logging.getLogger(__name__)
 
@@ -404,10 +406,21 @@ class DeepSearchToolManager:
         self.max_remote_evidences = int(self.tool_configs["max_remote_evidences"])
         self.max_remote_context_chars = int(self.tool_configs["max_remote_context_chars"])
         self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
-        artifact_dir = self.tool_configs.get("artifact_dir")
-        if not artifact_dir:
-            raise ValueError("tool_configs.artifact_dir is required (no implicit fallback).")
-        self.artifact_dir = Path(str(artifact_dir)).expanduser()
+        from app_registration import registrator
+
+        self._io_manager = registrator.get_object("io_manager")
+        if self._io_manager is None:
+            raise RuntimeError("io_manager is required for tool artifact persistence")
+
+        configured = str(self.tool_configs.get("artifact_dir") or f"{IO_PATH_PREFIX}{DEEPSEARCH_ARTIFACTS_NAMESPACE}").strip()
+        if not configured.startswith(IO_PATH_PREFIX):
+            raise ValueError("tool_configs.artifact_dir must be an io:// virtual path")
+        root_key = io_key(configured)
+        if not root_key:
+            raise ValueError("tool_configs.artifact_dir must not be empty")
+        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+        self._artifact_namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
+        self._artifact_prefix = prefix
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
         """Invoke a tool through MCP and/or local registries according to the routing policy."""
@@ -1035,27 +1048,17 @@ class DeepSearchToolManager:
         artifacts.append({"type": "file", "path": artifact_path})
 
     def _persist_artifact(self, tool_name: str, payload: ToolResultPayload) -> Optional[str]:
-        if not self.artifact_dir:
-            return None
-        try:
-            self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            logger.warning("Failed to create artifact directory %s: %s", self.artifact_dir, exc)
-            return None
         file_name = f"{int(time.time() * 1000)}_{tool_name.replace('.', '_')}_{uuid.uuid4().hex}.json"
-        artifact_path = self.artifact_dir / file_name
-        try:
-            with artifact_path.open("w", encoding="utf-8") as handle:
-                # Tool payloads can carry UUID/path-like objects inside provenance/diagnostics.
-                # Persist a JSON-safe representation so artifact logging never breaks tool execution.
-                json.dump(
-                    json_safe(payload.model_dump(exclude_none=True)),
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                )
-        except OSError as exc:
-            logger.warning("Failed to persist tool artifact for %s: %s", tool_name, exc)
-            return None
-        return str(artifact_path)
+        key_prefix = str(self._artifact_prefix or "").strip().lstrip("/")
+        tool_prefix = tool_name.replace(".", "_")
+        key = (
+            f"{key_prefix}/tool_artifacts/{tool_prefix}/{file_name}".lstrip("/")
+            if key_prefix
+            else f"tool_artifacts/{tool_prefix}/{file_name}"
+        )
+        put = self._io_manager.put_json(
+            namespace=self._artifact_namespace,
+            key=key,
+            payload=json_safe(payload.model_dump(exclude_none=True)),
+        )
+        return str(put.ref)

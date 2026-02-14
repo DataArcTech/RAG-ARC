@@ -5,7 +5,7 @@
             "type": "dense",
             "index_config": {
                 "type": "faiss",
-                "index_path": "./data/unified_faiss_index",
+                "index_path": "io://unified_faiss_index",
                 "metric": "cosine",
                 "index_type": "flat",
                 "normalize_L2": true,
@@ -22,14 +22,14 @@
             "type": "tantivy_bm25",
             "index_config": {
                 "type": "bm25_builder",
-                "index_path": "./data/unified_bm25_index"
+                "index_path": "io://unified_bm25_index"
             }
         },
         {
             "type": "pruned_hipporag_optimized",
             "graph_store_config": {
                 "type": "pruned_hipporag_igraph_optimized",
-                "storage_path": "./data/graph_index",
+                "storage_path": "io://graph_index",
                 "embedding": {
                     "type": "qwen_embedding",
                     "model_name": "Qwen/Qwen3-Embedding-0.6B",
@@ -39,14 +39,14 @@
                 },
                 "fact_faiss_config": {
                     "type": "faiss",
-                    "index_path": "./data/graph_index/fact_index",
+                    "index_path": "io://graph_index/fact_index",
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true
                 },
                 "entity_faiss_config": {
                     "type": "faiss",
-                    "index_path": "./data/graph_index/entity_index",
+                    "index_path": "io://graph_index/entity_index",
                     "metric": "cosine",
                     "index_type": "hnsw",
                     "normalize_L2": true,
@@ -75,4 +75,3 @@
         "with_score": true
     }
 }
-

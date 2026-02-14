@@ -1,11 +1,11 @@
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from application.deepsearch.artifacts import DeepSearchArtifactStore
+from core.constants.io_namespaces import DEEPSEARCH_ARTIFACTS_NAMESPACE
 from core.utils.json_safe import json_safe
+from framework.virtual_paths import IO_PATH_PREFIX, io_key
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +40,16 @@ class DeepSearchServiceArtifactsMixin:
             return {key: value for key, value in vars(config).items() if not key.startswith("_")}
         return {"value": config}
 
-    def _resolve_experiment_dir(self) -> Optional[Path]:
+    def _resolve_experiment_dir(self) -> Optional[str]:
         candidate = None
         if isinstance(self.config, dict):
             candidate = self.config.get("experiment_output_dir")
-        directory = candidate
+        directory = str(candidate or "").strip()
         if not directory:
             return None
-        return Path(str(directory)).expanduser()
+        if not directory.startswith(IO_PATH_PREFIX):
+            raise ValueError("DeepSearchService config.experiment_output_dir must be an io:// virtual path")
+        return directory
 
     def _resolve_artifact_store(self) -> DeepSearchArtifactStore | None:
         if not isinstance(self.config, dict):
@@ -55,10 +57,21 @@ class DeepSearchServiceArtifactsMixin:
         artifacts_cfg = self._resolve_artifacts_config()
         if not bool(artifacts_cfg.get("enabled", True)):
             return None
-        configured = self.config.get("artifact_dir")
-        if not configured:
-            raise ValueError("DeepSearchService config.artifact_dir is required (no implicit env fallback).")
-        return DeepSearchArtifactStore.from_root_dir(str(configured))
+
+        from app_registration import registrator
+
+        io_manager = registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for DeepSearch artifacts")
+
+        configured = str(self.config.get("artifact_dir") or f"{IO_PATH_PREFIX}{DEEPSEARCH_ARTIFACTS_NAMESPACE}").strip()
+        if not configured.startswith(IO_PATH_PREFIX):
+            raise ValueError("DeepSearchService config.artifact_dir must be an io:// virtual path")
+
+        root_key = io_key(configured)
+        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+        namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
+        return DeepSearchArtifactStore.from_io_manager(io_manager, namespace=namespace, prefix=prefix)
 
     def _persist_experiment_snapshot(
         self,
@@ -72,11 +85,11 @@ class DeepSearchServiceArtifactsMixin:
     ) -> None:
         if not self.experiment_output_dir:
             return
-        try:
-            self.experiment_output_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:  # pragma: no cover - filesystem guard
-            logger.warning("Failed to prepare experiment directory %s: %s", self.experiment_output_dir, exc)
-            return
+        from app_registration import registrator
+
+        io_manager = registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for DeepSearch experiment snapshots")
 
         plan_payload = plan.get("plan") or {}
         plan_id = plan.get("plan_id") or plan_payload.get("plan_id") or snapshot.get("plan_metadata", {}).get("plan_id")
@@ -97,11 +110,12 @@ class DeepSearchServiceArtifactsMixin:
             "request_metadata": snapshot.get("request_metadata"),
         }
         filename = plan_id or snapshot.get("run_id") or f"run_{int(time.time() * 1000)}"
-        path = self.experiment_output_dir / f"{filename}.json"
+        root_key = io_key(str(self.experiment_output_dir))
+        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+        namespace = namespace or "deepsearch_experiments"
+        key = "/".join([p for p in [prefix, f"{filename}.json"] if p])
         try:
-            path.write_text(
-                json.dumps(json_safe(experiment_record), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:  # pragma: no cover - filesystem guard
+            io_manager.put_json(namespace=namespace, key=key, payload=json_safe(experiment_record))
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to persist DeepSearch experiment snapshot: %s", exc)
+            return

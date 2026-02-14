@@ -31,7 +31,7 @@ class ParserCombinatorConfig(AbstractConfig):
     Example:
         ```python
         config = ParserCombinatorConfig(
-            base_output_dir="./data/parsed_files",
+            base_output_dir="io://parsed_files",
             ocr_parser=DotsOCRParserConfig(...),
             native_parser=NativeParserConfig()
         )
@@ -41,7 +41,7 @@ class ParserCombinatorConfig(AbstractConfig):
 
     # Unified base output directory for all parsers
     base_output_dir: str = Field(
-        default_factory=lambda: str(os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files") or "./data/parsed_files"),
+        default_factory=lambda: str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "io://parsed_files"),
         description="Unified base output directory for all parsers.",
     )
 
