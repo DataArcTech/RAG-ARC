@@ -17,6 +17,7 @@ from encapsulation.database.bm25_indexer_tantivy import Index
 from encapsulation.database.bm25_indexer_tokenization import _BM25IndexBuilderTokenizationMixin
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 from framework.shared_module_decorator import shared_module
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,9 @@ class BM25IndexBuilder(
             config: BM25IndexBuilderConfig instance
         """
         self.config = config
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        if is_io_path(getattr(self.config, "index_path", "")):
+            self.config.index_path = str(resolve_io_to_local_path(self.config.index_path))
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
         fallback = os.path.join(runtime_root, os.path.basename(self.config.index_path) or "bm25_index")
         self.config.index_path = ensure_writable_dir(self.config.index_path, fallback)
 
@@ -101,4 +104,3 @@ class BM25IndexBuilder(
     def index(self) -> Optional[Index]:
         """Get the Tantivy index instance"""
         return self._index
-

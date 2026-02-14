@@ -5,7 +5,7 @@
             "type": "dense",
             "index_config": {
                 "type": "faiss",
-                "index_path": "./data/unified_faiss_index",
+                "index_path": "io://unified_faiss_index",
                 "metric": "cosine",
                 "index_type": "flat",
                 "normalize_L2": true,
@@ -22,7 +22,7 @@
             "type": "tantivy_bm25",
             "index_config": {
                 "type": "bm25_builder",
-                "index_path": "./data/unified_bm25_index"
+                "index_path": "io://unified_bm25_index"
             }
         }
     ],

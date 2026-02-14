@@ -103,9 +103,14 @@ def _default_shared_cache_enabled() -> bool:
 def _default_shared_cache_dir() -> str:
     raw = str(os.getenv("MINERU_SHARED_CACHE_DIR", "") or "").strip()
     if raw:
+        if not raw.startswith("io://"):
+            raise ValueError("MINERU_SHARED_CACHE_DIR must be an io:// virtual path")
         return raw
-    base = str(os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files") or "./data/parsed_files").strip()
-    return str((Path(base).expanduser() / "mineru" / "_shared").resolve())
+    base = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "io://parsed_files").strip()
+    if not base.startswith("io://"):
+        raise ValueError("PARSER_OUTPUT_DIR must be an io:// virtual path")
+    base = base.rstrip("/")
+    return f"{base}/mineru/_shared"
 
 def _default_shared_cache_mode() -> str:
     raw = str(os.getenv("MINERU_SHARED_CACHE_MODE", "") or "").strip().lower()

@@ -10,7 +10,7 @@ class BM25BuilderConfig(AbstractConfig):
     type: Literal["bm25_builder"] = "bm25_builder"
 
     index_path: str = Field(
-        default_factory=lambda: os.getenv("BM25_INDEX_PATH", "./data/unified_bm25_index"),
+        default_factory=lambda: os.getenv("BM25_INDEX_PATH", "io://unified_bm25_index"),
         description="index storage path",
     )
 

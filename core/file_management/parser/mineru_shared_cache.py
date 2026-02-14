@@ -1,11 +1,11 @@
 import hashlib
 import json
 import logging
-import os
-import shutil
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Optional
+
+from encapsulation.io.io_manager import IOManager
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ class MinerUSharedCacheKey:
     bytes_sha256: str
     parser_fingerprint: str
 
-    def rel_dir(self) -> Path:
-        return Path("by_sha256") / self.bytes_sha256 / self.parser_fingerprint
+    def rel_dir(self) -> str:
+        return "/".join(["by_sha256", self.bytes_sha256, self.parser_fingerprint])
 
 
 def build_parser_fingerprint(*, params: Dict[str, Any]) -> str:
@@ -40,148 +40,151 @@ def build_parser_fingerprint(*, params: Dict[str, Any]) -> str:
     return _stable_json_hash(params)
 
 
-def resolve_shared_cache_dir(*, base_dir: str | None) -> Optional[Path]:
+def resolve_shared_cache_dir(*, base_dir: str | None) -> Optional[str]:
     raw = str(base_dir or "").strip()
     if not raw:
         return None
-    return Path(raw).expanduser()
+    if not is_io_path(raw):
+        raise ValueError("MinerU shared cache dir must be an io:// virtual path")
+    return raw.rstrip("/")
 
 
-def shared_cache_hit(shared_root: Path, key: MinerUSharedCacheKey) -> Optional[Path]:
-    """Return cache directory when present and complete, else None."""
-    cand = (shared_root / key.rel_dir()).resolve()
-    complete = cand / ".complete"
-    if not cand.exists() or not cand.is_dir():
-        return None
-    if not complete.exists():
-        return None
-    md_files = list(cand.glob("*.md"))
-    if not md_files:
+def _join_virtual_dir(base: str, suffix: str) -> str:
+    left = str(base or "").strip().rstrip("/")
+    right = str(suffix or "").strip().lstrip("/")
+    return f"{left}/{right}" if right else left
+
+
+def _split_virtual_dir(base_dir: str) -> tuple[str, str]:
+    token = str(base_dir or "").strip()
+    if not is_io_path(token):
+        raise ValueError(f"expected an io:// virtual dir, got: {base_dir!r}")
+    key = io_key(token)
+    parts = [p for p in key.split("/") if p]
+    if not parts:
+        raise ValueError(f"empty io:// dir: {base_dir!r}")
+    namespace = parts[0]
+    prefix = "/".join(parts[1:])
+    return namespace, prefix
+
+
+def shared_cache_hit(io_manager: IOManager, shared_root: str, key: MinerUSharedCacheKey) -> Optional[str]:
+    """Return cache virtual dir when present and complete, else None."""
+
+    cand = _join_virtual_dir(shared_root, key.rel_dir())
+    complete = _join_virtual_dir(cand, ".complete")
+    if not io_manager.exists(complete):
         return None
     try:
-        if any(p.stat().st_size > 0 for p in md_files):
-            return cand
+        keys = io_manager.list_keys_path(cand, limit=2000)
     except Exception:
         return None
+    md_keys = [k for k in keys if str(k).lower().endswith(".md")]
+    if not md_keys:
+        return None
+    for ref in md_keys[:3]:
+        try:
+            blob = io_manager.get_bytes(ref)
+            if blob and blob.strip():
+                return cand
+        except Exception:
+            continue
     return None
-
-
-def _try_symlink_dir(src: Path, dst: Path) -> bool:
-    try:
-        os.symlink(str(src), str(dst), target_is_directory=True)
-        return True
-    except Exception:
-        return False
-
-
-def _safe_clear_empty_dir(path: Path) -> None:
-    try:
-        if path.exists() and path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
-    except Exception:
-        return
 
 
 def materialize_shared_cache(
     *,
-    shared_dir: Path,
-    dest_dir: Path,
+    io_manager: IOManager,
+    shared_dir: str,
+    dest_dir: str,
     mode: str,
 ) -> Dict[str, Any]:
-    """Materialize shared cache artifacts under dest_dir.
+    """Materialize shared cache artifacts under dest_dir via object copies."""
 
-    The caller owns the directory naming convention; this helper only performs filesystem operations.
-    """
-    mode_norm = (mode or "").strip().lower() or "symlink"
-    if mode_norm not in {"symlink", "copy"}:
-        mode_norm = "symlink"
-
-    result: Dict[str, Any] = {"mode": mode_norm, "ok": False, "error": None}
-    if dest_dir.exists() and dest_dir.is_symlink():
-        try:
-            # If already pointing at the same shared dir, treat as ok.
-            target = Path(os.readlink(dest_dir)).resolve()
-            if target == shared_dir.resolve():
-                result["ok"] = True
-                return result
-        except Exception:
-            pass
-
-    if mode_norm == "symlink":
-        _safe_clear_empty_dir(dest_dir)
-        if not dest_dir.exists():
-            if _try_symlink_dir(shared_dir, dest_dir):
-                result["ok"] = True
-                return result
-        # fallthrough to copy
-        result["mode"] = "copy"
+    mode_norm = (mode or "").strip().lower() or "copy"
+    if mode_norm != "copy":
         mode_norm = "copy"
 
-    if mode_norm == "copy":
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(shared_dir, dest_dir, dirs_exist_ok=True)
-            result["ok"] = True
-            return result
-        except Exception as exc:
-            result["error"] = str(exc)
-            return result
+    result: Dict[str, Any] = {"mode": mode_norm, "ok": False, "error": None}
+    shared_dir = str(shared_dir or "").strip().rstrip("/")
+    dest_dir = str(dest_dir or "").strip().rstrip("/")
+    if not (shared_dir.startswith(IO_PATH_PREFIX) and dest_dir.startswith(IO_PATH_PREFIX)):
+        result["error"] = "shared_dir/dest_dir must be io:// virtual dirs"
+        return result
 
-    return result
+    try:
+        keys = io_manager.list_keys_path(shared_dir, limit=None)
+        prefix = shared_dir.rstrip("/") + "/"
+        for ref in keys:
+            token = str(ref)
+            if not token.startswith(prefix):
+                continue
+            suffix = token[len(prefix) :]
+            if not suffix or suffix == ".complete":
+                continue
+            payload = io_manager.get_bytes(token)
+            if payload is None:
+                continue
+            io_manager.put_bytes_path(_join_virtual_dir(dest_dir, suffix), payload=payload)
+        io_manager.put_text_path(_join_virtual_dir(dest_dir, ".complete"), text="ok\n")
+        result["ok"] = True
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
 
 
 def publish_to_shared_cache(
     *,
-    shared_root: Path,
+    io_manager: IOManager,
+    shared_root: str,
     key: MinerUSharedCacheKey,
-    src_dir: Path,
+    src_dir: str,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
-    """Best-effort publish MinerU artifacts into shared cache.
+    """Best-effort publish MinerU artifacts into shared cache (object store).
 
-    Uses a temp dir + rename to avoid exposing partial results.
+    Consistency rule:
+    - Files are copied under the destination prefix.
+    - `.complete` is written last as a commit marker.
     """
-    dest = (shared_root / key.rel_dir()).resolve()
-    result: Dict[str, Any] = {"ok": False, "dest": str(dest)}
+
+    shared_root = str(shared_root or "").strip().rstrip("/")
+    src_dir = str(src_dir or "").strip().rstrip("/")
+    if not (shared_root.startswith(IO_PATH_PREFIX) and src_dir.startswith(IO_PATH_PREFIX)):
+        return {"ok": False, "error": "shared_root/src_dir must be io:// virtual dirs"}
+
+    dest_dir = _join_virtual_dir(shared_root, key.rel_dir())
+    result: Dict[str, Any] = {"ok": False, "dest": dest_dir}
     try:
-        if not overwrite and (dest / ".complete").exists():
+        complete = _join_virtual_dir(dest_dir, ".complete")
+        if not overwrite and io_manager.exists(complete):
             result["ok"] = True
             result["skipped"] = "already_complete"
             return result
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + f".tmp-{os.getpid()}")
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(src_dir, tmp, dirs_exist_ok=True)
-        (tmp / ".complete").write_text("ok\n", encoding="utf-8")
-        try:
-            if overwrite and dest.exists():
-                backup = dest.with_name(dest.name + f".bak-{os.getpid()}")
-                try:
-                    if backup.exists():
-                        shutil.rmtree(backup, ignore_errors=True)
-                    os.rename(str(dest), str(backup))
-                except Exception:
-                    # If we can't move away the existing dir, do not risk clobbering it.
-                    shutil.rmtree(tmp, ignore_errors=True)
-                    raise
-                try:
-                    os.rename(str(tmp), str(dest))
-                    shutil.rmtree(backup, ignore_errors=True)
-                    result["overwritten"] = True
-                except Exception:
-                    # Best-effort rollback.
-                    try:
-                        if dest.exists():
-                            shutil.rmtree(dest, ignore_errors=True)
-                        os.rename(str(backup), str(dest))
-                    except Exception:
-                        pass
-                    raise
-            else:
-                os.rename(str(tmp), str(dest))
-        except FileExistsError:
-            shutil.rmtree(tmp, ignore_errors=True)
+
+        if overwrite:
+            try:
+                existing = io_manager.list_keys_path(dest_dir, limit=None)
+                for ref in existing:
+                    io_manager.delete(str(ref))
+            except Exception:
+                pass
+
+        keys = io_manager.list_keys_path(src_dir, limit=None)
+        prefix = src_dir.rstrip("/") + "/"
+        for ref in keys:
+            token = str(ref)
+            if not token.startswith(prefix):
+                continue
+            suffix = token[len(prefix) :]
+            if not suffix or suffix == ".complete":
+                continue
+            payload = io_manager.get_bytes(token)
+            if payload is None:
+                continue
+            io_manager.put_bytes_path(_join_virtual_dir(dest_dir, suffix), payload=payload)
+        io_manager.put_text_path(complete, text="ok\n")
         result["ok"] = True
         return result
     except Exception as exc:

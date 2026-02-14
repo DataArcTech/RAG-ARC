@@ -66,7 +66,7 @@ def build_demo_index():
 
     # FAISS index config.
     faiss_config = FaissVectorDBConfig(
-        index_path="./data/unified_faiss_index",
+        index_path="io://unified_faiss_index",
         metric="cosine",
         index_type="flat",
         normalize_L2=True,
@@ -83,9 +83,8 @@ def build_demo_index():
 
     # 4) Save FAISS index.
     print("\n4. 保存FAISS索引...")
-    os.makedirs("./data/unified_faiss_index", exist_ok=True)
-    faiss_index.save_index("./data/unified_faiss_index", "index")
-    print("FAISS索引已保存到 ./data/unified_faiss_index")
+    faiss_index.save_index("io://unified_faiss_index", "index")
+    print("FAISS索引已保存到 io://unified_faiss_index")
 
     # 5) Validate FAISS index.
     print("\n5. 验证FAISS索引...")
@@ -97,7 +96,7 @@ def build_demo_index():
     from config.encapsulation.database.bm25_config import BM25BuilderConfig
 
     bm25_config = BM25BuilderConfig(
-        index_path="./data/unified_bm25_index",
+        index_path="io://unified_bm25_index",
         bm25_k1=1.2,
         bm25_b=0.75
     )
@@ -109,10 +108,14 @@ def build_demo_index():
 
     # Delete existing index first (if any).
     import shutil
-    bm25_index_path = "./data/unified_bm25_index"
-    if os.path.exists(bm25_index_path):
-        print(f"删除现有BM25索引: {bm25_index_path}")
-        shutil.rmtree(bm25_index_path)
+    from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+    from pathlib import Path
+
+    bm25_index_path = "io://unified_bm25_index"
+    bm25_index_local = resolve_io_to_local_path(bm25_index_path) if is_io_path(bm25_index_path) else Path(bm25_index_path)
+    if bm25_index_local.exists():
+        print(f"删除现有BM25索引: {bm25_index_path} ({bm25_index_local})")
+        shutil.rmtree(bm25_index_local)
 
     print(f"准备构建BM25索引，Chunk数量: {len(chunks)}")
     bm25_index = bm25_config.build()
@@ -133,9 +136,8 @@ def build_demo_index():
 
     # 8) Save BM25 index.
     print("\n8. 保存BM25索引...")
-    os.makedirs("./data/unified_bm25_index", exist_ok=True)
-    bm25_index.save_index("./data/unified_bm25_index", "index")
-    print("BM25索引已保存到 ./data/unified_bm25_index")
+    bm25_index.save_index("io://unified_bm25_index", "index")
+    print("BM25索引已保存到 io://unified_bm25_index")
 
     # 9) Validate BM25 index.
     print("\n9. 验证BM25索引...")

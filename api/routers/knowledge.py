@@ -31,7 +31,7 @@ from application.knowledge.module import Knowledge
 from application.account.user import Account
 from core.file_management.storage.file import FileValidationError
 from core.utils.owner_guard import is_admin_owner
-from core.utils.path_guard import safe_leaf_name
+from core.utils.path_guard import require_writable_dir, safe_leaf_name
 from encapsulation.message_queue.redis_task_queue import TaskState
 from fastapi.responses import StreamingResponse, FileResponse
 from pathlib import Path
@@ -431,9 +431,6 @@ async def get_mineru_asset(
     """Serve MinerU local image assets for a given knowledge file.
 
     Only allows paths under: `${PARSER_OUTPUT_DIR}/mineru/<file_id>/images/...`
-
-    Backwards compatibility: older runs may have stored artifacts under
-    `${PARSER_OUTPUT_DIR}/mineru/<doc_stem>/images/...`.
     """
 
     metadata = await asyncio.to_thread(get_knowledge_handler().file_storage.get_file_metadata, file_id)
@@ -444,20 +441,42 @@ async def get_mineru_asset(
     if not token.startswith("images/"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
 
-    base_output = str(os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files") or "./data/parsed_files").strip()
-    base_dir = Path(base_output).expanduser().resolve()
-    file_dir = (base_dir / "mineru" / safe_leaf_name(file_id, default="document")).resolve()
-    stem = Path(str(getattr(metadata, "filename", "") or "document")).stem or "document"
-    legacy_dir = (base_dir / "mineru" / safe_leaf_name(stem, default="document")).resolve()
+    base_output = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "io://parsed_files").strip()
+    if not base_output.startswith("io://"):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="PARSER_OUTPUT_DIR must be io://")
+    backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
+    file_key = safe_leaf_name(file_id, default="document")
+    asset_ref = f"{base_output.rstrip('/')}/mineru/{file_key}/{token}"
 
-    for doc_dir in [file_dir, legacy_dir]:
-        candidate = (doc_dir / token).resolve()
+    if backend == "minio":
         try:
-            candidate.relative_to(doc_dir)
-        except Exception:
-            continue
-        if candidate.exists() and candidate.is_file():
-            return FileResponse(path=str(candidate))
+            import mimetypes
+            import app_registration
+            from io import BytesIO
+
+            io_manager = app_registration.registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for mineru asset access")
+            blob = io_manager.get_bytes(asset_ref)
+            if blob is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+            media_type, _ = mimetypes.guess_type(token)
+            return StreamingResponse(BytesIO(blob), media_type=media_type or "application/octet-stream")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to read asset: {exc}") from exc
+
+    base_dir = Path(require_writable_dir(base_output)).expanduser().resolve()
+    file_dir = (base_dir / "mineru" / file_key).resolve()
+
+    candidate = (file_dir / token).resolve()
+    try:
+        candidate.relative_to(file_dir)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if candidate.exists() and candidate.is_file():
+        return FileResponse(path=str(candidate))
 
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
 

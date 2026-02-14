@@ -1,0 +1,9 @@
+{
+  "type": "io_manager",
+  "file_db_config": {
+    "type": "local_blob_store",
+    "base_path": "${IO_STORE_BASE_PATH}"
+  },
+  "default_namespace": "${IO_STORE_DEFAULT_NAMESPACE}"
+}
+

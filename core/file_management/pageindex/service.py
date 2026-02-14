@@ -1,7 +1,6 @@
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config import pageindex as pageindex_cfg
@@ -14,8 +13,8 @@ from core.file_management.pageindex.summary import SectionSummaryGenerator
 from core.file_management.pageindex.tree_builder import SectionTreeBuildResult, build_section_tree
 from core.file_management.pageindex.types import SectionNode
 from core.file_management.pageindex.utils import normalize_for_match
-from core.utils.path_guard import require_writable_dir
 from encapsulation.data_model.schema import Chunk
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +107,32 @@ class PageIndexService:
             normalized_page_texts=normalized_page_texts,
         )
 
-    def _resolve_artifact_dir(self, context: PageIndexContext) -> Optional[Path]:
-        if context.md_path:
-            return Path(context.md_path).parent
-        if context.output_dir:
-            return Path(context.output_dir)
+    def _resolve_artifact_dir(self, context: PageIndexContext) -> Optional[str]:
+        token = str(context.md_path or "").strip()
+        if token:
+            try:
+                if is_io_path(token):
+                    key = io_key(token)
+                    parent = "/".join(key.split("/")[:-1])
+                    if not parent:
+                        logger.warning("PageIndex: md_path=%r has no parent directory; skipping artifacts", token)
+                        return None
+                    return f"{IO_PATH_PREFIX}{parent}"
+                # Non-io paths are not supported for artifact persistence.
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex: failed to resolve artifact dir from md_path=%r: %s", token, exc)
+                return None
+
+        token = str(context.output_dir or "").strip()
+        if token:
+            try:
+                if is_io_path(token):
+                    return token
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex: failed to resolve artifact dir from output_dir=%r: %s", token, exc)
+                return None
         return None
 
     def _write_artifacts(self, context: PageIndexContext) -> None:
@@ -121,14 +141,22 @@ class PageIndexService:
         artifact_dir = self._resolve_artifact_dir(context)
         if artifact_dir is None:
             return
-        try:
-            artifact_dir = Path(require_writable_dir(str(artifact_dir)))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("PageIndex artifact dir not writable: %s", exc)
+        if not is_io_path(artifact_dir):
+            logger.warning("PageIndex artifact dir must be io://..., got: %r", artifact_dir)
             return
 
-        tree_path = artifact_dir / pageindex_cfg.pageindex_tree_filename()
-        nodes_path = artifact_dir / pageindex_cfg.pageindex_nodes_filename()
+        try:
+            import app_registration
+
+            io_manager = app_registration.registrator.get_object("io_manager")
+        except Exception as exc:  # noqa: BLE001
+            io_manager = None
+            logger.warning("PageIndex: io_manager not available; skipping artifacts: %s", exc)
+        if io_manager is None:
+            return
+
+        tree_path = f"{artifact_dir.rstrip('/')}/{pageindex_cfg.pageindex_tree_filename()}"
+        nodes_path = f"{artifact_dir.rstrip('/')}/{pageindex_cfg.pageindex_nodes_filename()}"
 
         tree_payload = {
             "file_id": context.file_id,
@@ -139,12 +167,11 @@ class PageIndexService:
                 "uniform_level_flattened": context.tree.uniform_level_flattened,
             },
         }
-        tree_path.write_text(json.dumps(tree_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        io_manager.put_text_path(tree_path, text=json.dumps(tree_payload, ensure_ascii=False, indent=2))
 
         nodes_payload = _build_nodes_payload(context.tree.nodes)
-        with nodes_path.open("w", encoding="utf-8") as handle:
-            for row in nodes_payload:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        lines = [json.dumps(row, ensure_ascii=False) for row in nodes_payload]
+        io_manager.put_text_path(nodes_path, text="\n".join(lines) + "\n")
 
     def _chunk_offset(self, markdown: str, chunk_text: str, *, cursor: int, snippet_chars: int) -> Optional[int]:
         if not chunk_text:

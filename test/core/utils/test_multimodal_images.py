@@ -11,10 +11,11 @@ def _touch(path: Path) -> None:
 
 
 def test_collect_images_from_deepsearch_evidence_provenance_metadata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("PARSER_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("IO_STORE_BASE_PATH", str(tmp_path))
+    monkeypatch.setenv("PARSER_OUTPUT_DIR", "io://parsed_files")
     file_id = "1f396b17-f355-45f6-8acd-0eda1292cb77"
     rel = "images/example.jpg"
-    _touch(tmp_path / "mineru" / file_id / rel)
+    _touch(tmp_path / "parsed_files" / "mineru" / file_id / rel)
 
     evidences = [
         {
@@ -31,16 +32,17 @@ def test_collect_images_from_deepsearch_evidence_provenance_metadata(monkeypatch
     ]
 
     paths = collect_image_paths_from_deepsearch_evidences(evidences, max_images=10)
-    assert [p.resolve() for p in paths] == [(tmp_path / "mineru" / file_id / rel).resolve()]
+    assert [p.resolve() for p in paths] == [(tmp_path / "parsed_files" / "mineru" / file_id / rel).resolve()]
 
 
 def test_collect_images_from_deepsearch_evidence_chunk_metadata_backcompat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("PARSER_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("IO_STORE_BASE_PATH", str(tmp_path))
+    monkeypatch.setenv("PARSER_OUTPUT_DIR", "io://parsed_files")
     file_id = "fd010412-46b8-4667-889b-162ee1a3c2b0"
     rel = "images/example2.jpg"
-    _touch(tmp_path / "mineru" / file_id / rel)
+    _touch(tmp_path / "parsed_files" / "mineru" / file_id / rel)
 
     evidences = [
         {
@@ -59,14 +61,15 @@ def test_collect_images_from_deepsearch_evidence_chunk_metadata_backcompat(
     ]
 
     paths = collect_image_paths_from_deepsearch_evidences(evidences, max_images=10)
-    assert [p.resolve() for p in paths] == [(tmp_path / "mineru" / file_id / rel).resolve()]
+    assert [p.resolve() for p in paths] == [(tmp_path / "parsed_files" / "mineru" / file_id / rel).resolve()]
 
 
 def test_collect_images_from_metadata_when_content_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("PARSER_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("IO_STORE_BASE_PATH", str(tmp_path))
+    monkeypatch.setenv("PARSER_OUTPUT_DIR", "io://parsed_files")
     file_id = "03576cff-a4b6-4ae2-8586-59700dd72747"
     rel = "images/example3.jpg"
-    _touch(tmp_path / "mineru" / file_id / rel)
+    _touch(tmp_path / "parsed_files" / "mineru" / file_id / rel)
 
     evidences = [
         {
@@ -78,5 +81,4 @@ def test_collect_images_from_metadata_when_content_missing(monkeypatch: pytest.M
     ]
 
     paths = collect_image_paths_from_deepsearch_evidences(evidences, max_images=10)
-    assert [p.resolve() for p in paths] == [(tmp_path / "mineru" / file_id / rel).resolve()]
-
+    assert [p.resolve() for p in paths] == [(tmp_path / "parsed_files" / "mineru" / file_id / rel).resolve()]

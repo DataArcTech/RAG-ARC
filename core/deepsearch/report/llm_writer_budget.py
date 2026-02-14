@@ -10,7 +10,8 @@ def dump_json(payload: Any) -> str:
     def _default(value: Any) -> str:
         return str(value)
 
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_default)
+    # Stable key ordering reduces prompt drift, improving cache hit rates across retries.
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_default)
 
 
 def slim_methodology(method: Dict[str, Any], *, level: int) -> Dict[str, Any]:

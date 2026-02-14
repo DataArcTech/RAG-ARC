@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
-from core.utils.path_guard import require_writable_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.native import NativeParserConfig
@@ -210,10 +209,18 @@ class NativeParser(AbstractParser):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Parse a file of any supported type from binary data"""
+        import app_registration
+
+        io_manager = app_registration.registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for NativeParser")
+
         output_dir = getattr(self.config, "output_dir", None)
         if not isinstance(output_dir, str) or not output_dir.strip():
             raise ValueError("NativeParser requires config.output_dir (no implicit env defaults).")
-        output_dir = require_writable_dir(output_dir)
+        output_dir_virtual = str(output_dir).strip()
+        if not output_dir_virtual.startswith("io://"):
+            raise ValueError("NativeParser config.output_dir must be an io:// virtual path")
 
         # Extract file extension and validate
         base_filename, file_ext = os.path.splitext(filename)
@@ -226,19 +233,25 @@ class NativeParser(AbstractParser):
         # Route to appropriate parser method
         try:
             if file_ext == '.docx':
-                return self._parse_docx(file_data, filename, output_dir, **kwargs)
+                return self._parse_docx(io_manager, file_data, filename, output_dir_virtual, **kwargs)
             elif file_ext in ['.xlsx', '.xls', '.csv']:
-                return self._parse_excel(file_data, filename, output_dir, **kwargs)
+                return self._parse_excel(io_manager, file_data, filename, output_dir_virtual, **kwargs)
             elif file_ext == '.pptx':
-                return self._parse_ppt(file_data, filename, output_dir, **kwargs)
+                return self._parse_ppt(io_manager, file_data, filename, output_dir_virtual, **kwargs)
             elif file_ext == '.html':
-                return self._parse_html_content(file_data.decode('utf-8'), filename, base_filename, output_dir)
+                return self._parse_html_content(
+                    io_manager,
+                    file_data.decode("utf-8"),
+                    filename,
+                    base_filename,
+                    output_dir_virtual,
+                )
             elif file_ext == '.txt':
-                return self._parse_txt(file_data, filename, output_dir, **kwargs)
+                return self._parse_txt(io_manager, file_data, filename, output_dir_virtual, **kwargs)
             elif file_ext == '.md':
-                return self._parse_md(file_data, filename, output_dir, **kwargs)
+                return self._parse_md(io_manager, file_data, filename, output_dir_virtual, **kwargs)
             elif file_ext == '.pdf':
-                return self._parse_pdf(file_data, filename, output_dir, **kwargs)
+                return self._parse_pdf(file_data, filename, output_dir_virtual, **kwargs)
             else:
                 raise ValueError(f"File type '{file_ext}' is listed as supported but no handler exists")
 
@@ -250,7 +263,13 @@ class NativeParser(AbstractParser):
         """Get all supported file extensions"""
         return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html', '.txt', '.md', '.pdf']
 
-    def _parse_pdf(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_pdf(
+        self,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """Parse text-based PDF without OCR (native extraction)."""
         try:
             import io
@@ -274,6 +293,7 @@ class NativeParser(AbstractParser):
                                 "source_file_name": filename,
                                 "pdf_backend": "pypdf",
                                 "pdf_glyph_names_decoded": bool(decoded.changed),
+                                "output_dir": output_dir_virtual,
                             },
                         }
                     )
@@ -286,15 +306,29 @@ class NativeParser(AbstractParser):
                             "page_count": page_count,
                             "pdf_backend": "pypdf",
                             "pdf_glyph_names_decoded": False,
+                            "output_dir": output_dir_virtual,
                         },
                     }
                 )
+            else:
+                for row in results:
+                    if isinstance(row, dict):
+                        meta = row.get("metadata")
+                        if isinstance(meta, dict):
+                            meta.setdefault("output_dir", output_dir_virtual)
             return results
         except Exception as e:
             logger.error(f"Failed to parse PDF {filename}: {str(e)}")
             raise RuntimeError(f"Failed to parse PDF {filename}: {str(e)}")
 
-    def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_docx(
+        self,
+        io_manager,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """Parse DOCX file from binary data and return structured results"""
         try:
             import io
@@ -302,8 +336,7 @@ class NativeParser(AbstractParser):
 
             base_filename = os.path.splitext(filename)[0]
             stem = Path(filename).stem or "document"
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             logger.info(f"Parsing DOCX: {base_filename}")
 
@@ -338,25 +371,28 @@ class NativeParser(AbstractParser):
             }
 
             # Save as JSON
-            json_path = os.path.join(save_dir, f"{stem}.json")
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(content, f, ensure_ascii=False, indent=2)
+            json_path_virtual = f"{save_dir_virtual.rstrip('/')}/{stem}.json"
+            io_manager.put_json_path(json_path_virtual, payload=content)
 
             # Save as Markdown
             md_content = self._convert_docx_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{stem}.md")
-            with open(md_path, 'w', encoding='utf-8') as f:
-                f.write(md_content)
+            md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{stem}.md"
+            io_manager.put_text_path(md_path_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
 
             result = {
                 'filename': filename,
                 'page_no': 0,
                 'content_type': 'docx',
                 'output_paths': {
-                    'json': json_path,
-                    'markdown': md_path
+                    'json': json_path_virtual,
+                    'markdown': md_path_virtual,
                 },
-                'metadata': content['metadata']
+                "md_content_path": md_path_virtual,
+                "text": md_content,
+                "metadata": {
+                    **(content.get("metadata") or {}),
+                    "output_dir": save_dir_virtual,
+                },
             }
 
             return [result]
@@ -365,7 +401,14 @@ class NativeParser(AbstractParser):
             logger.error(f"DOCX parsing failed: {str(e)}")
             raise
 
-    def _parse_excel(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_excel(
+        self,
+        io_manager,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """Parse Excel file from binary data and return structured results"""
         try:
             import io
@@ -375,8 +418,7 @@ class NativeParser(AbstractParser):
             base_filename = os.path.splitext(filename)[0]
             stem = Path(filename).stem or "document"
             file_ext = os.path.splitext(filename)[1].lower()
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             logger.info(f"Parsing Excel: {base_filename}, file size: {len(file_data)} bytes")
 
@@ -437,30 +479,34 @@ class NativeParser(AbstractParser):
                 all_content.append(sheet_content)
 
                 # Save individual sheet as CSV
-                csv_path = os.path.join(save_dir, f"{stem}_{sheet_name}.csv")
-                df.to_csv(csv_path, index=False, encoding='utf-8')
+                csv_name = f"{stem}_{sheet_name}.csv"
+                csv_path_virtual = f"{save_dir_virtual.rstrip('/')}/{csv_name}"
+                csv_text = df.to_csv(index=False)
+                io_manager.put_text_path(csv_path_virtual, text=csv_text, content_type="text/csv; charset=utf-8")
 
                 # Save as JSON
-                json_path = os.path.join(save_dir, f"{stem}_{sheet_name}.json")
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(sheet_content, f, ensure_ascii=False, indent=2)
+                json_name = f"{stem}_{sheet_name}.json"
+                json_path_virtual = f"{save_dir_virtual.rstrip('/')}/{json_name}"
+                io_manager.put_json_path(json_path_virtual, payload=sheet_content)
 
                 sheet_results.append({
                     'filename': filename,
                     'page_no': len(sheet_results),
                     'content_type': 'excel_sheet',
                     'sheet_name': sheet_name,
+                    "text": csv_text,
                     'output_paths': {
-                        'json': json_path,
-                        'csv': csv_path
+                        'json': json_path_virtual,
+                        'csv': csv_path_virtual,
                     },
-                    'metadata': sheet_content['metadata']
+                    'metadata': {
+                        **(sheet_content.get("metadata") or {}),
+                        "output_dir": save_dir_virtual,
+                    },
                 })
 
             # Save combined results
-            combined_json = os.path.join(save_dir, f"{stem}_combined.json")
-            with open(combined_json, 'w', encoding='utf-8') as f:
-                json.dump(all_content, f, ensure_ascii=False, indent=2)
+            io_manager.put_json_path(f"{save_dir_virtual.rstrip('/')}/{stem}_combined.json", payload=all_content)
 
             return sheet_results
 
@@ -468,7 +514,14 @@ class NativeParser(AbstractParser):
             logger.error(f"Excel parsing failed: {str(e)}")
             raise
 
-    def _parse_ppt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_ppt(
+        self,
+        io_manager,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """Parse PowerPoint file from binary data and return structured results"""
         try:
             import io
@@ -476,8 +529,7 @@ class NativeParser(AbstractParser):
 
             base_filename = os.path.splitext(filename)[0]
             stem = Path(filename).stem or "document"
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             logger.info(f"Parsing PowerPoint: {base_filename}")
 
@@ -508,36 +560,37 @@ class NativeParser(AbstractParser):
                 slides_data.append(slide_content)
 
                 # Save individual slide
-                slide_json = os.path.join(save_dir, f"{stem}_slide_{i+1}.json")
-                with open(slide_json, 'w', encoding='utf-8') as f:
-                    json.dump(slide_content, f, ensure_ascii=False, indent=2)
+                slide_json_name = f"{stem}_slide_{i+1}.json"
+                slide_json_virtual = f"{save_dir_virtual.rstrip('/')}/{slide_json_name}"
+                io_manager.put_json_path(slide_json_virtual, payload=slide_content)
 
                 # Convert to markdown
                 md_content = self._convert_slide_to_markdown(slide_content)
-                slide_md = os.path.join(save_dir, f"{stem}_slide_{i+1}.md")
-                with open(slide_md, 'w', encoding='utf-8') as f:
-                    f.write(md_content)
+                slide_md_name = f"{stem}_slide_{i+1}.md"
+                slide_md_virtual = f"{save_dir_virtual.rstrip('/')}/{slide_md_name}"
+                io_manager.put_text_path(slide_md_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
 
                 results.append({
                     'filename': filename,
                     'page_no': i,
                     'content_type': 'ppt_slide',
                     'slide_number': i + 1,
+                    "text": md_content,
                     'output_paths': {
-                        'json': slide_json,
-                        'markdown': slide_md
+                        'json': slide_json_virtual,
+                        'markdown': slide_md_virtual,
                     },
+                    "md_content_path": slide_md_virtual,
                     'metadata': {
                         'title': slide_content['title'],
                         'text_blocks': len(slide_content['text_content']),
-                        'has_notes': bool(slide_content['notes'])
+                        'has_notes': bool(slide_content['notes']),
+                        "output_dir": save_dir_virtual,
                     }
                 })
 
             # Save combined presentation
-            combined_json = os.path.join(save_dir, f"{stem}_combined.json")
-            with open(combined_json, 'w', encoding='utf-8') as f:
-                json.dump(slides_data, f, ensure_ascii=False, indent=2)
+            io_manager.put_json_path(f"{save_dir_virtual.rstrip('/')}/{stem}_combined.json", payload=slides_data)
 
             return results
 
@@ -545,12 +598,18 @@ class NativeParser(AbstractParser):
             logger.error(f"PowerPoint parsing failed: {str(e)}")
             raise
 
-    def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[Dict[str, Any]]:
+    def _parse_html_content(
+        self,
+        io_manager,
+        html_content: str,
+        filename: str,
+        base_filename: str,
+        output_dir_virtual: str,
+    ) -> List[Dict[str, Any]]:
         """Parse HTML content and return structured results"""
         try:
             stem = Path(filename).stem or "document"
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             logger.info(f"Parsing HTML: {base_filename}")
 
@@ -559,31 +618,32 @@ class NativeParser(AbstractParser):
             content["metadata"] = {"filename": base_filename}
 
             # Save results
-            json_path = os.path.join(save_dir, f"{stem}.json")
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(content, f, ensure_ascii=False, indent=2)
+            json_path_virtual = f"{save_dir_virtual.rstrip('/')}/{stem}.json"
+            io_manager.put_json_path(json_path_virtual, payload=content)
 
             # Convert to markdown
             md_content = self._convert_html_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{stem}.md")
-            with open(md_path, 'w', encoding='utf-8') as f:
-                f.write(md_content)
+            md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{stem}.md"
+            io_manager.put_text_path(md_path_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
 
             result = {
                 'filename': filename,
                 'page_no': 0,
                 'content_type': 'html',
                 'output_paths': {
-                    'json': json_path,
-                    'markdown': md_path
+                    'json': json_path_virtual,
+                    'markdown': md_path_virtual,
                 },
+                "md_content_path": md_path_virtual,
+                "text": md_content,
                 'metadata': {
                     'title': content['title'],
                     'headings_count': len(content['headings']),
                     'paragraphs_count': len(content['paragraphs']),
                     'links_count': len(content['links']),
                     'images_count': len(content['images']),
-                    'tables_count': len(content['tables'])
+                    'tables_count': len(content['tables']),
+                    "output_dir": save_dir_virtual,
                 }
             }
 
@@ -647,7 +707,14 @@ class NativeParser(AbstractParser):
         """Convert HTML content to Markdown."""
         return html_structured_content_to_markdown(content)
 
-    def _parse_txt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_txt(
+        self,
+        io_manager,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """Parse plain text file from binary data and return structured results"""
         try:
             # Decode text content
@@ -656,25 +723,25 @@ class NativeParser(AbstractParser):
             # Create output directory
             base_filename = os.path.splitext(filename)[0]
             stem = Path(filename).stem or "document"
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             # Save as markdown (plain text is valid markdown)
             md_filename = f"{stem}.md"
-            md_path = os.path.join(save_dir, md_filename)
+            md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{md_filename}"
 
-            with open(md_path, 'w', encoding='utf-8') as f:
-                f.write(text_content)
+            io_manager.put_text_path(md_path_virtual, text=text_content, content_type="text/markdown; charset=utf-8")
 
-            logger.info(f"TXT parsing complete: {filename} -> {md_path}")
+            logger.info("TXT parsing complete: %s -> %s", filename, md_path_virtual)
 
             return [{
                 "type": "text",
                 "content": text_content,
+                "md_content_path": md_path_virtual,
                 "metadata": {
                     "source_file": filename,
-                    "output_file": md_path,
-                    "format": "txt"
+                    "output_file": md_path_virtual,
+                    "output_dir": save_dir_virtual,
+                    "format": "txt",
                 }
             }]
 
@@ -682,7 +749,14 @@ class NativeParser(AbstractParser):
             logger.error(f"TXT parsing failed: {str(e)}")
             raise
 
-    def _parse_md(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+    def _parse_md(
+        self,
+        io_manager,
+        file_data: bytes,
+        filename: str,
+        output_dir_virtual: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
         """
         Parse Markdown file from binary data - direct save without conversion.
 
@@ -696,25 +770,25 @@ class NativeParser(AbstractParser):
             # Create output directory
             base_filename = os.path.splitext(filename)[0]
             stem = Path(filename).stem or "document"
-            save_dir = os.path.join(output_dir, base_filename)
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
             # Save markdown file directly (no conversion needed)
             md_filename = f"{stem}.md"
-            md_path = os.path.join(save_dir, md_filename)
+            md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{md_filename}"
 
-            with open(md_path, 'w', encoding='utf-8') as f:
-                f.write(md_content)
+            io_manager.put_text_path(md_path_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
 
-            logger.info(f"MD file saved directly: {filename} -> {md_path}")
+            logger.info("MD file saved directly: %s -> %s", filename, md_path_virtual)
 
             return [{
                 "type": "markdown",
                 "content": md_content,
+                "md_content_path": md_path_virtual,
                 "metadata": {
                     "source_file": filename,
-                    "output_file": md_path,
-                    "format": "md"
+                    "output_file": md_path_virtual,
+                    "output_dir": save_dir_virtual,
+                    "format": "md",
                 }
             }]
 

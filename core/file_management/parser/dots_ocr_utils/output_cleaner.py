@@ -496,7 +496,7 @@ class OutputCleaner:
         """Saves the cleaned data"""
         
         logger.info(f"\n💾 Saving cleaned data to: {output_dir}")
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
         fallback_dir = os.path.join(runtime_root, "dotsocr_clean")
         output_dir = ensure_writable_dir(output_dir, fallback_dir)
         

@@ -11,6 +11,7 @@ from encapsulation.data_model.schema import Chunk
 from framework.shared_module_decorator import shared_module
 from core.utils.path_guard import ensure_writable_dir
 from core.utils.faiss_lock import FAISS_LOCK
+from framework.virtual_paths import is_io_path, resolve_io_to_local_path
 
 if TYPE_CHECKING:
     from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
@@ -109,6 +110,8 @@ class FaissVectorDB(VectorDB):
         Args:
             path: Directory path containing .faiss and .pkl files
         """
+        if is_io_path(path):
+            path = str(resolve_io_to_local_path(path))
         logger.info(f"Loading index from path: {path}")
 
         # Validate path exists
@@ -766,8 +769,10 @@ class FaissVectorDB(VectorDB):
             name: Base name for saved files (without extension)
                  Creates {name}.faiss and {name}.pkl
         """
+        if is_io_path(path):
+            path = str(resolve_io_to_local_path(path))
         logger.info(f"Saving index to path: {path} with name: {name}")
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
         fallback_dir = os.path.join(runtime_root, os.path.basename(path) or "faiss_index")
         path = ensure_writable_dir(path, fallback_dir)
         os.makedirs(path, exist_ok=True)

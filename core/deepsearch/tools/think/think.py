@@ -6,7 +6,12 @@ from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
-from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT_EN
+from core.prompts.deepsearch import (
+    THINK_TOOL_SYSTEM_PROMPT_EN,
+    THINK_TOOL_SYSTEM_PROMPT_FINAL_EN,
+    THINK_TOOL_SYSTEM_PROMPT_GATE_EN,
+    THINK_TOOL_SYSTEM_PROMPT_INITIAL_EN,
+)
 from core.deepsearch.utils.evidence_cards import evidence_cards
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
 from core.utils.llm_json import repair_json_from_raw_with_retry
@@ -151,12 +156,17 @@ class ThinkTool(GraphTool):
         previous_tool_call_results = extra.get("previous_tool_call_results")
         recent_tool_runs = extra.get("recent_tool_runs")
         current_plan = extra.get("current_plan")
+        tool_budget_snapshot = (
+            (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None
+        )
+        budget_status = self._build_budget_status(tool_budget_snapshot)
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
             "context_evidences": cards,
             "graph_context": context_snapshot,
-            "tool_budget": (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None,
+            "tool_budget": tool_budget_snapshot,
+            "budget_status": budget_status,
             "coverage_metrics": coverage_snapshot,
             "available_tools": available_tools,
             "previous_tool_call_results": previous_tool_call_results,
@@ -172,6 +182,7 @@ class ThinkTool(GraphTool):
                 "trigger": extra.get("trigger"),
                 "round": extra.get("round"),
                 "think_mode": extra.get("think_mode"),
+                "budget_phase": (budget_status or {}).get("phase") if isinstance(budget_status, dict) else None,
             }
         prompt_json = self._serialize_payload(prompt_payload)
         prompt_stats = {
@@ -181,16 +192,16 @@ class ThinkTool(GraphTool):
             "previous_tool_call_results_count": len(previous_tool_call_results) if isinstance(previous_tool_call_results, list) else None,
             "recent_tool_runs_count": len(recent_tool_runs) if isinstance(recent_tool_runs, list) else None,
             "current_plan_count": len(current_plan) if isinstance(current_plan, list) else None,
+            "budget_phase": (budget_status or {}).get("phase") if isinstance(budget_status, dict) else None,
+            "budget_remaining_calls": (budget_status or {}).get("remaining_calls") if isinstance(budget_status, dict) else None,
             "max_tokens": self.max_tokens,
             "include_extra_in_prompt": self.include_extra_in_prompt,
         }
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {
-                "role": "user",
-                "content": prompt_json,
-            },
-        ]
+        system_prompt = self._select_system_prompt(
+            extra=extra,
+            previous_tool_call_results=previous_tool_call_results,
+        )
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt_json}]
         mode = str((request.extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
         mode_defaults: Dict[str, Any] | None = None
         try:
@@ -224,6 +235,9 @@ class ThinkTool(GraphTool):
             schema_repair = None
             try:
                 normalized = self._normalize_payload(parsed)
+                normalized, tool_call_norm = self._normalize_tool_calls_in_payload(normalized)
+                if tool_call_norm:
+                    mode_defaults = {**(mode_defaults or {}), "tool_call_normalization": tool_call_norm}
                 # If the model omits the plan (common on weaker models), reuse the current plan
                 # snapshot from the runtime. This keeps the loop robust without hardcoding new steps.
                 if isinstance(normalized, dict) and not isinstance(normalized.get("plan"), list):
@@ -264,6 +278,9 @@ class ThinkTool(GraphTool):
                 schema_repair = {"error": str(exc)}
                 parsed = repaired
                 normalized = self._normalize_payload(parsed)
+                normalized, tool_call_norm = self._normalize_tool_calls_in_payload(normalized)
+                if tool_call_norm:
+                    mode_defaults = {**(mode_defaults or {}), "tool_call_normalization": tool_call_norm, "after_repair": True}
                 if isinstance(normalized, dict) and not isinstance(normalized.get("plan"), list):
                     current_plan = (request.extra or {}).get("current_plan")
                     if isinstance(current_plan, list):
@@ -348,6 +365,97 @@ class ThinkTool(GraphTool):
                     return updated
         return payload
 
+    @staticmethod
+    def _normalize_tool_calls_in_payload(payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Normalize common function-call style tool schemas into ThinkToolCall schema.
+
+        Some models emit tool calls in OpenAI/Anthropic-style "function" formats such as:
+        - {"function": "explore", "arguments": {...}}
+        - {"type": "function", "function": {"name": "explore", "arguments": "{...json...}"}}
+        We normalize these into {"tool_name","tool_args","rationale","parallelizable"} and drop irrecoverable entries.
+        """
+
+        if not isinstance(payload, dict):
+            return payload, {}
+
+        tool_calls = payload.get("tool_calls")
+        if tool_calls is None:
+            return payload, {}
+        if not isinstance(tool_calls, list):
+            # Keep schema errors observable (schema repair will handle if needed).
+            return payload, {"skipped": "tool_calls_not_list"}
+
+        normed: list[dict[str, Any]] = []
+        stats: dict[str, Any] = {"input": len(tool_calls), "output": 0, "dropped": 0, "rewritten": 0}
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                stats["dropped"] += 1
+                continue
+
+            updated: dict[str, Any] = {}
+
+            # Extract tool name.
+            tool_name = call.get("tool_name")
+            if isinstance(tool_name, str) and tool_name.strip():
+                updated["tool_name"] = tool_name.strip()
+            else:
+                fn = call.get("function")
+                if isinstance(fn, str) and fn.strip():
+                    updated["tool_name"] = fn.strip()
+                elif isinstance(fn, dict):
+                    name = fn.get("name")
+                    if isinstance(name, str) and name.strip():
+                        updated["tool_name"] = name.strip()
+
+            # Extract tool args.
+            tool_args = call.get("tool_args")
+            if isinstance(tool_args, dict):
+                updated["tool_args"] = tool_args
+            else:
+                # Common alternatives: "arguments" at top-level or under function dict.
+                args = call.get("arguments")
+                fn = call.get("function")
+                if args is None and isinstance(fn, dict):
+                    args = fn.get("arguments")
+                if isinstance(args, dict):
+                    updated["tool_args"] = args
+                elif isinstance(args, str) and args.strip():
+                    parsed = safe_json_loads(args, expected="dict")
+                    updated["tool_args"] = parsed if isinstance(parsed, dict) else {}
+                else:
+                    updated["tool_args"] = {}
+
+            # Extract rationale (required by schema).
+            rationale = call.get("rationale")
+            if isinstance(rationale, str) and rationale.strip():
+                updated["rationale"] = rationale.strip()
+            else:
+                reason = call.get("reason") or call.get("thought") or call.get("why")
+                if isinstance(reason, str) and reason.strip():
+                    updated["rationale"] = reason.strip()
+                else:
+                    updated["rationale"] = "normalized_from_function_call"
+
+            # Preserve optional fields.
+            if isinstance(call.get("parallelizable"), bool):
+                updated["parallelizable"] = bool(call["parallelizable"])
+
+            if not str(updated.get("tool_name") or "").strip():
+                stats["dropped"] += 1
+                continue
+
+            if updated.keys() != call.keys():
+                stats["rewritten"] += 1
+            normed.append(updated)
+
+        stats["output"] = len(normed)
+        updated_payload = dict(payload)
+        updated_payload["tool_calls"] = normed
+        # Only return stats if anything changed (keeps metadata clean).
+        if stats["dropped"] or stats["rewritten"]:
+            return updated_payload, stats
+        return updated_payload, {}
+
     async def _parse_or_repair_json(self, *, messages: List[Dict[str, str]], raw: str) -> Dict[str, Any]:
         parsed = safe_json_loads(raw, expected="dict")
         if isinstance(parsed, dict):
@@ -404,7 +512,109 @@ class ThinkTool(GraphTool):
         def _default(value):
             return str(value)
 
-        return json.dumps(payload, ensure_ascii=False, default=_default)
+        # Stable, token-efficient JSON improves cache hit rates and reduces JSON-repair churn.
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_default)
+
+    @staticmethod
+    def _is_missing_primary_page_evidence(previous_tool_call_results: Any) -> bool:
+        if not isinstance(previous_tool_call_results, list):
+            return False
+        for row in previous_tool_call_results:
+            if not isinstance(row, dict):
+                continue
+            reason = str(row.get("failure_reason") or "").strip()
+            if reason == "missing_primary_page_evidence":
+                return True
+        return False
+
+    @staticmethod
+    def _budget_phase(snapshot: Dict[str, Any]) -> str:
+        try:
+            max_calls_total = int(snapshot.get("max_calls_total") or 0)
+        except Exception:
+            max_calls_total = 0
+        try:
+            remaining_calls = int(snapshot.get("remaining_calls") or 0)
+        except Exception:
+            remaining_calls = 0
+
+        remaining_ratio = 0.0
+        if max_calls_total > 0:
+            remaining_ratio = remaining_calls / float(max_calls_total)
+
+        critical_calls = max(0, int(getattr(tool_defaults, "THINK_BUDGET_CRITICAL_REMAINING_CALLS", 1)))
+        low_calls = max(0, int(getattr(tool_defaults, "THINK_BUDGET_LOW_REMAINING_CALLS", 3)))
+        raw_critical_ratio = getattr(tool_defaults, "THINK_BUDGET_CRITICAL_REMAINING_RATIO", 0.05)
+        raw_low_ratio = getattr(tool_defaults, "THINK_BUDGET_LOW_REMAINING_RATIO", 0.15)
+        try:
+            critical_ratio = float(raw_critical_ratio) if raw_critical_ratio is not None else 0.05
+        except Exception:
+            critical_ratio = 0.05
+        try:
+            low_ratio = float(raw_low_ratio) if raw_low_ratio is not None else 0.15
+        except Exception:
+            low_ratio = 0.15
+
+        if remaining_calls <= critical_calls or remaining_ratio <= critical_ratio:
+            return "critical"
+        if remaining_calls <= low_calls or remaining_ratio <= low_ratio:
+            return "low"
+        return "ok"
+
+    def _build_budget_status(self, tool_budget_snapshot: Any) -> Dict[str, Any] | None:
+        if not bool(getattr(tool_defaults, "THINK_BUDGET_STATUS_ENABLED", True)):
+            return None
+        if not isinstance(tool_budget_snapshot, dict):
+            return None
+
+        try:
+            max_calls_total = int(tool_budget_snapshot.get("max_calls_total") or 0)
+        except Exception:
+            max_calls_total = 0
+        try:
+            used_calls = int(tool_budget_snapshot.get("used_calls") or 0)
+        except Exception:
+            used_calls = 0
+        try:
+            remaining_calls = int(tool_budget_snapshot.get("remaining_calls") or 0)
+        except Exception:
+            remaining_calls = 0
+
+        remaining_ratio = 0.0
+        if max_calls_total > 0:
+            remaining_ratio = remaining_calls / float(max_calls_total)
+        phase = self._budget_phase(
+            {
+                "max_calls_total": max_calls_total,
+                "used_calls": used_calls,
+                "remaining_calls": remaining_calls,
+            }
+        )
+        return {
+            "max_calls_total": max_calls_total,
+            "used_calls": used_calls,
+            "remaining_calls": remaining_calls,
+            "remaining_ratio": round(float(remaining_ratio), 3),
+            "phase": phase,
+        }
+
+    def _select_system_prompt(
+        self,
+        *,
+        extra: Dict[str, Any],
+        previous_tool_call_results: Any,
+    ) -> str:
+        if not bool(getattr(tool_defaults, "THINK_PROMPT_VARIANTS_ENABLED", True)):
+            return self.system_prompt
+
+        mode = str((extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
+        if mode == initial_mode.MODE:
+            return THINK_TOOL_SYSTEM_PROMPT_INITIAL_EN
+        if mode == final_mode.MODE:
+            return THINK_TOOL_SYSTEM_PROMPT_FINAL_EN
+        if self._is_missing_primary_page_evidence(previous_tool_call_results):
+            return THINK_TOOL_SYSTEM_PROMPT_GATE_EN
+        return self.system_prompt
 
     @staticmethod
     def _build_thought_log_entry(note: ThinkNote, coverage_snapshot: Dict[str, Any]) -> Dict[str, Any]:

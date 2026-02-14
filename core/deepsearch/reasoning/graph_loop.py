@@ -275,6 +275,37 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                             plan_step_id=think_step_id,
                         )
 
+                # Let the model explicitly stop the reasoning loop (report-style DeepSearch),
+                # but never allow stopping before collecting at least one read.pages evidence.
+                think_is_final = self._extract_is_final_from_think_notes(result.think_notes or [])
+                if think_is_final is True:
+                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
+                        previous_tool_call_results = [
+                            {
+                                "status": "failed",
+                                "step_id": f"{think_step_id}_final_gate",
+                                "failure_reason": "missing_primary_page_evidence",
+                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
+                                "suggested_next_steps": [
+                                    "Finalization requires citeable page evidence: call read.pages at least once.",
+                                    "Use explore + search.file to obtain a real file_id (UUID) if not already known.",
+                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages, then read.pages.",
+                                ],
+                            }
+                        ]
+                        await emit_trace(
+                            "think",
+                            "Finalization requested but evidence gate unmet (missing read.pages). Continuing think loop.",
+                            meta={"stage": "final_gate", "round": round_idx},
+                        )
+                        continue
+                    await emit_trace(
+                        "think",
+                        "Think requested finalization (stopping reasoning loop and proceeding to report).",
+                        meta={"stage": "finalize", "round": round_idx},
+                    )
+                    break
+
                 tool_call_records, tool_call_summary = await self._execute_tool_calls_from_think(
                     think_step_id=think_step_id,
                     question=question,
@@ -341,6 +372,19 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "coverage_metrics": coverage_metrics,
             "tool_memoization": tool_memo.stats(),
         }
+
+    @staticmethod
+    def _extract_is_final_from_think_notes(think_notes: Sequence[ThinkNote]) -> bool | None:
+        if not think_notes:
+            return None
+        for note in reversed(list(think_notes)):
+            raw = note.metadata.get("raw") if isinstance(note.metadata, dict) else None
+            if not isinstance(raw, dict):
+                continue
+            if "is_final" not in raw:
+                continue
+            return bool(raw.get("is_final"))
+        return None
 
     @staticmethod
     def _should_require_primary_page_evidence(context: GraphQueryContext) -> bool:
