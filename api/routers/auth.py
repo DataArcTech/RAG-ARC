@@ -25,7 +25,6 @@ from application.account.user import Account
 from config.application.account_config import AccountConfig
 from api.schemas.response import StandardResponse
 from core.user_management.user import StorageOperationError
-from core.utils.path_guard import require_writable_dir
 
 
 def _get_jwt_secret_key() -> str:
@@ -41,25 +40,34 @@ def _get_jwt_secret_key() -> str:
     if value:
         return value
 
+    # Prefer IOManager-backed persistence (works for both LocalDB and MinIO backends).
+    try:
+        import app_registration
+
+        io_manager = app_registration.registrator.get_object("io_manager")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"io_manager is required for JWT secret persistence: {exc}") from exc
+
+    if io_manager is None:
+        raise RuntimeError("io_manager is required for JWT secret persistence")
+
     runtime_dir_virtual = str(os.getenv("RAGARC_RUNTIME_DIR", "io://runtime") or "").strip() or "io://runtime"
     if not runtime_dir_virtual.startswith("io://"):
         raise RuntimeError("RAGARC_RUNTIME_DIR must be an io:// virtual path")
-    runtime_dir = Path(require_writable_dir(runtime_dir_virtual))
-    secret_path = runtime_dir / "jwt_secret_key"
+    secret_ref = runtime_dir_virtual.rstrip("/") + "/jwt_secret_key"
 
     try:
-        if secret_path.exists():
-            existing = secret_path.read_text(encoding="utf-8").strip()
-            if existing:
-                return existing
+        existing = io_manager.get_text_path(secret_ref)
+        if existing and existing.strip():
+            return existing.strip()
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Failed to read persisted JWT secret key at {secret_path}") from exc
+        raise RuntimeError(f"Failed to read persisted JWT secret key at {secret_ref}") from exc
 
     generated = secrets.token_hex(32)
     try:
-        secret_path.write_text(generated, encoding="utf-8")
+        io_manager.put_text(namespace="runtime", key="jwt_secret_key", text=generated)
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Failed to persist JWT secret key at {secret_path}") from exc
+        raise RuntimeError(f"Failed to persist JWT secret key at {secret_ref}") from exc
     return generated
 
 

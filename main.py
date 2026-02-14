@@ -261,8 +261,12 @@ async def validation_exception_handler(request, exc):
     )
 
 app.mount("/mcp", mcp.mcp_app)
-# Mount static file service for parsed files (virtual io:// path mapped to LocalDB).
+# Mount static file service for parsed files (LocalDB only).
 try:
+    backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
+    if backend == "minio":
+        raise RuntimeError("parsed_files static mount is disabled for IO_STORE_BACKEND=minio (no local filesystem mapping)")
+
     parser_output_dir_virtual = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "").strip() or "io://parsed_files"
     if not parser_output_dir_virtual.startswith("io://"):
         raise ValueError("PARSER_OUTPUT_DIR must be an io:// virtual path")

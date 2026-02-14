@@ -150,8 +150,9 @@ Benchmark/实验模式：
 | `FILE_STORE_BASE_PATH` | `io://file_store` | 原始文件虚拟路径前缀（io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | 解析结果 blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
 | `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Chunk blob 虚拟路径前缀（io://...），映射到 LocalDB。 |
-| `IO_STORE_BACKEND` | `localdb` | `io://...` 的后端选择器。Phase 1 支持 `localdb`；`minio` 用于 Docker 本地 MinIO 的脚手架，后续阶段会完整接入。 |
-| `IO_STORE_BASE_PATH` | `./data/localdb` | io:// 映射的物理 LocalDB 根目录（Phase 1）。 |
+| `IO_STORE_BACKEND` | `localdb` | `io://...` 的后端选择器。`localdb` 会把数据落到本地文件系统（位于 `IO_STORE_BASE_PATH`）。`minio` 会把 IO 对象持久化到 MinIO；除本地专用 namespace（通常是索引）外，默认不提供本地文件系统映射。 |
+| `IO_STORE_BASE_PATH` | `./data/localdb` | io:// 的本地持久化根目录：当 `IO_STORE_BACKEND=localdb` 时所有 io:// 都映射到这里；当 `IO_STORE_BACKEND=minio` 时仅 `IO_LOCAL_PERSIST_NAMESPACES` 中的 namespace 会映射到这里（通常是索引）。 |
+| `IO_LOCAL_PERSIST_NAMESPACES` | `unified_faiss_index,section_faiss_index,unified_bm25_index,section_bm25_index,graph_index_neo4j,graph_index` | 逗号分隔的 io:// namespace 列表：即使在 `IO_STORE_BACKEND=minio` 下也仍然落到 `IO_STORE_BASE_PATH`（通常是索引目录）。 |
 | `IO_STORE_DEFAULT_NAMESPACE` | `io` | IOManager 默认 namespace（key 前缀）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
 | `FAISS_INDEX_PATH` | `io://unified_faiss_index` | FAISS 索引虚拟基目录（io://...，映射到 LocalDB）。启用 owner-scoped 后真实索引位于 `.../owners/<owner_id>/`。 |
@@ -468,7 +469,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
-| `RAGARC_LOG_DIR` | `io://logs` | 日志虚拟目录（io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
+| `RAGARC_LOG_DIR` | `io://logs` | 日志虚拟目录（io://...），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | 应用启动依赖检查模式（Postgres/Redis/Neo4j）：`off`/`warn`/`strict`。注意：当前 API 启动在该变量未设置时默认走 `strict`。 |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | 知识库索引任务依赖检查模式（`/knowledge/*` 索引与 Celery 任务使用）：`off`/`warn`/`strict`。单测为保持 hermetic 默认设置为 `off`。 |
 | `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | `Knowledge.is_file_active` 是否额外校验底层 blob 是否存在（避免返回“元数据存在但文件已丢失”的引用来源，前端下载会 404）。 |
@@ -478,7 +479,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/图片解析方式：`native`（不做 OCR；仅 PDF 文本抽取）、`dotsocr`（本地 DotsOCR OCR）、`mineru`（远程 MinerU 服务）。 |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 统一解析输出虚拟目录（io://...，native/dots_ocr/vlm_ocr/mineru 会落到子目录），映射到 LocalDB。 |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 统一解析输出虚拟目录（io://...，native/dots_ocr/vlm_ocr/mineru 会落到子目录），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
 | `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖。 |
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
@@ -520,7 +521,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint（`host:port`）。当使用 `./start.sh` 且 `IO_STORE_BACKEND=minio` 时，容器内可通过 `rag-arc-minio:9000` 访问。 |
+| `MINIO_MANAGED_BY_DOCKER` | `false` | 当 `IO_STORE_BACKEND=minio` 时，是否由 `./start.sh` 启动本地 MinIO 容器（`true/false`）。若为 `false`，需要通过 `MINIO_ENDPOINT` 提供外部 MinIO。 |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint（`host:port`）。若使用 Docker 管理的 MinIO（`MINIO_MANAGED_BY_DOCKER=true`），容器内一般用 `rag-arc-minio:9000`（建议在 `.env` 显式设置 `MINIO_ENDPOINT=rag-arc-minio:9000`）。本地 `uv run` 进程通常是 `localhost:9000`。 |
 | `MINIO_BUCKET` | `test-bucket` | MinIO bucket 名称（用于 blob 存取）。 |
 | `MINIO_SECURE` | `false` | 连接 MinIO 时是否使用 HTTPS（`true`/`false`）。 |
 | `MINIO_USERNAME` | `root` | MinIO 用户名/Access Key（server bootstrap + client 的兜底凭据）。 |

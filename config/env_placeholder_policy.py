@@ -31,6 +31,8 @@ ENV_DEFAULTS: dict[str, str] = {
     "RAGARC_LOG_DIR": "io://logs",
     # IO manager store base path (Phase 1: LocalDB-backed; later can point to an object store adapter).
     "IO_STORE_BASE_PATH": "./data/localdb",
+    # Namespaces that remain local-persistent even when IO_STORE_BACKEND=minio (typically index dirs).
+    "IO_LOCAL_PERSIST_NAMESPACES": "unified_faiss_index,section_faiss_index,unified_bm25_index,section_bm25_index,graph_index_neo4j,graph_index",
     "IO_STORE_DEFAULT_NAMESPACE": "io",
     # MultiPath fusion weights (RAG inference).
     # Order aligns with `config/json_configs/rag_inference*.json` retrievers: [dense, bm25, graph].

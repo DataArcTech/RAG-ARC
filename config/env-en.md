@@ -150,8 +150,9 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `FILE_STORE_BASE_PATH` | `io://file_store` | Virtual base path (io://...) for original files (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `io://parsed_content_store` | Virtual base path (io://...) for parsed content blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
 | `CHUNK_STORE_BASE_PATH` | `io://chunk_store` | Virtual base path (io://...) for chunk blobs (mapped to LocalDB under `IO_STORE_BASE_PATH`). |
-| `IO_STORE_BACKEND` | `localdb` | IO backend selector for `io://...` paths. Phase 1 supports `localdb`; `minio` is used for Docker-local MinIO scaffolding and will be fully wired in the next phase. |
-| `IO_STORE_BASE_PATH` | `./data/localdb` | Physical LocalDB root directory for io:// mapping (Phase 1). |
+| `IO_STORE_BACKEND` | `localdb` | IO backend selector for `io://...` paths. `localdb` persists to the local filesystem under `IO_STORE_BASE_PATH`. `minio` persists IO objects to MinIO; local filesystem mapping is disabled except for local-only namespaces (typically indexes). |
+| `IO_STORE_BASE_PATH` | `./data/localdb` | Persistent LocalDB root directory used for all io:// filesystem mapping when `IO_STORE_BACKEND=localdb`, and for selected local-only namespaces via `IO_LOCAL_PERSIST_NAMESPACES` when `IO_STORE_BACKEND=minio`. |
+| `IO_LOCAL_PERSIST_NAMESPACES` | `unified_faiss_index,section_faiss_index,unified_bm25_index,section_bm25_index,graph_index_neo4j,graph_index` | Comma-separated list of io:// namespaces that remain local-persistent under `IO_STORE_BASE_PATH` even when `IO_STORE_BACKEND=minio` (typically index directories). |
 | `IO_STORE_DEFAULT_NAMESPACE` | `io` | Default namespace (key prefix) for IOManager. |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `io://files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
 | `FAISS_INDEX_PATH` | `io://unified_faiss_index` | Virtual base directory (io://...) for FAISS indexes (mapped to LocalDB). Owner-scoped artifacts live under `.../owners/<owner_id>/`. |
@@ -470,7 +471,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
-| `RAGARC_LOG_DIR` | `io://logs` | Virtual directory (io://...) for log files, mapped to LocalDB under `IO_STORE_BASE_PATH`. |
+| `RAGARC_LOG_DIR` | `io://logs` | Virtual directory (io://...) for log files, persisted via IO backend (`localdb` or `minio`). |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | Dependency check mode for app startup (Postgres/Redis/Neo4j): `off`/`warn`/`strict`. Note: the API startup currently defaults to `strict` when this env var is unset. |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | Dependency check mode for knowledge indexing tasks (used by `/knowledge/*` indexing and Celery tasks): `off`/`warn`/`strict`. Unit tests set this to `off` for hermetic runs. |
 | `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | Whether `Knowledge.is_file_active` also checks that the underlying blob exists (prevents returning citations that later 404 in file download flows). |
@@ -480,7 +481,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/image parse mode: `native` (no OCR; PDF text extraction only), `dotsocr` (local OCR), `mineru` (remote MinerU service). |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Unified virtual base directory (io://...) for parser outputs (native/dots_ocr/vlm_ocr/mineru subfolders), mapped to LocalDB. |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Unified virtual base directory (io://...) for parser outputs (native/dots_ocr/vlm_ocr/mineru subfolders), persisted via IO backend (`localdb` or `minio`). |
 | `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory. |
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
@@ -522,7 +523,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint (`host:port`). When using `./start.sh` with `IO_STORE_BACKEND=minio`, containers can reach MinIO at `rag-arc-minio:9000`. |
+| `MINIO_MANAGED_BY_DOCKER` | `false` | When `IO_STORE_BACKEND=minio`, whether `./start.sh` should also start a local MinIO container (`true/false`). If `false`, you must provide an external MinIO endpoint via `MINIO_ENDPOINT`. |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO endpoint (`host:port`). For Docker-managed MinIO (`MINIO_MANAGED_BY_DOCKER=true`), containers can reach it at `rag-arc-minio:9000` (set `MINIO_ENDPOINT=rag-arc-minio:9000` in `.env`). For local `uv run` processes, `localhost:9000` is typical. |
 | `MINIO_BUCKET` | `test-bucket` | Bucket name for MinIO-backed blob operations. |
 | `MINIO_SECURE` | `false` | Use HTTPS when connecting to MinIO (`true`/`false`). |
 | `MINIO_USERNAME` | `root` | MinIO access key / username (fallback credentials for both server bootstrap + client config). |

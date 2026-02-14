@@ -25,6 +25,9 @@ def resolve_local_image_paths_for_mineru(
     parser_output_dir: str | None = None,
 ) -> List[Path]:
     """Resolve MinerU relative image URLs (images/...) into local file paths under PARSER_OUTPUT_DIR."""
+    backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower()
+    if backend == "minio":
+        raise RuntimeError("MinerU image path resolution to local filesystem is disabled when IO_STORE_BACKEND=minio")
     base = (parser_output_dir or os.getenv("PARSER_OUTPUT_DIR") or "io://parsed_files").strip() or "io://parsed_files"
     if not base.startswith("io://"):
         raise ValueError("PARSER_OUTPUT_DIR must be an io:// virtual path")

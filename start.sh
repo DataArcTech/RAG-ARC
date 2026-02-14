@@ -64,6 +64,14 @@ should_start_minio() {
     [[ "${backend,,}" == "minio" ]]
 }
 
+should_manage_minio_container() {
+    if ! should_start_minio; then
+        return 1
+    fi
+    local managed="${MINIO_MANAGED_BY_DOCKER:-false}"
+    [[ "${managed,,}" == "true" || "${managed}" == "1" || "${managed,,}" == "yes" ]]
+}
+
 ensure_docker_image() {
     local image="$1"
     if [[ -z "${image}" ]]; then
@@ -101,7 +109,7 @@ prepare_host_directories() {
         chmod -R ug+rwx "$dir" 2>/dev/null || true
     done
 
-    if should_start_minio; then
+    if should_manage_minio_container; then
         mkdir -p "data/minio"
         if command -v chown >/dev/null 2>&1; then
             sudo -n chown -R "$HOST_UID:$HOST_GID" "data/minio" 2>/dev/null || chown -R "$HOST_UID:$HOST_GID" "data/minio" || true
@@ -170,7 +178,7 @@ check_images() {
         fi
     fi
 
-    if should_start_minio; then
+    if should_manage_minio_container; then
         MINIO_IMAGE=${MINIO_IMAGE:-quay.io/minio/minio:latest}
         ensure_docker_image "${MINIO_IMAGE}" || MISSING_IMAGES+=("${MINIO_IMAGE}")
     fi
@@ -274,13 +282,17 @@ stop_old_containers() {
         print_message "$GREEN" "✅ Old neo4j container cleaned"
     fi
 
-    # Stop and remove old MinIO container (optional)
-    OLD_MINIO=$(docker ps -a -q -f name=rag-arc-minio)
-    if [ ! -z "$OLD_MINIO" ]; then
-        print_message "$YELLOW" "⚠️  Found old minio container, stopping and removing..."
-        docker stop rag-arc-minio 2>/dev/null || true
-        docker rm rag-arc-minio 2>/dev/null || true
-        print_message "$GREEN" "✅ Old minio container cleaned"
+    # Stop and remove old MinIO container (optional, only when managed by this script)
+    if should_manage_minio_container; then
+        OLD_MINIO=$(docker ps -a -q -f name=rag-arc-minio)
+        if [ ! -z "$OLD_MINIO" ]; then
+            print_message "$YELLOW" "⚠️  Found old minio container, stopping and removing..."
+            docker stop rag-arc-minio 2>/dev/null || true
+            docker rm rag-arc-minio 2>/dev/null || true
+            print_message "$GREEN" "✅ Old minio container cleaned"
+        fi
+    else
+        OLD_MINIO=""
     fi
     
     if [ -z "$OLD_APP" ] && [ -z "$OLD_POSTGRES" ] && [ -z "$OLD_REDIS" ] && [ -z "$OLD_NEO4J" ] && [ -z "$OLD_MINIO" ]; then
@@ -394,7 +406,7 @@ start_neo4j() {
 start_minio() {
     load_dotenv
     refresh_env_derived
-    if ! should_start_minio; then
+    if ! should_manage_minio_container; then
         return 0
     fi
 
@@ -795,8 +807,10 @@ show_services_info() {
     print_message "$GREEN" "   - PostgreSQL: rag-arc-postgres:5432"
     print_message "$GREEN" "   - Redis: rag-arc-redis:6379"
     print_message "$GREEN" "   - Neo4j: bolt://rag-arc-neo4j:7687"
-    if should_start_minio; then
+    if should_manage_minio_container; then
         print_message "$GREEN" "   - MinIO: http://rag-arc-minio:9000"
+    elif should_start_minio; then
+        print_message "$YELLOW" "   - MinIO: external (${MINIO_ENDPOINT:-<set MINIO_ENDPOINT>})"
     fi
     echo ""
 
@@ -811,7 +825,7 @@ show_services_info() {
         print_message "$GREEN" "   - Neo4j Browser: http://localhost:${NEO4J_HTTP_PORT:-7474}"
         print_message "$GREEN" "   - Neo4j Bolt: bolt://localhost:${NEO4J_BOLT_PORT:-7687}"
     fi
-    if should_start_minio && [[ "${EXPOSE_MINIO:-false}" == "true" ]]; then
+    if should_manage_minio_container && [[ "${EXPOSE_MINIO:-false}" == "true" ]]; then
         print_message "$GREEN" "   - MinIO API: http://localhost:${MINIO_HOST_PORT:-9000}"
         print_message "$GREEN" "   - MinIO Console: http://localhost:${MINIO_CONSOLE_HOST_PORT:-9001}"
     fi
