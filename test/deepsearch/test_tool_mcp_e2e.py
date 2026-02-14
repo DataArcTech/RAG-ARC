@@ -73,7 +73,7 @@ async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
         tool_manager_config={
             "enable_builtin_tools": False,
             "enabled_tools": {"think": {"enabled": True}},
-            "artifact_dir": str(tmp_path),
+            "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/server",
         },
         local_tools={"think": _ScopeEchoTool(descriptor)},
     )
@@ -90,7 +90,7 @@ async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
             tool_configs={
                 "enable_builtin_tools": False,
                 "enabled_tools": {"think": {"mcp_only": True}},
-                "artifact_dir": str(tmp_path),
+                "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/client",
                 "max_remote_evidences": 32,
                 "max_remote_context_chars": 4096,
             },
@@ -123,7 +123,7 @@ async def test_mcp_tool_scope_override_trusted_token_allows_override(tmp_path):
         tool_manager_config={
             "enable_builtin_tools": False,
             "enabled_tools": {"think": {"enabled": True}},
-            "artifact_dir": str(tmp_path),
+            "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/server",
         },
         local_tools={"think": _ScopeEchoTool(descriptor)},
         scope_override_policy="allow_trusted",
@@ -139,7 +139,7 @@ async def test_mcp_tool_scope_override_trusted_token_allows_override(tmp_path):
             tool_configs={
                 "enable_builtin_tools": False,
                 "enabled_tools": {"think": {"mcp_only": True}},
-                "artifact_dir": str(tmp_path),
+                "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/client",
                 "max_remote_evidences": 32,
                 "max_remote_context_chars": 4096,
             },

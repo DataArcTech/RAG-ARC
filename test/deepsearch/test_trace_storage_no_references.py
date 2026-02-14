@@ -1,12 +1,9 @@
-import json
-from pathlib import Path
-
 from core.deepsearch.trace import TraceEvent
 
 
 def test_save_trace_events_to_file_does_not_append_references_section(tmp_path, monkeypatch):
     # Keep test artifacts isolated from local/ workspace directories.
-    monkeypatch.setenv("DEEPSEARCH_TRACE_STORAGE_PATH", str(tmp_path))
+    monkeypatch.setenv("DEEPSEARCH_TRACE_STORAGE_PATH", f"io://deepsearch_traces/{tmp_path.name}")
 
     from api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_handler import _save_trace_events_to_file
 
@@ -35,8 +32,13 @@ def test_save_trace_events_to_file_does_not_append_references_section(tmp_path, 
     )
 
     assert saved_path
-    payload = json.loads(Path(saved_path).read_text(encoding="utf-8"))
-    answer = payload["deepsearch_result"]["report"]["answer"]
+    from app_registration import registrator
+
+    io_manager = registrator.get_object("io_manager")
+    payload = io_manager.get_json(saved_path)
+    assert isinstance(payload, dict)
+    answer = (payload.get("deepsearch_result") or {}).get("report", {}).get("answer")
+    assert isinstance(answer, str)
 
     # Product requirement: rely on <sup> anchors + sources mapping; avoid dumping a "References" section into text.
     assert "<sup>1</sup>" in answer

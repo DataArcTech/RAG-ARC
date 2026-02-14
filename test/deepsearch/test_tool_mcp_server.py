@@ -68,7 +68,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tm
         instructions="test",
         adapter=_StubAdapter(),
         default_scope=GraphAccessScope(scope_id="stub-owner"),
-        tool_manager_config={"artifact_dir": str(tmp_path)},
+        tool_manager_config={"artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/mcp_server"},
     )
 
     descriptor = get_tool_descriptor("graph.beam_search")
@@ -93,7 +93,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tm
 @pytest.mark.asyncio
 async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_SCOPE_ID", "owner-xyz")
-    monkeypatch.setenv("TEST_TOOL_ARTIFACT_DIR", str(tmp_path / "tool_artifacts"))
+    monkeypatch.setenv("TEST_TOOL_ARTIFACT_DIR", f"io://deepsearch_artifacts/{tmp_path.name}/tool_artifacts")
     monkeypatch.delenv("DEEPSEARCH_DEFAULT_ADAPTER", raising=False)
     payload = {
         "type": "deepsearch_tool_mcp_server",
