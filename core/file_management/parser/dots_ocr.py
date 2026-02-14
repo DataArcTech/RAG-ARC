@@ -11,7 +11,6 @@ import fitz
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
 from framework.thread_pool import get_thread_pool
-from core.utils.path_guard import require_writable_dir
 
 # Import DotsOCR utilities
 from .dots_ocr_utils.image_utils import fetch_image, smart_resize, get_image_by_fitz_doc
@@ -69,6 +68,11 @@ class DotsOCRParser(AbstractParser):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Parse a file (PDF or image) from binary data"""
+        import app_registration
+
+        io_manager = app_registration.registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for DotsOCRParser")
 
         prompt_mode = getattr(self.config, "default_prompt_mode")
         bbox = getattr(self.config, "default_bbox")
@@ -90,9 +94,6 @@ class DotsOCRParser(AbstractParser):
         output_dir_virtual = str(output_dir).strip()
         if not output_dir_virtual.startswith("io://"):
             raise ValueError("DotsOCRParser config.output_dir must be an io:// virtual path")
-        output_dir_local = require_writable_dir(output_dir_virtual)
-        save_dir_local = os.path.join(output_dir_local, base_filename)
-        os.makedirs(save_dir_local, exist_ok=True)
         save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
         # Run parsing in thread pool to avoid blocking the event loop
@@ -102,7 +103,6 @@ class DotsOCRParser(AbstractParser):
                 self._parse_pdf,
                 file_data,
                 base_filename,
-                save_dir_local,
                 prompt_mode,
                 **kwargs
             )
@@ -111,39 +111,44 @@ class DotsOCRParser(AbstractParser):
                 self._parse_image,
                 file_data,
                 base_filename,
-                save_dir_local,
                 prompt_mode,
                 bbox=bbox,
                 fitz_preprocess=fitz_preprocess,
                 **kwargs
             )
 
-        def _to_virtual_path(value: Any) -> Any:
-            if not isinstance(value, str) or not value.strip():
-                return value
-            normalized = value.replace("\\", "/")
-            local_prefix = save_dir_local.replace("\\", "/").rstrip("/")
-            if normalized == local_prefix:
-                return save_dir_virtual
-            if normalized.startswith(local_prefix + "/"):
-                suffix = normalized[len(local_prefix) + 1 :]
-                return f"{save_dir_virtual.rstrip('/')}/{suffix}"
-            return value
+        logger.info("Parsing finished, results saved to %s", save_dir_virtual)
 
+        persisted_results: List[Dict[str, Any]] = []
         for item in results or []:
             if not isinstance(item, dict):
                 continue
-            for key in ("md_content_path", "layout_info_path", "layout_image_path"):
-                if key in item:
-                    item[key] = _to_virtual_path(item.get(key))
+            artifact_name = str(item.get("artifact_name") or base_filename).strip() or base_filename
+            md_content = item.get("md_content")
+            layout_info = item.get("layout_info")
 
-        logger.info("Parsing finished, results saved to %s", save_dir_virtual)
+            if isinstance(md_content, str) and md_content.strip():
+                md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{artifact_name}.md"
+                io_manager.put_text_path(md_path_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
+                item["md_content_path"] = md_path_virtual
+                item["text"] = md_content
+            if layout_info is not None:
+                json_path_virtual = f"{save_dir_virtual.rstrip('/')}/{artifact_name}.json"
+                io_manager.put_json_path(json_path_virtual, payload=layout_info)
+                item["layout_info_path"] = json_path_virtual
 
-        with open(os.path.join(output_dir_local, f"{base_filename}.jsonl"), 'w', encoding="utf-8") as w:
-            for result in results:
-                w.write(json.dumps(result, ensure_ascii=False) + '\n')
+            item.pop("md_content", None)
+            item.pop("layout_info", None)
+            item.pop("artifact_name", None)
+            persisted_results.append(item)
 
-        return results
+        io_manager.put_text_path(
+            f"{output_dir_virtual.rstrip('/')}/{base_filename}.jsonl",
+            text="".join([json.dumps(row, ensure_ascii=False) + "\n" for row in persisted_results]),
+            content_type="application/jsonl; charset=utf-8",
+        )
+
+        return persisted_results
 
     def get_supported_extensions(self) -> List[str]:
         """Get supported file extensions"""
@@ -153,7 +158,6 @@ class DotsOCRParser(AbstractParser):
         self,
         file_data: bytes,
         filename: str,
-        save_dir: str,
         prompt_mode: str,
         bbox: Optional[Any] = None,
         fitz_preprocess: bool = False,
@@ -162,7 +166,7 @@ class DotsOCRParser(AbstractParser):
         """Parse a single image file from binary data"""
         origin_image = Image.open(io.BytesIO(file_data))
         result = self._parse_single_image(
-            origin_image, prompt_mode, save_dir, filename,
+            origin_image, prompt_mode, filename,
             source="image", bbox=bbox, fitz_preprocess=fitz_preprocess
         )
         result['filename'] = filename
@@ -172,7 +176,6 @@ class DotsOCRParser(AbstractParser):
         self,
         file_data: bytes,
         filename: str,
-        save_dir: str,
         prompt_mode: str,
         **kwargs
     ) -> List[Dict[str, Any]]:
@@ -201,7 +204,6 @@ class DotsOCRParser(AbstractParser):
             {
                 "origin_image": image,
                 "prompt_mode": prompt_mode,
-                "save_dir": save_dir,
                 "save_name": filename,
                 "source": "pdf",
                 "page_idx": i,
@@ -231,7 +233,6 @@ class DotsOCRParser(AbstractParser):
         self,
         origin_image: Image.Image,
         prompt_mode: str,
-        save_dir: str,
         save_name: str,
         source: str = "image",
         page_idx: int = 0,
@@ -347,13 +348,9 @@ class DotsOCRParser(AbstractParser):
                 #     # 'layout_image_path': image_layout_path,
                 # })
 
-                md_file_path = os.path.join(save_dir, f"{save_name}.md")
-                with open(md_file_path, "w", encoding="utf-8") as md_file:
-                    # Clean base64 images from markdown content
-                    cleaned_cells = clean_base64_images(cells)
-                    md_file.write(cleaned_cells)
                 result.update({
-                    'md_content_path': md_file_path,
+                    'artifact_name': save_name,
+                    'md_content': clean_base64_images(cells),
                     'filtered': True
                 })
             else:
@@ -364,15 +361,12 @@ class DotsOCRParser(AbstractParser):
                 #     logger.info(f"Error drawing layout on image: {e}")
                 #     image_with_layout = origin_image
 
-                json_file_path = os.path.join(save_dir, f"{save_name}.json")
-                with open(json_file_path, 'w', encoding="utf-8") as w:
-                    json.dump(cells, w, ensure_ascii=False, indent=4)
-
                 # Don't save image layout - not needed
                 # image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
                 # image_with_layout.save(image_layout_path)
                 result.update({
-                    'layout_info_path': json_file_path,
+                    'artifact_name': save_name,
+                    'layout_info': cells,
                     # 'layout_image_path': image_layout_path,
                 })
 
@@ -382,17 +376,13 @@ class DotsOCRParser(AbstractParser):
                     # Don't generate _nohf.md - not needed
                     # md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True)
 
-                    md_file_path = os.path.join(save_dir, f"{save_name}.md")
-                    with open(md_file_path, "w", encoding="utf-8") as md_file:
-                        md_file.write(md_content)
-
                     # Don't save _nohf.md - not needed
                     # md_nohf_file_path = os.path.join(save_dir, f"{save_name}_nohf.md")
                     # with open(md_nohf_file_path, "w", encoding="utf-8") as md_file:
                     #     md_file.write(md_content_no_hf)
 
                     result.update({
-                        'md_content_path': md_file_path,
+                        'md_content': md_content,
                         # 'md_content_nohf_path': md_nohf_file_path,
                     })
         else:
@@ -404,13 +394,9 @@ class DotsOCRParser(AbstractParser):
             # })
 
             md_content = response
-            md_file_path = os.path.join(save_dir, f"{save_name}.md")
-            with open(md_file_path, "w", encoding="utf-8") as md_file:
-                # Clean base64 images from markdown content
-                cleaned_md_content = clean_base64_images(md_content)
-                md_file.write(cleaned_md_content)
             result.update({
-                'md_content_path': md_file_path,
+                'artifact_name': save_name,
+                'md_content': clean_base64_images(md_content),
             })
 
         return result

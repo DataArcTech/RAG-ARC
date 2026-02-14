@@ -13,7 +13,6 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
-from core.utils.path_guard import require_writable_dir
 from framework.thread_pool import get_thread_pool
 
 # Import only necessary utilities
@@ -65,6 +64,11 @@ class VLMOcrParser(AbstractParser):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Parse a file (PDF or image) from binary data - simple OCR mode"""
+        import app_registration
+
+        io_manager = app_registration.registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for VLMOcrParser")
 
         # Check if file type is supported
         base_filename, file_ext = os.path.splitext(filename)
@@ -82,9 +86,6 @@ class VLMOcrParser(AbstractParser):
         output_dir_virtual = str(output_dir).strip()
         if not output_dir_virtual.startswith("io://"):
             raise ValueError("VLMOcrParser config.output_dir must be an io:// virtual path")
-        output_dir_local = require_writable_dir(output_dir_virtual)
-        save_dir_local = os.path.join(output_dir_local, base_filename)
-        os.makedirs(save_dir_local, exist_ok=True)
         save_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{base_filename}"
 
         # Run parsing in thread pool to avoid blocking the event loop
@@ -94,7 +95,6 @@ class VLMOcrParser(AbstractParser):
                 self._parse_pdf,
                 file_data,
                 base_filename,
-                save_dir_local,
                 **kwargs
             )
         elif file_ext in image_extensions:
@@ -102,38 +102,34 @@ class VLMOcrParser(AbstractParser):
                 self._parse_image,
                 file_data,
                 base_filename,
-                save_dir_local,
                 **kwargs
             )
 
-        def _to_virtual_path(value: Any) -> Any:
-            if not isinstance(value, str) or not value.strip():
-                return value
-            normalized = value.replace("\\", "/")
-            local_prefix = save_dir_local.replace("\\", "/").rstrip("/")
-            if normalized == local_prefix:
-                return save_dir_virtual
-            if normalized.startswith(local_prefix + "/"):
-                suffix = normalized[len(local_prefix) + 1 :]
-                return f"{save_dir_virtual.rstrip('/')}/{suffix}"
-            return value
+        logger.info("Parsing finished, results saved to %s", save_dir_virtual)
 
+        persisted_results: List[Dict[str, Any]] = []
         for item in results or []:
             if not isinstance(item, dict):
                 continue
-            for key in ("md_content_path", "layout_info_path", "layout_image_path"):
-                if key in item:
-                    item[key] = _to_virtual_path(item.get(key))
+            artifact_name = str(item.get("artifact_name") or base_filename).strip() or base_filename
+            md_content = item.get("md_content")
+            if isinstance(md_content, str) and md_content.strip():
+                md_path_virtual = f"{save_dir_virtual.rstrip('/')}/{artifact_name}.md"
+                io_manager.put_text_path(md_path_virtual, text=md_content, content_type="text/markdown; charset=utf-8")
+                item["md_content_path"] = md_path_virtual
+                item["text_content"] = md_content
+                item["text"] = md_content
+            item.pop("md_content", None)
+            item.pop("artifact_name", None)
+            persisted_results.append(item)
 
-        logger.info("Parsing finished, results saved to %s", save_dir_virtual)
+        io_manager.put_text_path(
+            f"{output_dir_virtual.rstrip('/')}/{base_filename}.jsonl",
+            text="".join([json.dumps(row, ensure_ascii=False) + "\n" for row in persisted_results]),
+            content_type="application/jsonl; charset=utf-8",
+        )
 
-        jsonl_path = os.path.join(output_dir_local, f"{base_filename}.jsonl")
-        os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
-        with open(jsonl_path, 'w', encoding="utf-8") as w:
-            for result in results:
-                w.write(json.dumps(result, ensure_ascii=False) + '\n')
-
-        return results
+        return persisted_results
 
     def get_supported_extensions(self) -> List[str]:
         """Get supported file extensions"""
@@ -143,13 +139,12 @@ class VLMOcrParser(AbstractParser):
         self,
         file_data: bytes,
         filename: str,
-        save_dir: str,
         **kwargs
     ) -> List[Dict[str, Any]]:
         """Parse a single image file from binary data - simple OCR"""
         origin_image = Image.open(io.BytesIO(file_data))
         result = self._parse_single_image(
-            origin_image, save_dir, os.path.basename(filename), source="image", page_idx=0
+            origin_image, os.path.basename(filename), source="image", page_idx=0
         )
         result['filename'] = filename
         return [result]
@@ -158,7 +153,6 @@ class VLMOcrParser(AbstractParser):
         self,
         file_data: bytes,
         filename: str,
-        save_dir: str,
         **kwargs
     ) -> List[Dict[str, Any]]:
         """Parse a PDF file from binary data - simple OCR"""
@@ -185,7 +179,6 @@ class VLMOcrParser(AbstractParser):
         tasks = [
             {
                 "origin_image": image,
-                "save_dir": save_dir,
                 "save_name": os.path.basename(filename),
                 "source": "pdf",
                 "page_idx": i,
@@ -214,7 +207,6 @@ class VLMOcrParser(AbstractParser):
     def _parse_single_image(
         self,
         origin_image: Image.Image,
-        save_dir: str,
         save_name: str,
         source: str = "image",
         page_idx: int = 0,
@@ -234,14 +226,9 @@ class VLMOcrParser(AbstractParser):
         if source == 'pdf':
             save_name = f"{save_name}_page_{page_idx}"
 
-        # Save markdown content
-        md_file_path = os.path.join(save_dir, f"{save_name}.md")
-        os.makedirs(os.path.dirname(md_file_path), exist_ok=True)
-        with open(md_file_path, "w", encoding="utf-8") as md_file:
-            md_file.write(cleaned_response)
-
         result.update({
-            'md_content_path': md_file_path,
+            "artifact_name": save_name,
+            "md_content": cleaned_response,
             'text_content': cleaned_response
         })
 

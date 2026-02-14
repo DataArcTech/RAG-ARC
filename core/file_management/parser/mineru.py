@@ -1,10 +1,9 @@
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, TYPE_CHECKING
 
 from core.file_management.parser.base import AbstractParser
-from core.utils.path_guard import require_writable_dir, safe_leaf_name
+from core.utils.path_guard import safe_leaf_name
 from framework.thread_pool import get_thread_pool
 
 from encapsulation.remote_services.mineru_service_client import MinerUServiceClient
@@ -55,6 +54,12 @@ class MinerUParser(AbstractParser):
         return [".pdf", ".jpg", ".jpeg", ".png"]
 
     async def parse_file(self, file_data: bytes, filename: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        import app_registration
+
+        io_manager = app_registration.registrator.get_object("io_manager")
+        if io_manager is None:
+            raise RuntimeError("io_manager is required for MinerUParser")
+
         # `force_reparse` bypasses all cache reuse (local + shared) and refreshes the shared-cache
         # entry for the same (bytes_sha256, parser_fingerprint) key after a successful parse.
         #
@@ -73,30 +78,21 @@ class MinerUParser(AbstractParser):
         output_dir_virtual = str(output_dir).strip()
         if not output_dir_virtual.startswith("io://"):
             raise ValueError("MinerUParser config.output_dir must be an io:// virtual path")
-        output_dir_local = require_writable_dir(output_dir_virtual)
         source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
         doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
         doc_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{doc_key}"
-        doc_dir = Path(output_dir_local) / doc_key
-        # If a previous run materialized shared cache via symlink, `force_reparse` needs a real folder.
-        if force_reparse and doc_dir.exists() and doc_dir.is_symlink():
-            try:
-                doc_dir.unlink()
-            except Exception:
-                pass
-        doc_dir.mkdir(parents=True, exist_ok=True)
 
         # Cache reuse: if a previous MinerU run already produced local markdown for this file_id,
         # allow re-indexing to reuse it without calling the remote MinerU service again.
         reuse_cache = False if force_reparse else bool(kwargs.get("reuse_cache", getattr(self.config, "reuse_cache", False)))
-        md_local_path = doc_dir / f"{base_filename}.md"
-        if reuse_cache and md_local_path.exists():
-            md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
+        md_virtual_path = f"{doc_dir_virtual}/{base_filename}.md"
+        if reuse_cache:
+            md_text = io_manager.get_text_path(md_virtual_path) or ""
             if md_text.strip():
-                logger.info("Reusing cached MinerU markdown: %s", md_local_path)
+                logger.info("Reusing cached MinerU markdown: %s", md_virtual_path)
                 return [
                     {
-                        "md_content_path": f"{doc_dir_virtual}/{base_filename}.md",
+                        "md_content_path": md_virtual_path,
                         "text": md_text,
                         "metadata": {
                             "source_file_name": filename,
@@ -107,16 +103,19 @@ class MinerUParser(AbstractParser):
                 ]
 
         # If the filename stem changed between runs, fall back to any markdown file under doc_dir.
-        if reuse_cache and not md_local_path.exists():
-            md_candidates = sorted(doc_dir.glob("*.md"))
-            if md_candidates:
-                candidate = md_candidates[0]
-                md_text = candidate.read_text(encoding="utf-8", errors="ignore")
+        if reuse_cache:
+            try:
+                candidates = [ref for ref in io_manager.list_keys_path(doc_dir_virtual, limit=2000) if str(ref).lower().endswith(".md")]
+            except Exception:
+                candidates = []
+            if candidates:
+                candidate_ref = str(sorted(candidates)[0])
+                md_text = io_manager.get_text_path(candidate_ref) or ""
                 if md_text.strip():
-                    logger.info("Reusing cached MinerU markdown (fallback): %s", candidate)
+                    logger.info("Reusing cached MinerU markdown (fallback): %s", candidate_ref)
                     return [
                         {
-                            "md_content_path": f"{doc_dir_virtual}/{candidate.name}",
+                            "md_content_path": candidate_ref,
                             "text": md_text,
                             "metadata": {
                                 "source_file_name": filename,
@@ -158,29 +157,27 @@ class MinerUParser(AbstractParser):
                     }
                 )
                 shared_key = MinerUSharedCacheKey(bytes_sha256=bytes_sha, parser_fingerprint=fp)
-                shared_dir = shared_cache_hit(shared_root, shared_key)
+                shared_dir = shared_cache_hit(io_manager, shared_root, shared_key)
                 if shared_dir is not None:
-                    mat = materialize_shared_cache(shared_dir=shared_dir, dest_dir=doc_dir, mode=shared_mode)
+                    mat = materialize_shared_cache(io_manager=io_manager, shared_dir=shared_dir, dest_dir=doc_dir_virtual, mode=shared_mode)
                     if mat.get("ok"):
-                        md_candidates = sorted(doc_dir.glob("*.md"))
-                        if md_candidates:
-                            md_text = md_candidates[0].read_text(encoding="utf-8", errors="ignore")
-                            if md_text.strip():
-                                logger.info("Reusing shared MinerU artifacts: %s -> %s", shared_dir, doc_dir)
-                                return [
-                                    {
-                                        "md_content_path": f"{doc_dir_virtual}/{md_candidates[0].name}",
-                                        "text": md_text,
-                                        "metadata": {
-                                            "source_file_name": filename,
-                                            "mineru_shared_cache_reused": True,
-                                            "mineru_shared_cache_sha256": bytes_sha,
-                                            "mineru_shared_cache_fingerprint": fp,
-                                            "mineru_shared_cache_mode": mat.get("mode"),
-                                            "output_dir": doc_dir_virtual,
-                                        },
-                                    }
-                                ]
+                        md_text = io_manager.get_text_path(md_virtual_path) or ""
+                        if md_text.strip():
+                            logger.info("Reusing shared MinerU artifacts: %s -> %s", shared_dir, doc_dir_virtual)
+                            return [
+                                {
+                                    "md_content_path": md_virtual_path,
+                                    "text": md_text,
+                                    "metadata": {
+                                        "source_file_name": filename,
+                                        "mineru_shared_cache_reused": True,
+                                        "mineru_shared_cache_sha256": bytes_sha,
+                                        "mineru_shared_cache_fingerprint": fp,
+                                        "mineru_shared_cache_mode": mat.get("mode"),
+                                        "output_dir": doc_dir_virtual,
+                                    },
+                                }
+                            ]
             except Exception as exc:
                 logger.warning("MinerU shared-cache reuse failed; will fall back: %s", exc)
                 shared_key = None
@@ -203,28 +200,32 @@ class MinerUParser(AbstractParser):
         if not task_id or parse_result.get("status") != "success":
             raise RuntimeError(f"MinerU parsing failed: {parse_result}")
 
-        # Mirror primary artifacts to a stable local layout:
+        # Persist primary artifacts into io:// layout (no local files):
         # - <doc_dir>/<base_filename>.md
         # - <doc_dir>/*_content_list*.json
         # - <doc_dir>/images/...
-        md_local_path = doc_dir / f"{base_filename}.md"
-        content_list_local_path = doc_dir / f"{base_filename}_content_list.json"
-        asset_manifest_local_path = doc_dir / "asset_manifest.json"
-
-        def _download(rel_path: str, dst: Path) -> None:
-            self.client.download_task_file(task_id, rel_path, dst)
-
         md_rel = parse_result.get("markdown_rel_path")
         if md_rel:
-            await get_thread_pool().run_blocking(_download, str(md_rel), md_local_path)
+            md_bytes = await get_thread_pool().run_blocking(self.client.download_task_file_bytes, task_id, str(md_rel))
+            io_manager.put_bytes_path(md_virtual_path, payload=md_bytes, content_type="text/markdown; charset=utf-8")
 
         content_rel = parse_result.get("content_list_rel_path")
         if content_rel:
-            await get_thread_pool().run_blocking(_download, str(content_rel), content_list_local_path)
+            content_bytes = await get_thread_pool().run_blocking(self.client.download_task_file_bytes, task_id, str(content_rel))
+            io_manager.put_bytes_path(
+                f"{doc_dir_virtual}/{base_filename}_content_list.json",
+                payload=content_bytes,
+                content_type="application/json; charset=utf-8",
+            )
 
         manifest_rel = parse_result.get("asset_manifest_rel_path")
         if manifest_rel:
-            await get_thread_pool().run_blocking(_download, str(manifest_rel), asset_manifest_local_path)
+            manifest_bytes = await get_thread_pool().run_blocking(self.client.download_task_file_bytes, task_id, str(manifest_rel))
+            io_manager.put_bytes_path(
+                f"{doc_dir_virtual}/asset_manifest.json",
+                payload=manifest_bytes,
+                content_type="application/json; charset=utf-8",
+            )
 
         images_meta = parse_result.get("images_metadata") or []
         for image in images_meta:
@@ -235,23 +236,21 @@ class MinerUParser(AbstractParser):
                 continue
             rel_dir = Path(rel_path).parent
             subdir = rel_dir.as_posix() if rel_dir.as_posix() not in ("", ".") else "images"
-            dst = doc_dir / subdir / filename_only
-            await get_thread_pool().run_blocking(_download, str(task_rel), dst)
+            image_bytes = await get_thread_pool().run_blocking(self.client.download_task_file_bytes, task_id, str(task_rel))
+            io_manager.put_bytes_path(
+                f"{doc_dir_virtual}/{subdir}/{filename_only}",
+                payload=image_bytes,
+                content_type=None,
+            )
 
         try:
-            import json
-
-            (doc_dir / "mineru_parse_result.json").write_text(
-                json.dumps(parse_result, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            io_manager.put_json_path(f"{doc_dir_virtual}/mineru_parse_result.json", payload=parse_result)
         except Exception as exc:
-            logger.warning("Failed to write mineru_parse_result.json: %s", exc)
+            logger.warning("Failed to persist mineru_parse_result.json: %s", exc)
 
-        if not md_local_path.exists():
-            raise RuntimeError(f"MinerU markdown download missing: {md_local_path}")
-
-        md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
+        md_text = io_manager.get_text_path(md_virtual_path) or ""
+        if not md_text.strip():
+            raise RuntimeError(f"MinerU markdown missing or empty: {md_virtual_path}")
         # Publish to shared cache:
         # - normal: publish on miss (no overwrite)
         # - force_reparse: overwrite to refresh the shared entry for the same bytes+fingerprint key
@@ -273,21 +272,22 @@ class MinerUParser(AbstractParser):
                         }
                     )
                     publish_to_shared_cache(
+                        io_manager=io_manager,
                         shared_root=shared_root_force,
                         key=MinerUSharedCacheKey(bytes_sha256=bytes_sha, parser_fingerprint=fp),
-                        src_dir=doc_dir,
+                        src_dir=doc_dir_virtual,
                         overwrite=True,
                     )
             except Exception:
                 pass
         elif shared_root is not None and shared_key is not None:
             try:
-                publish_to_shared_cache(shared_root=shared_root, key=shared_key, src_dir=doc_dir)
+                publish_to_shared_cache(io_manager=io_manager, shared_root=shared_root, key=shared_key, src_dir=doc_dir_virtual)
             except Exception:
                 pass
         return [
             {
-                "md_content_path": f"{doc_dir_virtual}/{base_filename}.md",
+                "md_content_path": md_virtual_path,
                 "text": md_text,
                 "metadata": {
                     "source_file_name": filename,
