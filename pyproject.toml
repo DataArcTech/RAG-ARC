@@ -53,6 +53,9 @@ dependencies = [
     "minio>=7.2.7",
     # Authentication
     "passlib>=1.7.4",
+    # passlib 1.7.x is not compatible with bcrypt 5.x (import-time backend self-test raises).
+    # Keep bcrypt pinned <5 to ensure CLI/user bootstrap works.
+    "bcrypt<5",
     "pyjwt>=2.8.0",
     # API clients
     "openai>=2.2.0",
