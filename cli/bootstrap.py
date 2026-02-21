@@ -35,7 +35,10 @@ def initialize(owner_id: Optional[str] = None) -> CLIContext:
     """Load environment variables and initialize registrator if needed."""
     global _initialized
     if not _initialized:
-        load_dotenv()
+        # Avoid python-dotenv's frame-based find_dotenv() heuristics; in some execution
+        # environments (e.g. uv + stdin, embedded runners), it can fail to locate .env.
+        # CLI should always honor repo-local `RAG-ARC/.env` as the single source of truth.
+        load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
         configure_scope_provider()  # ensure GraphAccessScope picks up freshly loaded .env values
         app_registration.initialize()
         _initialized = True

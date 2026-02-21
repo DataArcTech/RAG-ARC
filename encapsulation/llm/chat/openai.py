@@ -160,12 +160,42 @@ class OpenAIChatLLM(ChatLLMBase):
                 **kwargs,
             )
 
+        def _extract_provider_error(payload: Any) -> Optional[str]:
+            """Detect error-shaped JSON bodies from OpenAI-compatible gateways.
+
+            Some gateways may return HTTP 200 with an error payload (no `choices`),
+            which the OpenAI SDK can parse without raising. Surface that as an
+            exception so higher-level retry/budget logic can react (e.g., context
+            length vs rate limit).
+            """
+
+            if not isinstance(payload, dict):
+                return None
+            err = payload.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("error") or err.get("type") or ""
+                code = err.get("code") or err.get("status") or ""
+                msg = str(msg).strip()
+                code = str(code).strip()
+                if code and msg:
+                    return f"{code}: {msg}"
+                if msg:
+                    return msg
+                return json.dumps(err, ensure_ascii=False, default=str)[:2000]
+            if isinstance(err, str) and err.strip():
+                return err.strip()
+            if "choices" not in payload:
+                msg = payload.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+            return None
+
         try:
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
             temperature = self._adjust_temperature_for_model(model, temperature)
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
-            response = self.client.chat.completions.create(
+            raw = self.client.with_raw_response.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -173,8 +203,25 @@ class OpenAIChatLLM(ChatLLMBase):
                 **kwargs
             )
 
-            result = response.choices[0].message.content.strip()
-            return result
+            try:
+                body = raw.http_response.json()
+            except Exception:  # noqa: BLE001
+                body = {"_raw_text": (raw.http_response.text or "")[:4000]}
+
+            provider_err = _extract_provider_error(body)
+            if provider_err:
+                raise RuntimeError(f"OpenAI-compatible chat error: {provider_err}")
+            if isinstance(body, dict) and "choices" not in body:
+                raise RuntimeError(f"OpenAI-compatible chat error: missing choices; keys={sorted(body.keys())!r}")
+
+            response = raw.parse()
+            choices = getattr(response, "choices", None)
+            if not choices:
+                raise RuntimeError("OpenAI-compatible chat error: response.choices is empty/None")
+            content = getattr(choices[0].message, "content", None)
+            if content is None:
+                return ""
+            return str(content).strip()
 
         except Exception as e:
             logger.error(f"Chat completion failed: {str(e)}")
@@ -536,19 +583,61 @@ class OpenAIChatLLM(ChatLLMBase):
             import asyncio
             return await asyncio.to_thread(self.chat, messages, **kwargs)
 
+        def _extract_provider_error(payload: Any) -> Optional[str]:
+            if not isinstance(payload, dict):
+                return None
+            err = payload.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("error") or err.get("type") or ""
+                code = err.get("code") or err.get("status") or ""
+                msg = str(msg).strip()
+                code = str(code).strip()
+                if code and msg:
+                    return f"{code}: {msg}"
+                if msg:
+                    return msg
+                return json.dumps(err, ensure_ascii=False, default=str)[:2000]
+            if isinstance(err, str) and err.strip():
+                return err.strip()
+            if "choices" not in payload:
+                msg = payload.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+            return None
+
         try:
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
-            response = await self.async_client.chat.completions.create(
+            raw = await self.async_client.with_raw_response.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 **kwargs
             )
-            result = response.choices[0].message.content
-            return result
+            try:
+                body = raw.http_response.json()
+            except Exception:  # noqa: BLE001
+                body = {"_raw_text": (raw.http_response.text or "")[:4000]}
+
+            provider_err = _extract_provider_error(body)
+            if provider_err:
+                raise RuntimeError(f"OpenAI-compatible chat error: {provider_err}")
+            if isinstance(body, dict) and "choices" not in body:
+                raise RuntimeError(f"OpenAI-compatible chat error: missing choices; keys={sorted(body.keys())!r}")
+
+            # NOTE: `with_raw_response` currently returns a LegacyAPIResponse wrapper in
+            # openai-python 2.x (Stainless legacy wrapper). For the async client, its
+            # `.parse()` is still synchronous. Do NOT await it.
+            response = raw.parse()
+            choices = getattr(response, "choices", None)
+            if not choices:
+                raise RuntimeError("OpenAI-compatible chat error: response.choices is empty/None")
+            content = getattr(choices[0].message, "content", None)
+            if content is None:
+                return ""
+            return str(content)
 
         except Exception as e:
             logger.error(f"Async chat failed: {str(e)}")
