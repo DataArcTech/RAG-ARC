@@ -22,6 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 class _IndexManagerPipelineMixin:
+    @staticmethod
+    def _resolve_io_manager() -> Any | None:
+        """Best-effort access to IOManager.
+
+        NOTE: do not resolve `io://...` paths in core logic. IOManager owns backend mapping
+        (LocalDB now; MinIO later).
+        """
+
+        try:
+            from framework.register import Register
+
+            return Register().get_object("io_manager")
+        except Exception:
+            return None
+
     def _chunk_with_optional_strict_page(
         self,
         *,
@@ -54,7 +69,11 @@ class _IndexManagerPipelineMixin:
                     diagnostics["source"] = "pageindex_content_list"
 
         if not page_texts:
-            loaded_page_texts, load_diag = load_page_markdown(md_path=md_path, output_dir=output_dir)
+            loaded_page_texts, load_diag = load_page_markdown(
+                md_path=md_path,
+                output_dir=output_dir,
+                io_manager=self._resolve_io_manager(),
+            )
             diagnostics.update(load_diag)
             if loaded_page_texts:
                 page_texts = loaded_page_texts
@@ -194,12 +213,14 @@ class _IndexManagerPipelineMixin:
                     from config import pageindex as pageindex_cfg
 
                     if pageindex_cfg.pageindex_enabled():
+                        io_manager = self._resolve_io_manager()
                         pageindex_context = self.pageindex_service.build_context(
                             file_id=file_id,
                             filename=effective_filename,
                             markdown=parsed_text,
                             md_path=md_path_abs,
                             output_dir=output_dir_abs,
+                            io_manager=io_manager,
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -300,6 +321,12 @@ class _IndexManagerPipelineMixin:
                     CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
                 )
 
+                # `process_file_from_parsed_content_id` may be called with `owner_id=...` in kwargs.
+                # `store_chunks_batch` already receives `owner_id` explicitly from file_metadata, so
+                # we must avoid passing duplicate kwargs which would raise a TypeError.
+                store_kwargs = dict(kwargs)
+                store_kwargs.pop("owner_id", None)
+
                 stored_refs: list[tuple[int, str]] = await get_thread_pool().run_blocking(
                     store_batch,
                     source_parsed_content_id=parsed_content_id,
@@ -307,7 +334,7 @@ class _IndexManagerPipelineMixin:
                     chunks=chunks,
                     owner_id=getattr(file_metadata, "owner_id", None),
                     validate_after_store=CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
-                    **kwargs,
+                    **store_kwargs,
                 )
                 for chunk_index, chunk_id in stored_refs:
                     if not chunk_id:
@@ -318,6 +345,8 @@ class _IndexManagerPipelineMixin:
                     except Exception:
                         continue
             else:
+                store_kwargs = dict(kwargs)
+                store_kwargs.pop("owner_id", None)
                 for i, chunk in enumerate(chunks):
                     if chunk is None:
                         continue
@@ -330,7 +359,7 @@ class _IndexManagerPipelineMixin:
                         chunk_index=i,
                         owner_id=getattr(file_metadata, "owner_id", None),
                         validate_after_store=True,
-                        **kwargs,
+                        **store_kwargs,
                     )
                     if chunk_id:
                         chunk_ids.append(chunk_id)
@@ -689,12 +718,14 @@ class _IndexManagerPipelineMixin:
                     from config import pageindex as pageindex_cfg
 
                     if pageindex_cfg.pageindex_enabled():
+                        io_manager = self._resolve_io_manager()
                         pageindex_context = self.pageindex_service.build_context(
                             file_id=file_id,
                             filename=filename,
                             markdown=parsed_text,
                             md_path=md_path_abs,
                             output_dir=output_dir_abs,
+                            io_manager=io_manager,
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -767,6 +798,12 @@ class _IndexManagerPipelineMixin:
                     CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
                 )
 
+                # `process_file_from_parsed_content_id` may be called with `owner_id=...` in kwargs.
+                # `store_chunks_batch` already receives `owner_id` explicitly from file_metadata, so
+                # we must avoid passing duplicate kwargs which would raise a TypeError.
+                store_kwargs = dict(kwargs)
+                store_kwargs.pop("owner_id", None)
+
                 stored_refs: list[tuple[int, str]] = await get_thread_pool().run_blocking(
                     store_batch,
                     source_parsed_content_id=parsed_content_id,
@@ -774,7 +811,7 @@ class _IndexManagerPipelineMixin:
                     chunks=chunks,
                     owner_id=getattr(file_metadata, "owner_id", None),
                     validate_after_store=CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
-                    **kwargs,
+                    **store_kwargs,
                 )
                 for chunk_index, chunk_id in stored_refs:
                     if not chunk_id:
@@ -785,6 +822,8 @@ class _IndexManagerPipelineMixin:
                     except Exception:
                         continue
             else:
+                store_kwargs = dict(kwargs)
+                store_kwargs.pop("owner_id", None)
                 for i, chunk in enumerate(chunks):
                     if chunk is None:
                         continue
@@ -797,7 +836,7 @@ class _IndexManagerPipelineMixin:
                         chunk_index=i,
                         owner_id=getattr(file_metadata, "owner_id", None),
                         validate_after_store=True,
-                        **kwargs,
+                        **store_kwargs,
                     )
                     if chunk_id:
                         chunk_ids.append(chunk_id)
@@ -1082,12 +1121,14 @@ class _IndexManagerPipelineMixin:
                     from config import pageindex as pageindex_cfg
 
                     if pageindex_cfg.pageindex_enabled():
+                        io_manager = self._resolve_io_manager()
                         pageindex_context = self.pageindex_service.build_context(
                             file_id=file_id,
                             filename=filename,
                             markdown=parsed_text,
                             md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
                             output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            io_manager=io_manager,
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -1508,24 +1549,17 @@ class _IndexManagerPipelineMixin:
                         from framework.virtual_paths import is_io_path
 
                         if is_io_path(markdown_path):
-                            try:
-                                import app_registration
+                            io_manager = self._resolve_io_manager()
+                            if io_manager is None:
+                                raise RuntimeError("io_manager unavailable for io:// markdown_path")
+                            text = io_manager.get_text_path(str(markdown_path))
+                            if text is None:
+                                raise RuntimeError("IOManager returned empty content for io:// markdown_path")
+                            return text
 
-                                io_manager = app_registration.registrator.get_object("io_manager")
-                            except Exception:  # noqa: BLE001
-                                io_manager = None
-                            if io_manager is not None:
-                                text = io_manager.get_text_path(str(markdown_path))
-                                if text is not None:
-                                    return text
-                        from framework.virtual_paths import resolve_io_to_local_path
                         from pathlib import Path
 
-                        local_path = (
-                            resolve_io_to_local_path(markdown_path)
-                            if is_io_path(markdown_path)
-                            else Path(str(markdown_path)).expanduser().resolve()
-                        )
+                        local_path = Path(str(markdown_path)).expanduser().resolve()
                         with open(local_path, "r", encoding="utf-8") as f:
                             return f.read()
                     except Exception as e:
@@ -1539,20 +1573,17 @@ class _IndexManagerPipelineMixin:
                     from framework.virtual_paths import is_io_path
 
                     if is_io_path(md_path):
-                        try:
-                            import app_registration
+                        io_manager = self._resolve_io_manager()
+                        if io_manager is None:
+                            raise RuntimeError("io_manager unavailable for io:// md_content_path")
+                        text = io_manager.get_text_path(str(md_path))
+                        if text is None:
+                            raise RuntimeError("IOManager returned empty content for io:// md_content_path")
+                        return text
 
-                            io_manager = app_registration.registrator.get_object("io_manager")
-                        except Exception:  # noqa: BLE001
-                            io_manager = None
-                        if io_manager is not None:
-                            text = io_manager.get_text_path(str(md_path))
-                            if text is not None:
-                                return text
-                    from framework.virtual_paths import resolve_io_to_local_path
                     from pathlib import Path
 
-                    local_path = resolve_io_to_local_path(md_path) if is_io_path(md_path) else Path(str(md_path)).expanduser().resolve()
+                    local_path = Path(str(md_path)).expanduser().resolve()
                     with open(local_path, "r", encoding="utf-8") as f:
                         return f.read()
                 except Exception as e:

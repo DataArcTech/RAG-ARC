@@ -11,7 +11,7 @@ import igraph as ig
 
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
-from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+from framework.virtual_paths import is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,13 @@ class _PrunedHippoRAGIGraphIndexingMixin:
 
         storage_path = getattr(self, "storage_path", None) or getattr(self.config, "storage_path", "io://graph_index")
         if is_io_path(storage_path):
-            storage_path = str(resolve_io_to_local_path(storage_path))
+            try:
+                from framework.register import Register
+
+                io_manager = Register().get_object("io_manager")
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("io_manager unavailable while resolving io:// storage_path") from exc
+            storage_path = str(io_manager.resolve_local_dir(str(storage_path), ensure=True))
         os.makedirs(storage_path, exist_ok=True)
 
         # Initialize fact index (FAISS Flat for exact search)

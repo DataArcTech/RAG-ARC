@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 
 from .base import FileDB
-from core.utils.path_guard import ensure_writable_dir
+from core.utils.path_guard import ensure_writable_dir, require_writable_dir
 
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,10 @@ class LocalDB(FileDB):
                 or os.getenv("LOCAL_BLOB_STORE_BASE_PATH")
                 or "./data/files"
             )
-            resolved = ensure_writable_dir(preferred)
+            # If base_path is explicitly configured (e.g., chunk_store, parsed_content_store),
+            # do NOT silently fall back to runtime directories. That would create split-brain
+            # storage where indexing writes to A but retrieval reads from B.
+            resolved = require_writable_dir(preferred) if configured else ensure_writable_dir(preferred)
             self._resolved_base_path = Path(resolved)
         return self._resolved_base_path
     

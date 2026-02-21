@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+from framework.virtual_paths import is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -96,20 +96,24 @@ def ensure_writable_dir(
     When preferred_path is not writable, fall back to fallback_path (or
     ./local/runtime/<preferred_name>) and return the resolved location.
     """
-    preferred = (
-        resolve_io_to_local_path(preferred_path)
-        if is_io_path(preferred_path)
-        else Path(preferred_path).expanduser().resolve()
-    )
+
+    def _resolve_dir(value: str) -> Path:
+        if is_io_path(value):
+            try:
+                from framework.register import Register
+
+                io_manager = Register().get_object("io_manager")
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("io_manager unavailable while resolving io:// dir") from exc
+            return Path(io_manager.resolve_local_dir(str(value), ensure=True)).expanduser().resolve()
+        return Path(value).expanduser().resolve()
+
+    preferred = _resolve_dir(preferred_path)
     if _test_write_access(preferred) and _tree_is_writable(preferred):
         return str(preferred)
 
     fallback_candidate = fallback_path or os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
-    runtime_root = (
-        resolve_io_to_local_path(fallback_candidate)
-        if is_io_path(fallback_candidate)
-        else Path(fallback_candidate).expanduser().resolve()
-    )
+    runtime_root = _resolve_dir(fallback_candidate)
 
     fallback = runtime_root
     if fallback_path is None:
@@ -134,8 +138,16 @@ def require_writable_dir(path: str) -> str:
 
     Unlike `ensure_writable_dir`, this function does not attempt any fallback paths.
     """
+    if is_io_path(path):
+        try:
+            from framework.register import Register
 
-    target = resolve_io_to_local_path(path) if is_io_path(path) else Path(path).expanduser().resolve()
+            io_manager = Register().get_object("io_manager")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("io_manager unavailable while resolving io:// dir") from exc
+        target = Path(io_manager.resolve_local_dir(str(path), ensure=True)).expanduser().resolve()
+    else:
+        target = Path(path).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.NamedTemporaryFile(dir=target, prefix=".perm_probe_", delete=True) as handle:

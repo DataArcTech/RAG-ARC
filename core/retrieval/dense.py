@@ -120,9 +120,9 @@ class DenseRetriever(BaseRetriever):
                 cache[key] = db
 
         # Attempt to load if artifacts exist and index isn't loaded yet.
+        # NOTE: `index_dir` is often an `io://...` virtual path; FaissVectorDB.load_index resolves it via IOManager.
         try:
-            if getattr(db, "index", None) is None and os.path.isdir(index_dir):
-                # faiss.py load_index already checks for both .faiss and .pkl.
+            if getattr(db, "index", None) is None:
                 db.load_index(index_dir)
         except Exception:
             # Treat as empty until indexing writes artifacts.

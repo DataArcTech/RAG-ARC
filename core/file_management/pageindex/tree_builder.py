@@ -1,7 +1,8 @@
+import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from config import pageindex as pageindex_cfg
 from core.file_management.pageindex.types import HeadingSignal, SectionNode
@@ -15,6 +16,7 @@ from core.file_management.pageindex.utils import (
     read_json,
     resolve_content_list_path,
 )
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -192,23 +194,90 @@ def build_section_tree(
     filename: Optional[str],
     md_path: Optional[str],
     output_dir: Optional[str],
+    io_manager: Any = None,
 ) -> SectionTreeBuildResult:
     headings = iter_markdown_headings(markdown)
     content_list: List[dict] = []
     content_index: Dict[str, List[dict]] = {}
     page_texts: Dict[int, str] = {}
     max_page_idx = None
-    content_path = resolve_content_list_path(md_path, output_dir)
-    if content_path:
+
+    def _load_content_list_from_io(io_dir: str, *, expected_basename: Optional[str]) -> List[dict]:
+        """Load MinerU `*_content_list*.json` from an io:// directory using IOManager.
+
+        NOTE: Do not resolve io:// to a local filesystem path here. The IOManager abstraction
+        owns backend mapping (LocalDB now, MinIO later).
+        """
+
+        if io_manager is None:
+            return []
         try:
-            loaded = read_json(content_path)
-            if isinstance(loaded, list):
-                content_list = loaded
-                content_index = build_content_list_index(content_list)
-                page_texts = build_page_text_index(content_list)
-                max_page_idx = max_page_index(content_list)
+            keys = io_manager.list_keys_path(io_dir)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to read MinerU content_list %s: %s", content_path, exc)
+            logger.warning("Failed to list io:// keys under %s: %s", io_dir, exc)
+            return []
+
+        def _basename(ref: str) -> str:
+            token = str(ref or "").strip()
+            return token.rsplit("/", 1)[-1] if "/" in token else token
+
+        expected = (expected_basename or "").strip()
+        expected_hit = None
+        matches: List[str] = []
+        for ref in keys:
+            base = _basename(ref)
+            if expected and base == expected:
+                expected_hit = str(ref)
+                break
+            if base.endswith(".json") and "_content_list" in base:
+                matches.append(str(ref))
+
+        candidate = expected_hit or (sorted(matches)[0] if matches else None)
+        if not candidate:
+            return []
+        try:
+            raw = io_manager.get_text_path(candidate)
+            if raw is None:
+                return []
+            loaded = json.loads(raw)
+            return loaded if isinstance(loaded, list) else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read MinerU content_list %s: %s", candidate, exc)
+            return []
+
+    # MinerU outputs are persisted under io://..., so PageIndex must be able to load content_list
+    # via IOManager (LocalDB/MinIO). For local filesystem paths we keep the glob-based behavior.
+    md_path_token = str(md_path or "").strip()
+    output_dir_token = str(output_dir or "").strip()
+    expected_content_list_basename = None
+    if md_path_token:
+        md_base = md_path_token.rsplit("/", 1)[-1]
+        if md_base.endswith(".md"):
+            expected_content_list_basename = md_base[:-3] + "_content_list.json"
+
+    loaded_list: List[dict] = []
+    if output_dir_token and is_io_path(output_dir_token):
+        loaded_list = _load_content_list_from_io(output_dir_token, expected_basename=expected_content_list_basename)
+    elif md_path_token and is_io_path(md_path_token):
+        parent_key = "/".join(io_key(md_path_token).split("/")[:-1])
+        if parent_key:
+            loaded_list = _load_content_list_from_io(f"{IO_PATH_PREFIX}{parent_key}", expected_basename=expected_content_list_basename)
+
+    if not loaded_list:
+        content_path = resolve_content_list_path(md_path, output_dir)
+        if content_path:
+            try:
+                loaded = read_json(content_path)
+                if isinstance(loaded, list):
+                    loaded_list = loaded
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read MinerU content_list %s: %s", content_path, exc)
+
+    if loaded_list:
+        content_list = loaded_list
+        content_index = build_content_list_index(content_list)
+        page_texts = build_page_text_index(content_list)
+        max_page_idx = max_page_index(content_list)
 
     signals: List[HeadingSignal] = []
     max_level = pageindex_cfg.section_level_max()
