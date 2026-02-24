@@ -215,11 +215,23 @@ class RedisTaskQueue:
     def _get_result_store(self) -> ResultStore:
         if self._result_store is not None:
             return self._result_store
+        backend = str(self._settings.result_store_backend or "").strip().lower() or "io"
+        if backend == "local":
+            from encapsulation.message_queue.result_store import build_result_store
+
+            self._result_store = build_result_store(
+                backend="local",
+                local_dir=self._settings.result_store_local_dir,
+                minio_endpoint=self._settings.result_store_minio_endpoint,
+                minio_bucket=self._settings.result_store_minio_bucket,
+            )
+            return self._result_store
+
         io_manager = self._io_manager
         if io_manager is None:
             raise RuntimeError("io_manager is required for MQ result store")
         self._result_store = build_result_store_with_io_manager(
-            backend=self._settings.result_store_backend,
+            backend=backend,
             local_dir=self._settings.result_store_local_dir,
             minio_endpoint=self._settings.result_store_minio_endpoint,
             minio_bucket=self._settings.result_store_minio_bucket,

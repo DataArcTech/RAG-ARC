@@ -353,31 +353,49 @@ def _save_trace_events_to_file(
             ]
         }
 
-        io_manager = _require_io_manager()
         trace_root = str(os.getenv("DEEPSEARCH_TRACE_STORAGE_PATH", f"{IO_PATH_PREFIX}{DEEPSEARCH_TRACES_NAMESPACE}") or "").strip()
-        if not trace_root.startswith(IO_PATH_PREFIX):
-            raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must be an io:// virtual path")
-        root_key = io_key(trace_root)
-        if not root_key:
+        if not trace_root:
             raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must not be empty")
-        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
-        namespace = namespace or DEEPSEARCH_TRACES_NAMESPACE
-        key = f"{prefix}/{file_id}/{filename}".lstrip("/") if prefix else f"{file_id}/{filename}"
 
-        put = io_manager.put_json(
-            namespace=namespace,
-            key=key,
-            payload=trace_data,
-        )
+        # Preferred: io:// storage via IOManager (works across LocalDB/MinIO).
+        if trace_root.startswith(IO_PATH_PREFIX):
+            io_manager = _require_io_manager()
+            root_key = io_key(trace_root)
+            if not root_key:
+                raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must not be empty")
+            namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+            namespace = namespace or DEEPSEARCH_TRACES_NAMESPACE
+            key = f"{prefix}/{file_id}/{filename}".lstrip("/") if prefix else f"{file_id}/{filename}"
 
+            put = io_manager.put_json(
+                namespace=namespace,
+                key=key,
+                payload=trace_data,
+            )
+
+            logger.info(
+                "Saved %d trace events to %s (request_id=%s, run_id=%s)",
+                len(trace_events),
+                put.ref,
+                request_id,
+                run_id or request_id,
+            )
+            return str(put.ref)
+
+        # Legacy: local filesystem path support for unit tests / dev scripts.
+        out_dir = Path(trace_root).expanduser().resolve() / str(file_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (out_dir / filename).resolve()
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(trace_data, handle, ensure_ascii=False, indent=2, default=str)
         logger.info(
             "Saved %d trace events to %s (request_id=%s, run_id=%s)",
             len(trace_events),
-            put.ref,
+            out_path,
             request_id,
             run_id or request_id,
         )
-        return str(put.ref)
+        return str(out_path)
     except Exception as e:
         logger.error("Failed to save trace events to file: %s", e, exc_info=True)
         return None
@@ -393,17 +411,28 @@ def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
         Dictionary containing trace data, or None if loading failed.
     """
     try:
-        from app_registration import registrator
+        token = str(trace_file_path or "").strip()
+        if not token:
+            return None
 
-        io_manager = registrator.get_object("io_manager")
-        if io_manager is None:
-            raise RuntimeError("io_manager is required for trace retrieval")
-        if not isinstance(trace_file_path, str) or not trace_file_path.strip().startswith("io://"):
-            raise ValueError("trace_file_path must be an io:// virtual path")
-        payload = io_manager.get_json(trace_file_path)
-        if payload is None:
-            logger.warning("Trace ref not found: %s", trace_file_path)
-        return payload
+        if token.startswith("io://"):
+            from app_registration import registrator
+
+            io_manager = registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for trace retrieval")
+            payload = io_manager.get_json(token)
+            if payload is None:
+                logger.warning("Trace ref not found: %s", token)
+            return payload
+
+        path = Path(token)
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
     except Exception as e:
         logger.error("Failed to load trace events from file %s: %s", trace_file_path, e, exc_info=True)
         return None

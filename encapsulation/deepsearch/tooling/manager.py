@@ -407,21 +407,32 @@ class DeepSearchToolManager:
         self.max_remote_evidences = int(self.tool_configs["max_remote_evidences"])
         self.max_remote_context_chars = int(self.tool_configs["max_remote_context_chars"])
         self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
-        from app_registration import registrator
-
-        self._io_manager = registrator.get_object("io_manager")
-        if self._io_manager is None:
-            raise RuntimeError("io_manager is required for tool artifact persistence")
+        self._io_manager = None
+        self._artifact_dir_local: Path | None = None
 
         configured = str(self.tool_configs.get("artifact_dir") or f"{IO_PATH_PREFIX}{DEEPSEARCH_ARTIFACTS_NAMESPACE}").strip()
-        if not configured.startswith(IO_PATH_PREFIX):
-            raise ValueError("tool_configs.artifact_dir must be an io:// virtual path")
-        root_key = io_key(configured)
-        if not root_key:
+        if not configured:
             raise ValueError("tool_configs.artifact_dir must not be empty")
-        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
-        self._artifact_namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
-        self._artifact_prefix = prefix
+
+        if configured.startswith(IO_PATH_PREFIX):
+            from app_registration import registrator
+
+            self._io_manager = registrator.get_object("io_manager")
+            if self._io_manager is None:
+                raise RuntimeError("io_manager is required for tool artifact persistence when artifact_dir is io://")
+
+            root_key = io_key(configured)
+            if not root_key:
+                raise ValueError("tool_configs.artifact_dir must not be empty")
+            namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+            self._artifact_namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
+            self._artifact_prefix = prefix
+        else:
+            # Local filesystem path support for unit tests / dev scripts.
+            self._artifact_namespace = None
+            self._artifact_prefix = None
+            self._artifact_dir_local = Path(configured).expanduser().resolve()
+            self._artifact_dir_local.mkdir(parents=True, exist_ok=True)
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
         """Invoke a tool through MCP and/or local registries according to the routing policy."""
@@ -1118,13 +1129,26 @@ class DeepSearchToolManager:
 
     def _persist_artifact(self, tool_name: str, payload: ToolResultPayload) -> Optional[str]:
         file_name = f"{int(time.time() * 1000)}_{tool_name.replace('.', '_')}_{uuid.uuid4().hex}.json"
-        key_prefix = str(self._artifact_prefix or "").strip().lstrip("/")
         tool_prefix = tool_name.replace(".", "_")
+
+        if self._artifact_dir_local is not None:
+            dst_dir = (self._artifact_dir_local / "tool_artifacts" / tool_prefix).resolve()
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = (dst_dir / file_name).resolve()
+            dst.write_text(
+                json.dumps(json_safe(payload.model_dump(exclude_none=True)), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            return str(dst)
+
+        key_prefix = str(self._artifact_prefix or "").strip().lstrip("/")
         key = (
             f"{key_prefix}/tool_artifacts/{tool_prefix}/{file_name}".lstrip("/")
             if key_prefix
             else f"tool_artifacts/{tool_prefix}/{file_name}"
         )
+        if self._io_manager is None:
+            raise RuntimeError("io_manager is required for io:// artifact persistence")
         put = self._io_manager.put_json(
             namespace=self._artifact_namespace,
             key=key,

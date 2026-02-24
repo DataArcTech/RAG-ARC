@@ -18,6 +18,80 @@ from config.core.deepsearch import plan_template_defaults
 
 
 class DeepSearchServiceInitialThinkMixin:
+    @staticmethod
+    def _normalize_question_kind(value: Any) -> str:
+        token = str(value or "").strip().lower() or "file_qa"
+        if token not in {"encyclopedia", "file_qa", "file_computable_qa", "exploratory_report"}:
+            return "file_qa"
+        return token
+
+    @staticmethod
+    def _coerce_decomposition(value: Any, *, question: str) -> Dict[str, Any]:
+        """Coerce a 5W1H decomposition object into a stable shape (best-effort).
+
+        The decomposition is a retrieval-oriented plan scaffold (NOT evidence).
+        If the selector fails to provide it, return a minimal placeholder so the
+        think loop can still see that decomposition is expected.
+        """
+
+        q = str(question or "").strip()
+        default = {
+            "fivew1h": {"who": "", "what": "", "when": "", "where": "", "why": "", "how": ""},
+            "sub_queries": [f"The document contains the information needed to answer: {q} (<TO_EXTRACT>)."] if q else [],
+            "answer_expectation": "",
+        }
+        if not isinstance(value, dict):
+            return default
+        out: Dict[str, Any] = {}
+        five = value.get("fivew1h")
+        if isinstance(five, dict):
+            out["fivew1h"] = {
+                "who": str(five.get("who") or ""),
+                "what": str(five.get("what") or ""),
+                "when": str(five.get("when") or ""),
+                "where": str(five.get("where") or ""),
+                "why": str(five.get("why") or ""),
+                "how": str(five.get("how") or ""),
+            }
+        else:
+            out["fivew1h"] = dict(default["fivew1h"])
+        subs_raw = value.get("sub_queries")
+        subs: List[str] = []
+        if isinstance(subs_raw, list):
+            for item in subs_raw:
+                s = str(item or "").strip()
+                if s and s not in subs:
+                    subs.append(s)
+        out["sub_queries"] = subs[:10] if subs else list(default["sub_queries"])
+        out["answer_expectation"] = str(value.get("answer_expectation") or "")
+        return out
+
+    @staticmethod
+    def _attach_initial_think_signals(
+        reasoning_context: GraphQueryContext,
+        *,
+        is_computable: bool,
+        question_kind: str,
+        decomposition: Dict[str, Any] | None = None,
+    ) -> None:
+        if not isinstance(reasoning_context.metadata, dict):
+            return
+        # Make key signals explicit and stable so downstream think loops do not miss them.
+        initial_think = {
+            "is_computable": bool(is_computable),
+            "question_kind": str(question_kind),
+            # PageIndex/MinerU use 0-based page indices; human-facing page numbers are typically 1-based.
+            "page_indexing": {"tool_index_base": 0, "human_index_base": 1},
+        }
+        if isinstance(decomposition, dict) and decomposition:
+            # Keep the decomposition in initial_think so the think loop can drive retrieval sub-queries explicitly.
+            initial_think["decomposition"] = dict(decomposition)
+            # Convenience alias (avoid deep nesting in prompts/tools).
+            reasoning_context.metadata["decomposition"] = dict(decomposition)
+        reasoning_context.metadata["initial_think"] = initial_think
+        # Convenience aliases (avoid deep nesting in prompts/tools).
+        reasoning_context.metadata["is_computable"] = bool(is_computable)
+        reasoning_context.metadata["question_kind"] = str(question_kind)
     def _initial_think_template_cfg(self) -> Dict[str, Any]:
         cfg = None
         try:
@@ -120,9 +194,19 @@ class DeepSearchServiceInitialThinkMixin:
                 report_style = str(hit.report_style or "").strip().lower()
                 if report_style not in {"deepsearch", "research"}:
                     report_style = "deepsearch"
+                is_computable = bool(getattr(hit, "is_computable", False))
+                question_kind = self._normalize_question_kind(getattr(hit, "question_kind", "file_qa"))
+                decomposition = getattr(hit, "decomposition", None)
+                decomposition = self._coerce_decomposition(decomposition, question=question)
                 if isinstance(reasoning_context.metadata, dict):
                     reasoning_context.metadata["report_style"] = report_style
                     reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
+                    self._attach_initial_think_signals(
+                        reasoning_context,
+                        is_computable=is_computable,
+                        question_kind=question_kind,
+                        decomposition=decomposition,
+                    )
 
                 await emit_trace(
                     "write_outline",
@@ -145,6 +229,8 @@ class DeepSearchServiceInitialThinkMixin:
                 return {
                     "report_needed": bool(hit.report_needed),
                     "report_style": report_style,
+                    "is_computable": is_computable,
+                    "question_kind": question_kind,
                     "plan_state": plan_state,
                     "think_notes": note_payloads,
                     "think_notes_obj": note_objs,
@@ -220,6 +306,17 @@ class DeepSearchServiceInitialThinkMixin:
                             "signature": signature or None,
                             "slots": dict(selection.slots),
                         }
+                        self._attach_initial_think_signals(
+                            reasoning_context,
+                            is_computable=bool(getattr(selection, "is_computable", False)),
+                            question_kind=self._normalize_question_kind(getattr(selection, "question_kind", "file_qa")),
+                            decomposition=(
+                                self._coerce_decomposition(
+                                    selection.raw.get("decomposition") if isinstance(selection.raw, dict) else None,
+                                    question=question,
+                                )
+                            ),
+                        )
 
                     raw = {
                         "reasoning": selection.reasoning or f"Using plan template: {selection.template_id}",
@@ -227,6 +324,13 @@ class DeepSearchServiceInitialThinkMixin:
                         "plan": list(plan_state.items),
                         "report_needed": bool(selection.report_needed),
                         "report_style": report_style,
+                        "is_computable": bool(getattr(selection, "is_computable", False)),
+                        "question_kind": self._normalize_question_kind(getattr(selection, "question_kind", "file_qa")),
+                        "decomposition": (
+                            dict(selection.raw.get("decomposition"))
+                            if isinstance(selection.raw, dict) and isinstance(selection.raw.get("decomposition"), dict)
+                            else None
+                        ),
                         "template": {
                             "template_id": selection.template_id,
                             "signature": signature or None,
@@ -276,6 +380,9 @@ class DeepSearchServiceInitialThinkMixin:
                                 CachedInitialThink(
                                     report_needed=bool(selection.report_needed),
                                     report_style=report_style,
+                                    is_computable=bool(raw.get("is_computable") or False),
+                                    question_kind=str(raw.get("question_kind") or "file_qa"),
+                                    decomposition=(dict(raw.get("decomposition")) if isinstance(raw.get("decomposition"), dict) else None),
                                     raw=dict(raw),
                                     plan_items=list(plan_state.items),
                                     think_notes_payloads=list(note_payloads),
@@ -287,6 +394,8 @@ class DeepSearchServiceInitialThinkMixin:
                     return {
                         "report_needed": bool(selection.report_needed),
                         "report_style": report_style,
+                        "is_computable": bool(raw.get("is_computable") or False),
+                        "question_kind": str(raw.get("question_kind") or "file_qa"),
                         "plan_state": plan_state,
                         "think_notes": note_payloads,
                         "think_notes_obj": [note],
@@ -344,12 +453,23 @@ class DeepSearchServiceInitialThinkMixin:
         report_needed = raw.get("report_needed")
         if report_needed is None:
             raise RuntimeError("Initial think missing report_needed")
+        # Backward compatibility: older/custom think implementations may omit these signals.
+        if "is_computable" not in raw:
+            raw["is_computable"] = False
+        if "question_kind" not in raw:
+            raw["question_kind"] = "file_qa"
         report_style_raw = raw.get("report_style")
         report_style = str(report_style_raw or "").strip().lower() if report_style_raw is not None else ""
         if report_style not in {"deepsearch", "research"}:
             report_style = "deepsearch"
         if isinstance(reasoning_context.metadata, dict):
             reasoning_context.metadata["report_style"] = report_style
+            self._attach_initial_think_signals(
+                reasoning_context,
+                is_computable=bool(raw.get("is_computable") or False),
+                question_kind=self._normalize_question_kind(raw.get("question_kind")),
+                decomposition=self._coerce_decomposition(raw.get("decomposition"), question=question),
+            )
 
         if update_plan_from_think_notes(plan_state, think_notes=notes):
             reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
@@ -389,6 +509,9 @@ class DeepSearchServiceInitialThinkMixin:
                     CachedInitialThink(
                         report_needed=bool(report_needed),
                         report_style=report_style,
+                        is_computable=bool(raw.get("is_computable") or False),
+                        question_kind=self._normalize_question_kind(raw.get("question_kind")),
+                        decomposition=(dict(raw.get("decomposition")) if isinstance(raw.get("decomposition"), dict) else None),
                         raw=dict(raw),
                         plan_items=list(plan_state.items),
                         think_notes_payloads=list(note_payloads),
@@ -399,6 +522,8 @@ class DeepSearchServiceInitialThinkMixin:
         return {
             "report_needed": bool(report_needed),
             "report_style": report_style,
+            "is_computable": bool(raw.get("is_computable") or False),
+            "question_kind": self._normalize_question_kind(raw.get("question_kind")),
             "plan_state": plan_state,
             "think_notes": note_payloads,
             "think_notes_obj": list(notes),

@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from pathlib import Path
 
 from .base import AbstractParser
-from framework.singleton_decorator import singleton
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.native import NativeParserConfig
@@ -180,7 +179,6 @@ def html_structured_content_to_markdown(content: Dict[str, Any]) -> str:
     return "\n".join(md_lines)
 
 
-@singleton
 class NativeParser(AbstractParser):
     """
     Multi-format document parser supporting PDF, DOCX, Excel, PowerPoint, HTML, and images.
@@ -209,18 +207,26 @@ class NativeParser(AbstractParser):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Parse a file of any supported type from binary data"""
-        import app_registration
-
-        io_manager = app_registration.registrator.get_object("io_manager")
-        if io_manager is None:
-            raise RuntimeError("io_manager is required for NativeParser")
-
         output_dir = getattr(self.config, "output_dir", None)
         if not isinstance(output_dir, str) or not output_dir.strip():
             raise ValueError("NativeParser requires config.output_dir (no implicit env defaults).")
-        output_dir_virtual = str(output_dir).strip()
-        if not output_dir_virtual.startswith("io://"):
-            raise ValueError("NativeParser config.output_dir must be an io:// virtual path")
+        output_dir_token = str(output_dir).strip()
+
+        io_manager = None
+        output_dir_virtual = output_dir_token
+        if output_dir_token.startswith("io://"):
+            import app_registration
+
+            io_manager = app_registration.registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for NativeParser when output_dir is io://")
+        else:
+            from core.file_management.parser.local_path_io import LocalPathIO
+
+            base_dir = Path(output_dir_token).expanduser().resolve()
+            base_dir.mkdir(parents=True, exist_ok=True)
+            io_manager = LocalPathIO(base_dir=base_dir)
+            output_dir_virtual = str(base_dir)
 
         # Extract file extension and validate
         base_filename, file_ext = os.path.splitext(filename)

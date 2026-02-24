@@ -25,7 +25,6 @@ ENV_DEFAULTS: dict[str, str] = {
     "PARSER_OUTPUT_DIR": "io://parsed_files",
     # DeepSearch local artifacts (mapped via IOManager).
     "DEEPSEARCH_PLAN_OUTPUT_DIR": "io://deepsearch_runs",
-    "DEEPSEARCH_TOOL_ARTIFACT_DIR": "io://deepsearch_artifacts",
     # Runtime/log dirs (mapped via IOManager).
     "RAGARC_RUNTIME_DIR": "io://runtime",
     "RAGARC_LOG_DIR": "io://logs",

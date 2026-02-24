@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 from framework.runtime_warnings import configure_runtime_warnings
 
 
@@ -31,6 +33,36 @@ def pytest_configure() -> None:
     os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")
     # Avoid filesystem/object-store probes in unit tests unless explicitly enabled.
     os.environ.setdefault("KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS", "0")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _register_io_manager_for_tests(tmp_path_factory) -> None:
+    """Ensure unit tests have a hermetic IOManager registered.
+
+    Many components persist artifacts via `io://...` virtual paths. Unit tests should
+    not depend on developer-local `.env` values or write into the repo's default
+    `./data/localdb` directory unless explicitly requested by a test.
+    """
+
+    base_dir = tmp_path_factory.mktemp("ragarc_iostore")
+    os.environ.setdefault("IO_STORE_BACKEND", "localdb")
+    os.environ.setdefault("IO_STORE_BASE_PATH", str(base_dir))
+    os.environ.setdefault("IO_STORE_DEFAULT_NAMESPACE", "io")
+
+    from app_registration import registrator
+    from config.encapsulation.io.io_manager_config import IOManagerConfig
+
+    # Avoid re-registering if a test suite already initialized IOManager.
+    try:
+        existing = registrator.get_object("io_manager")
+    except Exception:
+        existing = None
+    if existing is not None:
+        return
+
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / "config" / "json_configs" / "io_manager.json"
+    registrator.register(config_path=str(config_path), app_name="io_manager", config_type=IOManagerConfig)
 
 
 def pytest_runtest_setup(item) -> None:  # noqa: ANN001

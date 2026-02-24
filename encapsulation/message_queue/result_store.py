@@ -1,10 +1,11 @@
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from encapsulation.io.io_manager import IOManager
-from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path, resolve_io_to_local_path
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -117,8 +118,17 @@ class MinioResultStore(ResultStore):
 
 def build_result_store(*, backend: str, local_dir: str, minio_endpoint: str | None, minio_bucket: str | None) -> ResultStore:
     normalized = (backend or "").strip().lower() or "local"
-    if normalized in {"local", "io"}:
-        raise ResultStoreError("IOManagerResultStore requires an explicit io_manager (call build_result_store_with_io_manager)")
+    if normalized == "local":
+        base_dir = str(local_dir or "").strip() or "./local/mq_results"
+        if is_io_path(base_dir):
+            try:
+                resolved = resolve_io_to_local_path(base_dir)
+            except Exception as exc:  # noqa: BLE001
+                raise ResultStoreError(f"Failed to resolve local result store dir from {base_dir!r}: {exc}") from exc
+            base_dir = str(resolved)
+        return LocalFilesystemResultStore(base_dir=base_dir)
+    if normalized == "io":
+        raise ResultStoreError("IO-backed ResultStore requires an explicit io_manager (call build_result_store_with_io_manager)")
     if normalized == "minio":
         return MinioResultStore(endpoint=minio_endpoint, bucket=minio_bucket)
     raise ResultStoreError(f"Unknown MQ result store backend: {backend!r}")
@@ -133,7 +143,16 @@ def build_result_store_with_io_manager(
     io_manager: IOManager,
 ) -> ResultStore:
     normalized = (backend or "").strip().lower() or "io"
-    if normalized in {"local", "io"}:
+    if normalized == "local":
+        # Local filesystem store does not require IOManager. We still accept io:// paths by mapping them
+        # to the current LocalDB root (useful in hermetic tests).
+        return build_result_store(
+            backend="local",
+            local_dir=local_dir,
+            minio_endpoint=minio_endpoint,
+            minio_bucket=minio_bucket,
+        )
+    if normalized == "io":
         base_dir = str(local_dir or "").strip() or "io://mq_results"
         if not base_dir.startswith(IO_PATH_PREFIX):
             raise ResultStoreError("MQ result store directory must be an io:// virtual path")
@@ -141,3 +160,42 @@ def build_result_store_with_io_manager(
     if normalized == "minio":
         return MinioResultStore(endpoint=minio_endpoint, bucket=minio_bucket)
     raise ResultStoreError(f"Unknown MQ result store backend: {backend!r}")
+
+
+class LocalFilesystemResultStore(ResultStore):
+    def __init__(self, *, base_dir: str):
+        token = str(base_dir or "").strip()
+        if not token:
+            raise ResultStoreError("LocalFilesystemResultStore requires base_dir")
+        self._base_dir = Path(token).expanduser().resolve()
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+    def put_bytes(self, *, namespace: str, run_id: str, payload: bytes, ttl_seconds: int) -> str:  # noqa: ARG002
+        ns = _sanitize_name(namespace, fallback="default")
+        rid = _sanitize_name(run_id, fallback="run")
+        dst = (self._base_dir / ns / f"{rid}.json").resolve()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(payload)
+        return str(dst)
+
+    def get_bytes(self, ref: str) -> Optional[bytes]:
+        token = str(ref or "").strip()
+        if not token:
+            return None
+        if token.startswith(IO_PATH_PREFIX):
+            raise ResultStoreError(f"Unsupported result ref for LocalFilesystemResultStore: {ref!r}")
+        path = Path(token).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            return None
+        return path.read_bytes()
+
+    def delete(self, ref: str) -> None:
+        try:
+            token = str(ref or "").strip()
+            if not token or token.startswith(IO_PATH_PREFIX):
+                return
+            path = Path(token).expanduser().resolve()
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception:
+            return

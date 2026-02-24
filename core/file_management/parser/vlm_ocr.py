@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .base import AbstractParser
-from framework.singleton_decorator import singleton
 from framework.thread_pool import get_thread_pool
 
 # Import only necessary utilities
@@ -25,7 +24,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@singleton
 class VLMOcrParser(AbstractParser):
     """
     VLM-based OCR document parser implementation for simple text extraction.

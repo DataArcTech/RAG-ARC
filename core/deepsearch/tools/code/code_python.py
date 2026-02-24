@@ -262,6 +262,24 @@ sys.stdout.write(json.dumps(payload_out, ensure_ascii=False, default=str))
 def _fence_python(code: str) -> str:
     return "```python\n" + (code.rstrip() + "\n" if code.strip() else "") + "```"
 
+def _strip_code_fences(code: str) -> str:
+    """Best-effort removal of Markdown fences from model-provided code."""
+
+    raw = str(code or "")
+    t = raw.strip()
+    if not t.startswith("```"):
+        return raw
+    lines = t.splitlines()
+    if not lines:
+        return raw
+    # Drop the opening fence line (``` or ```python).
+    if lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    # Drop a trailing fence if present.
+    if lines and lines[-1].rstrip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
 
 def _truncate(text: str, limit: int) -> str:
     value = str(text or "")
@@ -353,15 +371,24 @@ class CodePythonTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = dict(request.extra or {})
-        raw_code = str(extra.get("code") or "")
-        code = raw_code.strip("\n")
+        # Some tool-call wrappers may pass nested `extra` objects; accept both shapes
+        # to improve call reliability across models/clients.
+        nested = extra.get("extra") if isinstance(extra.get("extra"), dict) else {}
+        raw_code = str(extra.get("code") or nested.get("code") or "")
+        code = _strip_code_fences(raw_code).strip("\n")
         if not code.strip():
             diagnostics = {"exec_status": "failed", "error": "missing_code"}
             return ToolResult(
                 summary=build_llm_envelope(
                     thinking="No code was provided for deterministic verification.",
                     answer={"exec_status": "failed", "error": "missing_code"},
-                    extra={"next_steps": ["Provide Python code via extra.code and retry code.python."]},
+                    extra={
+                        "next_steps": [
+                            "Call code.python with tool_args.extra.code (string).",
+                            "Optionally pass tool_args.extra.inputs (object) and read it from INPUTS in code.",
+                            "Set a final variable named `result` and/or print outputs for debugging.",
+                        ]
+                    },
                 ),
                 diagnostics=diagnostics,
                 evidences=[],
@@ -390,6 +417,8 @@ class CodePythonTool(GraphTool):
             )
 
         inputs = extra.get("inputs")
+        if inputs is None:
+            inputs = nested.get("inputs")
         if not isinstance(inputs, dict):
             inputs = {}
 

@@ -1,4 +1,6 @@
 import logging
+import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, TYPE_CHECKING
 
@@ -54,6 +56,18 @@ class MinerUParser(AbstractParser):
         return [".pdf", ".jpg", ".jpeg", ".png"]
 
     async def parse_file(self, file_data: bytes, filename: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        output_dir = getattr(self.config, "output_dir", None)
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            raise ValueError("MinerUParser requires config.output_dir (no implicit env defaults).")
+        output_dir_token = str(output_dir).strip()
+        if not output_dir_token.startswith("io://"):
+            return await self._parse_file_local(
+                output_dir=output_dir_token,
+                file_data=file_data,
+                filename=filename,
+                **kwargs,
+            )
+
         import app_registration
 
         io_manager = app_registration.registrator.get_object("io_manager")
@@ -72,12 +86,7 @@ class MinerUParser(AbstractParser):
             supported = ", ".join(self.get_supported_extensions())
             raise ValueError(f"Unsupported file type '{file_ext}'. Supported types: {supported}")
 
-        output_dir = getattr(self.config, "output_dir", None)
-        if not isinstance(output_dir, str) or not output_dir.strip():
-            raise ValueError("MinerUParser requires config.output_dir (no implicit env defaults).")
-        output_dir_virtual = str(output_dir).strip()
-        if not output_dir_virtual.startswith("io://"):
-            raise ValueError("MinerUParser config.output_dir must be an io:// virtual path")
+        output_dir_virtual = output_dir_token
         source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
         doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
         doc_dir_virtual = f"{output_dir_virtual.rstrip('/')}/{doc_key}"
@@ -162,6 +171,21 @@ class MinerUParser(AbstractParser):
                     mat = materialize_shared_cache(io_manager=io_manager, shared_dir=shared_dir, dest_dir=doc_dir_virtual, mode=shared_mode)
                     if mat.get("ok"):
                         md_text = io_manager.get_text_path(md_virtual_path) or ""
+                        if not md_text.strip():
+                            # Backward compatible: shared cache may contain a different markdown basename.
+                            try:
+                                candidates = [
+                                    ref
+                                    for ref in io_manager.list_keys_path(doc_dir_virtual, limit=2000)
+                                    if str(ref).lower().endswith(".md")
+                                ]
+                            except Exception:
+                                candidates = []
+                            if candidates:
+                                candidate_ref = str(sorted(candidates)[0])
+                                md_text = io_manager.get_text_path(candidate_ref) or ""
+                                if md_text.strip():
+                                    md_virtual_path = candidate_ref
                         if md_text.strip():
                             logger.info("Reusing shared MinerU artifacts: %s -> %s", shared_dir, doc_dir_virtual)
                             return [
@@ -250,7 +274,18 @@ class MinerUParser(AbstractParser):
 
         md_text = io_manager.get_text_path(md_virtual_path) or ""
         if not md_text.strip():
-            raise RuntimeError(f"MinerU markdown missing or empty: {md_virtual_path}")
+            # Fall back to any markdown file under the doc dir (handles MinerU naming differences).
+            try:
+                candidates = [ref for ref in io_manager.list_keys_path(doc_dir_virtual, limit=2000) if str(ref).lower().endswith(".md")]
+            except Exception:
+                candidates = []
+            if candidates:
+                candidate_ref = str(sorted(candidates)[0])
+                md_text = io_manager.get_text_path(candidate_ref) or ""
+                if md_text.strip():
+                    md_virtual_path = candidate_ref
+            if not md_text.strip():
+                raise RuntimeError(f"MinerU markdown missing or empty: {md_virtual_path}")
         # Publish to shared cache:
         # - normal: publish on miss (no overwrite)
         # - force_reparse: overwrite to refresh the shared entry for the same bytes+fingerprint key
@@ -297,6 +332,264 @@ class MinerUParser(AbstractParser):
                     "lang": lang,
                     "output_format": output_format,
                     "output_dir": doc_dir_virtual,
+                },
+            }
+        ]
+
+    async def _parse_file_local(
+        self,
+        *,
+        output_dir: str,
+        file_data: bytes,
+        filename: str,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Local filesystem path variant for unit tests and scripts."""
+
+        # `force_reparse` bypasses all cache reuse (local + shared) and refreshes the shared-cache
+        force_reparse = bool(kwargs.get("force_reparse", False))
+        base_filename = Path(filename).stem or "document"
+        file_ext = Path(filename).suffix.lower()
+        if file_ext not in set(self.get_supported_extensions()):
+            supported = ", ".join(self.get_supported_extensions())
+            raise ValueError(f"Unsupported file type '{file_ext}'. Supported types: {supported}")
+
+        base_dir = Path(output_dir).expanduser().resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
+        doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
+        doc_dir = (base_dir / doc_key).resolve()
+        try:
+            doc_dir.relative_to(base_dir)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("MinerUParser output_dir traversal detected") from exc
+        doc_dir.mkdir(parents=True, exist_ok=True)
+
+        reuse_cache = False if force_reparse else bool(kwargs.get("reuse_cache", getattr(self.config, "reuse_cache", False)))
+        md_path = doc_dir / f"{base_filename}.md"
+        if reuse_cache and md_path.exists():
+            md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+            if md_text.strip():
+                return [
+                    {
+                        "md_content_path": str(md_path),
+                        "text": md_text,
+                        "metadata": {"source_file_name": filename, "mineru_cache_reused": True, "output_dir": str(doc_dir)},
+                    }
+                ]
+        if reuse_cache:
+            candidates = sorted([p for p in doc_dir.glob("*.md") if p.is_file()])
+            if candidates:
+                cand = candidates[0]
+                md_text = cand.read_text(encoding="utf-8", errors="ignore")
+                if md_text.strip():
+                    return [
+                        {
+                            "md_content_path": str(cand),
+                            "text": md_text,
+                            "metadata": {"source_file_name": filename, "mineru_cache_reused": True, "output_dir": str(doc_dir)},
+                        }
+                    ]
+
+        backend = str(kwargs.get("backend") or getattr(self.config, "backend", "vlm-transformers"))
+        parse_method = str(kwargs.get("parse_method") or getattr(self.config, "parse_method", "auto"))
+        lang = str(kwargs.get("lang") or getattr(self.config, "lang", "ch"))
+        formula_enable = bool(kwargs.get("formula_enable", getattr(self.config, "formula_enable", True)))
+        table_enable = bool(kwargs.get("table_enable", getattr(self.config, "table_enable", True)))
+        start_page = int(kwargs.get("start_page", getattr(self.config, "start_page", 0)))
+        end_page = kwargs.get("end_page", getattr(self.config, "end_page", None))
+        end_page = int(end_page) if end_page is not None else None
+        output_format = str(kwargs.get("output_format") or getattr(self.config, "output_format", "mm_md"))
+
+        # Shared-cache reuse for local filesystem dirs.
+        shared_enabled = bool(getattr(self.config, "shared_cache_enabled", False)) and not force_reparse
+        shared_root_raw = str(getattr(self.config, "shared_cache_dir", "") or "").strip()
+        shared_root_path: Path | None = None
+        if shared_enabled and shared_root_raw:
+            if shared_root_raw.startswith("io://"):
+                try:
+                    import app_registration
+
+                    io_manager = app_registration.registrator.get_object("io_manager")
+                    if io_manager is not None:
+                        shared_root_path = Path(io_manager.resolve_local_dir(shared_root_raw, ensure=True)).expanduser().resolve()
+                except Exception:
+                    shared_root_path = None
+            else:
+                shared_root_path = Path(shared_root_raw).expanduser().resolve()
+
+        shared_mode = str(getattr(self.config, "shared_cache_mode", "copy") or "copy").strip().lower()
+        if shared_mode not in {"copy", "symlink"}:
+            shared_mode = "copy"
+
+        shared_key: MinerUSharedCacheKey | None = None
+        if shared_root_path is not None:
+            try:
+                bytes_sha = sha256_hex(file_data)
+                fp = build_parser_fingerprint(
+                    params={
+                        "backend": backend,
+                        "parse_method": parse_method,
+                        "lang": lang,
+                        "formula_enable": bool(formula_enable),
+                        "table_enable": bool(table_enable),
+                        "start_page": int(start_page),
+                        "end_page": None if end_page is None else int(end_page),
+                        "output_format": output_format,
+                    }
+                )
+                shared_key = MinerUSharedCacheKey(bytes_sha256=bytes_sha, parser_fingerprint=fp)
+                shared_dir = (shared_root_path / Path(shared_key.rel_dir())).resolve()
+                if (shared_dir / ".complete").exists():
+                    md_files = [p for p in shared_dir.rglob("*.md") if p.is_file()]
+                    if md_files:
+                        for src in shared_dir.rglob("*"):
+                            if src.name == ".complete" or src.is_dir():
+                                continue
+                            rel = src.relative_to(shared_dir)
+                            dst = (doc_dir / rel).resolve()
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            if shared_mode == "symlink":
+                                try:
+                                    if dst.exists():
+                                        dst.unlink()
+                                    dst.symlink_to(src)
+                                except Exception:
+                                    shutil.copy2(src, dst)
+                            else:
+                                shutil.copy2(src, dst)
+                        (doc_dir / ".complete").write_text("ok\n", encoding="utf-8")
+
+                        md_text = ""
+                        if md_path.exists():
+                            md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+                        if not md_text.strip():
+                            candidates = sorted([p for p in doc_dir.glob("*.md") if p.is_file()])
+                            if candidates:
+                                md_path = candidates[0]
+                                md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+                        if md_text.strip():
+                            return [
+                                {
+                                    "md_content_path": str(md_path),
+                                    "text": md_text,
+                                    "metadata": {
+                                        "source_file_name": filename,
+                                        "mineru_shared_cache_reused": True,
+                                        "mineru_shared_cache_sha256": bytes_sha,
+                                        "mineru_shared_cache_fingerprint": fp,
+                                        "mineru_shared_cache_mode": shared_mode,
+                                        "output_dir": str(doc_dir),
+                                    },
+                                }
+                            ]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MinerU local shared-cache reuse failed; will fall back: %s", exc)
+                shared_root_path = None
+                shared_key = None
+
+        parse_result = await get_thread_pool().run_blocking(
+            self.client.parse_bytes,
+            file_bytes=file_data,
+            filename=filename,
+            backend=backend,
+            parse_method=parse_method,
+            lang=lang,
+            formula_enable=formula_enable,
+            table_enable=table_enable,
+            start_page=start_page,
+            end_page=end_page,
+            output_format=output_format,
+        )
+
+        task_id = str(parse_result.get("task_id") or "").strip()
+        if not task_id or parse_result.get("status") != "success":
+            raise RuntimeError(f"MinerU parsing failed: {parse_result}")
+
+        def _download_to(rel_path: str, dst: Path) -> None:
+            fn = getattr(self.client, "download_task_file", None)
+            if callable(fn):
+                fn(task_id, rel_path, dst)
+                return
+            fn_bytes = getattr(self.client, "download_task_file_bytes", None)
+            if callable(fn_bytes):
+                blob = fn_bytes(task_id, rel_path)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(blob)
+                return
+            raise RuntimeError("MinerU client missing download_task_file/download_task_file_bytes")
+
+        md_rel = parse_result.get("markdown_rel_path")
+        if md_rel:
+            _download_to(str(md_rel), md_path)
+
+        content_rel = parse_result.get("content_list_rel_path")
+        if content_rel:
+            _download_to(str(content_rel), doc_dir / f"{base_filename}_content_list.json")
+
+        manifest_rel = parse_result.get("asset_manifest_rel_path")
+        if manifest_rel:
+            _download_to(str(manifest_rel), doc_dir / "asset_manifest.json")
+
+        images_meta = parse_result.get("images_metadata") or []
+        for image in images_meta:
+            task_rel = image.get("task_rel_path")
+            rel_path = str(image.get("relative_path") or "").strip()
+            filename_only = str(image.get("filename") or (Path(rel_path).name if rel_path else "")).strip()
+            if not task_rel or not filename_only:
+                continue
+            rel_dir = Path(rel_path).parent
+            subdir = rel_dir.as_posix() if rel_dir.as_posix() not in ("", ".") else "images"
+            _download_to(str(task_rel), doc_dir / subdir / filename_only)
+
+        try:
+            (doc_dir / "mineru_parse_result.json").write_text(
+                json.dumps(parse_result, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        md_text = ""
+        if md_path.exists():
+            md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+        if not md_text.strip():
+            candidates = sorted([p for p in doc_dir.glob("*.md") if p.is_file()])
+            if candidates:
+                md_path = candidates[0]
+                md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+        if not md_text.strip():
+            raise RuntimeError(f"MinerU markdown missing or empty: {md_path}")
+
+        if bool(getattr(self.config, "shared_cache_enabled", False)) and shared_root_path is not None and shared_key is not None:
+            try:
+                dest = (shared_root_path / Path(shared_key.rel_dir())).resolve()
+                if force_reparse and dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                dest.mkdir(parents=True, exist_ok=True)
+                for src in doc_dir.rglob("*"):
+                    if src.name == ".complete" or src.is_dir():
+                        continue
+                    rel = src.relative_to(doc_dir)
+                    dst = dest / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                (dest / ".complete").write_text("ok\n", encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MinerU local shared-cache publish failed: %s", exc)
+
+        return [
+            {
+                "md_content_path": str(md_path),
+                "text": md_text,
+                "metadata": {
+                    "source_file_name": filename,
+                    "mineru_task_id": task_id,
+                    "backend": backend,
+                    "parse_method": parse_method,
+                    "lang": lang,
+                    "output_format": output_format,
+                    "output_dir": str(doc_dir),
                 },
             }
         ]
