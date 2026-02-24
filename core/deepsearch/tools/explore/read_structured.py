@@ -8,6 +8,8 @@ Implementation note:
 - We read from graph-stored `Chunk` nodes and rely on PageIndex page metadata
   (`page_start/page_end`, `chunk_index`) to assemble page-level evidence.
 """
+import json
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -22,6 +24,8 @@ from core.deepsearch.utils.node_types import normalize_node_type
 from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.utils.json_extract import safe_json_loads
+from framework.virtual_paths import is_io_path
+from framework.virtual_paths import resolve_io_to_local_path
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
@@ -144,6 +148,128 @@ async def _fetch_file_chunks(
     return parsed, diagnostics
 
 
+def _load_mineru_content_list_pages(
+    *,
+    file_id: str,
+    page_start: int,
+    page_end: int,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    """Fallback loader for MinerU `*_content_list*.json` when graph chunks are unavailable."""
+
+    diagnostics: dict[str, Any] = {"file_id": file_id, "page_start": page_start, "page_end": page_end}
+    base = str(os.getenv("PARSER_OUTPUT_DIR", "io://parsed_files") or "io://parsed_files").strip() or "io://parsed_files"
+
+    raw_json: str | None = None
+    candidate_ref: str | None = None
+
+    if is_io_path(base):
+        doc_dir = f"{base.rstrip('/')}/mineru/{file_id}"
+        backend = str(os.getenv("IO_STORE_BACKEND", "localdb") or "localdb").strip().lower() or "localdb"
+        if backend != "minio":
+            # Unit-test/dev path: map io:// to local filesystem, honoring env overrides.
+            try:
+                doc_dir_local = resolve_io_to_local_path(doc_dir)
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["reason"] = "resolve_io_failed"
+                diagnostics["error"] = str(exc)
+                return {}, diagnostics
+            matches = sorted([p for p in doc_dir_local.glob("*_content_list*.json") if p.is_file()])
+            if not matches:
+                diagnostics["reason"] = "content_list_missing"
+                return {}, diagnostics
+            candidate_ref = str(matches[0])
+            raw_json = matches[0].read_text(encoding="utf-8", errors="ignore")
+        else:
+            # MinIO path: must go through IOManager listing/reads.
+            try:
+                import app_registration
+
+                io_manager = app_registration.registrator.get_object("io_manager")
+            except Exception:
+                io_manager = None
+            if io_manager is None:
+                diagnostics["reason"] = "io_manager_missing"
+                return {}, diagnostics
+            try:
+                keys = io_manager.list_keys_path(doc_dir, limit=2000)
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["reason"] = "list_keys_failed"
+                diagnostics["error"] = str(exc)
+                return {}, diagnostics
+
+            def _basename(ref: str) -> str:
+                token = str(ref or "").strip()
+                return token.rsplit("/", 1)[-1] if "/" in token else token
+
+            matches: list[str] = []
+            for ref in keys or []:
+                base_name = _basename(str(ref))
+                if base_name.endswith(".json") and "_content_list" in base_name:
+                    matches.append(str(ref))
+            if not matches:
+                diagnostics["reason"] = "content_list_missing"
+                return {}, diagnostics
+            candidate_ref = sorted(matches)[0]
+            raw_json = io_manager.get_text_path(candidate_ref)
+    else:
+        # Local filesystem base (rare; mostly unit tests).
+        try:
+            doc_dir = (Path(base).expanduser().resolve() / "mineru" / file_id).resolve()
+        except Exception:
+            diagnostics["reason"] = "invalid_parser_output_dir"
+            return {}, diagnostics
+        if not doc_dir.exists():
+            diagnostics["reason"] = "content_list_missing"
+            return {}, diagnostics
+        matches = sorted([p for p in doc_dir.glob("*_content_list*.json") if p.is_file()])
+        if not matches:
+            diagnostics["reason"] = "content_list_missing"
+            return {}, diagnostics
+        candidate_ref = str(matches[0])
+        raw_json = matches[0].read_text(encoding="utf-8", errors="ignore")
+
+    if raw_json is None:
+        diagnostics["reason"] = "content_list_empty"
+        diagnostics["candidate"] = candidate_ref
+        return {}, diagnostics
+
+    try:
+        loaded = json.loads(raw_json)
+    except Exception as exc:  # noqa: BLE001
+        diagnostics["reason"] = "content_list_invalid_json"
+        diagnostics["candidate"] = candidate_ref
+        diagnostics["error"] = str(exc)
+        return {}, diagnostics
+    if not isinstance(loaded, list):
+        diagnostics["reason"] = "content_list_unexpected_shape"
+        diagnostics["candidate"] = candidate_ref
+        return {}, diagnostics
+
+    page_to_parts: dict[int, list[str]] = {}
+    for row in loaded:
+        if not isinstance(row, dict):
+            continue
+        idx = _coerce_int(row.get("page_idx"))
+        if idx is None:
+            continue
+        if idx < int(page_start) or idx > int(page_end):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        page_to_parts.setdefault(int(idx), []).append(text)
+
+    page_to_text: dict[int, str] = {}
+    for idx, parts in page_to_parts.items():
+        joined = "\n".join([p for p in parts if p]).strip()
+        if joined:
+            page_to_text[int(idx)] = joined
+
+    diagnostics["candidate"] = candidate_ref
+    diagnostics["page_count"] = len(page_to_text)
+    return page_to_text, diagnostics
+
+
 def _join_full_page(chunks: Sequence[_ChunkRow]) -> tuple[str, list[str]]:
     """Join all chunk blocks on a page without truncation."""
 
@@ -173,7 +299,11 @@ class ReadPagesTool(GraphTool):
     descriptor = ToolDescriptor(
         name="read.pages",
         channel="graph",
-        description="Read all chunks overlapping a page range (requires PageIndex page metadata).",
+        description=(
+            "Read all chunks overlapping a page range (requires PageIndex page metadata). "
+            "IMPORTANT: page_start/page_end are 0-based indices (page 0 is the first page). "
+            "If a user mentions 'page N' (human 1-based), convert to index N-1 when calling this tool."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("read", "pages", "pageindex", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
@@ -184,8 +314,8 @@ class ReadPagesTool(GraphTool):
         input_schema=build_input_schema(
             extra_properties={
                 "file_id": {"type": "string", "description": "Target file_id (required)."},
-                "page_start": {"type": "integer", "minimum": 0, "description": "Start page (inclusive)."},
-                "page_end": {"type": "integer", "minimum": 0, "description": "End page (inclusive)."},
+                "page_start": {"type": "integer", "minimum": 0, "description": "Start page index (0-based, inclusive)."},
+                "page_end": {"type": "integer", "minimum": 0, "description": "End page index (0-based, inclusive)."},
                 "goal": {"type": "string", "description": "Why you are reading these pages (for provenance)."},
             },
             required_extra_fields=("file_id", "page_start", "page_end"),
@@ -209,21 +339,14 @@ class ReadPagesTool(GraphTool):
             if file_id_raw and not file_id:
                 reason = "invalid_file_id_format"
             return ToolResult(
-                summary="read.pages skipped: missing/invalid file_id or missing page range (use search.file/section.select).",
+                summary="read.pages skipped: missing/invalid file_id or missing page range (use search.file/page.select).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None, "page_start": page_start, "page_end": page_end},
             )
 
         if page_end < page_start:
             page_start, page_end = page_end, page_start
 
-        all_rows, fetch_diag = await _fetch_file_chunks(
-            request=request,
-            file_id=file_id,
-            page_start=page_start,
-            page_end=page_end,
-        )
-        if not all_rows:
-            return ToolResult(summary="read.pages returned no chunks.", diagnostics={**fetch_diag, "reason": fetch_diag.get("reason") or "empty_file"})
+        # PageIndex uses 0-based page indices; page 0 is valid.
 
         def _row_overlaps_page(row: _ChunkRow, page: int) -> bool:
             ps = row.page_start
@@ -238,12 +361,75 @@ class ReadPagesTool(GraphTool):
                 return False
             return ps <= page <= pe
 
+        all_rows, fetch_diag = await _fetch_file_chunks(
+            request=request,
+            file_id=file_id,
+            page_start=int(page_start),
+            page_end=int(page_end),
+        )
+        if not all_rows:
+            pages, diag = _load_mineru_content_list_pages(
+                file_id=file_id,
+                page_start=int(page_start),
+                page_end=int(page_end),
+            )
+            if pages:
+                evidences: list[EvidenceChunk] = []
+                summaries: list[str] = []
+                for p in range(int(page_start), int(page_end) + 1):
+                    text = pages.get(p)
+                    if not text:
+                        continue
+                    summaries.append(f"p{p}: content_list {len(text)} chars")
+                    evidences.append(
+                        EvidenceChunk(
+                            chunk_id=hashed_chunk_id(source="read.pages", content=f"{file_id}:{p}-content_list"),
+                            source="read.pages",
+                            content=text,
+                            kind=EVIDENCE_KIND_PRIMARY,
+                            score=None,
+                            provenance={
+                                "goal": goal,
+                                "source_file_id": file_id,
+                                "page_start": p,
+                                "page_end": p,
+                                "chunk_ids": [],
+                                "truncated": False,
+                                "node_type": "page",
+                                "node_types": {"text": 1},
+                                "evidence_class": EVIDENCE_CLASS_SOURCE_TEXT,
+                                "metadata": {"source_file_id": file_id, "page_start": p, "page_end": p},
+                            },
+                        )
+                    )
+                summary = "read.pages returned full page evidence (content_list fallback): " + "; ".join(summaries)
+                return ToolResult(
+                    summary=summary,
+                    evidences=evidences,
+                    diagnostics={
+                        **(fetch_diag or {}),
+                        **(diag or {}),
+                        "query_mode": "pageindex_content_list_direct",
+                        "page_indexing": "0_based",
+                    },
+                )
+
+            return ToolResult(
+                summary="read.pages returned no chunks.",
+                diagnostics={
+                    **(fetch_diag or {}),
+                    **(diag or {}),
+                    "reason": (fetch_diag or {}).get("reason") or (diag or {}).get("reason") or "empty_file",
+                    "page_indexing": "0_based",
+                },
+            )
+
+        filename = _extract_filename(all_rows)
         evidences: list[EvidenceChunk] = []
         page_summaries: list[str] = []
-        filename = _extract_filename(all_rows)
         page_diag: dict[int, dict[str, Any]] = {}
         page_char_counts: dict[int, int] = {}
-        for page in range(page_start, page_end + 1):
+        for page in range(int(page_start), int(page_end) + 1):
             page_rows = [row for row in all_rows if _row_overlaps_page(row, page)]
             if not page_rows:
                 continue
@@ -300,10 +486,14 @@ class ReadPagesTool(GraphTool):
                 "image_url_count": len(image_urls),
             }
 
+        if page_summaries:
+            fetch_diag = dict(fetch_diag or {})
+            fetch_diag["page_summaries"] = list(page_summaries)[:20]
+
         if not evidences:
             return ToolResult(
                 summary="read.pages returned no chunks (page metadata missing or range unmatched).",
-                diagnostics={**fetch_diag, "reason": "pages_not_found", "page_start": page_start, "page_end": page_end},
+                diagnostics={**fetch_diag, "reason": "pages_not_found", "page_start": int(page_start), "page_end": int(page_end), "page_indexing": "0_based"},
             )
 
         summary = "read.pages returned full page evidence: " + "; ".join(page_summaries)
@@ -422,6 +612,7 @@ class ReadPagesTool(GraphTool):
                 "median_page_chars": int(median_chars) if "median_chars" in locals() else None,
                 "median_page_chunks": int(median_chunks) if "median_chunks" in locals() else None,
             },
+            "page_indexing": "0_based",
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
