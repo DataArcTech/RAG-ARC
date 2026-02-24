@@ -672,6 +672,140 @@ def deepsearch(
         graph_store=graph_store,
     )
 
+
+def _load_questions_from_path(path: Path) -> List[Dict[str, Any]]:
+    """Load questions from a .json (list) or a text/tsv file.
+
+    Expected formats:
+    - JSON: [{"id": "...", "question": "..."}, ...] or ["question", ...]
+    - TXT/TSV: one question per line; if TSV, we take the last column as question.
+    """
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+
+    if p.suffix.lower() == ".json":
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            out: List[Dict[str, Any]] = []
+            for i, item in enumerate(payload):
+                if isinstance(item, str):
+                    q = item.strip()
+                    if q:
+                        out.append({"id": str(i), "question": q})
+                    continue
+                if isinstance(item, dict):
+                    q = str(item.get("question") or item.get("q") or "").strip()
+                    if not q:
+                        continue
+                    qid = str(item.get("id") or item.get("idx") or i)
+                    out.append({"id": qid, "question": q})
+            return out
+        raise ValueError("deepsearch-batch: JSON input must be a list")
+
+    out = []
+    for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines()):
+        raw = (line or "").strip()
+        if not raw or raw.startswith("#"):
+            continue
+        # TSV: idx \t ... \t question
+        if "\t" in raw:
+            q = raw.split("\t")[-1].strip()
+        else:
+            q = raw
+        if q:
+            out.append({"id": str(i), "question": q})
+    return out
+
+
+@app.command("deepsearch-batch")
+def deepsearch_batch(
+    input_path: Path = typer.Argument(..., exists=True, readable=True, resolve_path=True, help="Input file (.json or .tsv/.txt)."),
+    owner_id: Optional[str] = typer.Option(None, help="Optional owner UUID; defaults to CLI owner"),
+    output_dir: Path = typer.Option(
+        Path("local/deepsearch_batch_outputs"),
+        "--out-dir",
+        help="Directory to write per-question JSON outputs (trimmed + optional raw).",
+    ),
+    include_evidence: bool = typer.Option(
+        False,
+        "--with-evidence/--no-evidence",
+        help="Attach chunk/graph evidence bundle (chunks/seeds/graph_chain).",
+    ),
+    save_raw: bool = typer.Option(
+        False,
+        "--save-raw/--no-save-raw",
+        help="Persist the full raw payload alongside the trimmed JSON output.",
+    ),
+) -> None:
+    """Run DeepSearch over a batch of questions in a single process.
+
+    Why:
+    - Starting a new process per question is slow (re-register modules; reload indices/graph cache).
+    - Batch mode amortizes initialization cost and makes latency profiling easier.
+    """
+
+    ctx = initialize(owner_id=owner_id)
+    registrator = Register()
+    try:
+        service = registrator.get_object("deepsearch_service")
+    except KeyError:
+        typer.secho("DeepSearch service is not registered; check DEEPSEARCH_SERVICE_CONFIG_PATH.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    graph_store = None
+    try:
+        rag = registrator.get_object("rag_inference")
+        if isinstance(rag, RAGInference):
+            graph_store = rag.get_graph_store()
+    except Exception:  # noqa: BLE001
+        graph_store = None
+
+    items = _load_questions_from_path(input_path)
+    if not items:
+        typer.secho("deepsearch-batch: no questions found in input.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    typer.echo(f"[run] deepsearch-batch owner_id={ctx.owner_id} questions={len(items)} out_dir={out_dir}")
+
+    async def _run_all() -> None:
+        for idx, row in enumerate(items):
+            qid = str(row.get("id") or idx)
+            q = str(row.get("question") or "").strip()
+            if not q:
+                continue
+            typer.echo(f"[run] {idx+1}/{len(items)} id={qid}")
+            try:
+                payload = await service.run(q, owner_id=str(ctx.owner_id))
+            except Exception as exc:  # noqa: BLE001
+                err_path = out_dir / f"deepsearch_{qid}.error.json"
+                err_path.write_text(
+                    json.dumps({"id": qid, "question": q, "error": str(exc)}, ensure_ascii=False, indent=2, default=str)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                typer.secho(f"[error] id={qid}: {exc}", fg=typer.colors.RED)
+                continue
+
+            trimmed = trim_deepsearch_payload(payload, include_evidence=include_evidence, graph_store=graph_store)
+            trimmed_path = out_dir / f"deepsearch_{qid}.json"
+            trimmed_path.write_text(
+                json.dumps(json_safe(trimmed), ensure_ascii=False, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+            if save_raw:
+                raw_path = out_dir / f"deepsearch_{qid}.raw.json"
+                raw_path.write_text(
+                    json.dumps(json_safe(payload), ensure_ascii=False, indent=2, default=str) + "\n",
+                    encoding="utf-8",
+                )
+        typer.echo("[run] deepsearch-batch done")
+
+    asyncio.run(_run_all())
+
 @app.command()
 def chat(
     query: str = typer.Argument(..., help="User question to run through RAG pipeline."),
