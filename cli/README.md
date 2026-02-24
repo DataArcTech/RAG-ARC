@@ -25,6 +25,7 @@ The CLI lets you exercise the full RAG pipeline (ingestion → indexing/graph bu
 | Retrieval | `uv run rag-arc pipeline "What is RAG-ARC?" --skip-llm --subgraph --owner-id <UUID>` | Inspect rewrite/retrieval/rerank without calling the LLM. |
 | Graph QA | `uv run rag-arc graph-qa "Explain relation between X and Y" --owner-id <UUID>` | Run graph-only question answering and return subgraph metadata. |
 | DeepSearch | `uv run rag-arc deepsearch "What average SAT score..." --with-evidence --json` | Execute the DeepSearch on Graph pipeline (shared with HTTP/MCP). `--with-evidence` adds chunks/triples/seeds, `--json` writes trimmed output to `local/cli/<owner>/` (add `--save-raw` if you also need the full payload). |
+| DeepSearch | `uv run rag-arc deepsearch-batch ./questions.tsv --out-dir ./out --owner-id <UUID> --save-raw` | Run DeepSearch for many questions in a single process (amortizes initialization; writes one JSON per question). |
 | MCP | `uv run rag-arc tool-mcp-server --transport stdio` | Launch the DeepSearch tool MCP server (config at `config/json_configs/deepsearch_tool_mcp_server.json`, SSE port 8765, default path `/mcp/tools`). |
 | MCP | `uv run rag-arc chat-mcp-server --transport stdio` | Launch the chat/auth MCP server defined in `api/mcp/server.py` (SSE/HTTP default to `127.0.0.1:8785/mcp/chat`). |
 
@@ -41,6 +42,11 @@ Always pass `--owner-id <UUID>` when you want to reuse the same tenant/user data
 - `trigger-index` and `export-graph` run against the same graph store configured in `config/json_configs/*` (Neo4j for API profile by default). Ensure those services are accessible before running the commands.
 - The CLI caches a default owner ID in `~/.rag_arc_owner_id`. Override it via `--owner-id ...` or by setting `CLI_OWNER_ID`/`RAG_ARC_OWNER_ID` in the environment when you want to share the same tenant across machines.
 - Chunk previews shown in the terminal are trimmed to the first 50 characters for readability; use `--json` when you need the full content.
+- `deepsearch-batch` input formats:
+  - `.json`: a list of `{"id": "...", "question": "..."}` objects or a list of plain strings.
+  - `.tsv`/`.txt`: one question per line (TSV takes the last column as the question); `#` comments are ignored.
+- `deepsearch-batch` writes `deepsearch_<id>.json` (trimmed). Add `--save-raw` to also write `deepsearch_<id>.raw.json`.
+- Maintenance: if an owner-scoped FAISS index becomes incomplete after transient failures, you can repair it by re-adding missing chunks from `data/localdb/chunk_store/` via `uv run python scripts/repair_owner_faiss_from_chunk_store.py --owner-id <UUID> [--dry-run]`.
 
 > ℹ️ Built-in DeepSearch tools run locally inside the CLI/API process; spinning up the MCP tool server is only necessary after you configure an `mcp_client`, mark certain tools as `mcp_only`/`mcp_fallback`, or register remote tool descriptors.
 - Use `--with-evidence` on the `chat`/`pipeline`/`graph-qa` commands when you need the chunk/seed/triple evidence bundle; the option implicitly turns on `--subgraph` so the HippoRAG subgraph is exported alongside textual previews.

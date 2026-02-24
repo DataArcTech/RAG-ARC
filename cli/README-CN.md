@@ -25,6 +25,7 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 | 检索问答 | `uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --owner-id <UUID>` | 仅查看改写/检索/重排（可导出子图）。 |
 | 图问答 | `uv run rag-arc graph-qa "X和Y之间有什么关系?" --owner-id <UUID>` | 仅走图检索链路，并返回子图元数据。 |
 | DeepSearch | `uv run rag-arc deepsearch "请分析 Singapore American School..." --with-evidence --json` | 执行 Graph DeepSearch 流程。`--with-evidence` 返回 chunk/seed/triple，`--json` 将裁剪后的报告写到 `local/cli/<owner>/`（如需完整原始结果再加上 `--save-raw`）。 |
+| DeepSearch | `uv run rag-arc deepsearch-batch ./questions.tsv --out-dir ./out --owner-id <UUID> --save-raw` | 单进程批量跑 DeepSearch（复用初始化开销；每个问题输出一个 JSON）。 |
 | MCP | `uv run rag-arc tool-mcp-server --transport stdio` | 启动 DeepSearch 工具 MCP 服务器（配置位于 `config/json_configs/deepsearch_tool_mcp_server.json`，SSE 默认端口 8765，默认路径 `/mcp/tools`）。 |
 | MCP | `uv run rag-arc chat-mcp-server --transport stdio` | 启动聊天/鉴权 MCP 服务器（实现见 `api/mcp/server.py`，SSE/HTTP 默认 `127.0.0.1:8785/mcp/chat`）。 |
 
@@ -47,3 +48,8 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 - DeepSearch 命令依赖 `deepsearch_service` 配置（见 `config/json_configs/deepsearch_service.json`），请确保 CLI/服务端在启动时成功注册该模块。
 - 可通过 `.env` 中的证据控制变量（`CHAT_TOP_CHUNKS`、`CHAT_TOP_TRIPLES`、`CHAT_TOP_SEED_ENTITIES`、`DEEPSEARCH_TOP_CHUNKS`、`DEEPSEARCH_TOP_TRIPLES`、`DEEPSEARCH_TOP_SEED_ENTITIES`、`DEEPSEARCH_GRAPH_NODE_LIMIT`）调节输出规模；设置 `ENABLE_ALL_EVIDENCE=true` 可关闭所有裁剪。
 - DeepSearch `--json` 会同时生成裁剪后的报告和 `_raw` 备份，均保存在 `local/cli/<owner>/`，方便日后排查。
+- `deepsearch-batch` 支持的输入格式：
+  - `.json`：`[{"id":"...","question":"..."}, ...]` 或 `["question", ...]`。
+  - `.tsv`/`.txt`：每行一个问题（TSV 取最后一列作为问题）；以 `#` 开头的行会被忽略。
+- `deepsearch-batch` 会写入 `deepsearch_<id>.json`（裁剪版）；加 `--save-raw` 会额外写入 `deepsearch_<id>.raw.json`。
+- 维护脚本：当 owner 级 FAISS 索引因短暂失败导致不完整时，可用 `uv run python scripts/repair_owner_faiss_from_chunk_store.py --owner-id <UUID> [--dry-run]` 从 `data/localdb/chunk_store/` 扫描并补齐缺失 chunk。

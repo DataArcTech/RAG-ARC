@@ -359,8 +359,8 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
 | `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, payloads are stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). Applies to both task results and large progress/trace payloads. |
-| `MQ_RESULT_STORE` | `io` | External result store backend: `io` (IOManager-backed, Phase 1 LocalDB mapping) or `minio` (TODO). |
-| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | Virtual base directory (io://...) for external results when `MQ_RESULT_STORE=io`. |
+| `MQ_RESULT_STORE` | `io` | External result store backend: `io` (IOManager-backed, uses `io://...`) / `local` (local filesystem, no IOManager required) / `minio` (TODO). |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | Result directory. When `MQ_RESULT_STORE=io`, must be an `io://...` virtual dir. When `MQ_RESULT_STORE=local`, can be a local path (also accepts `io://...` and maps it to the LocalDB root for hermetic tests). |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
 | `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
 | `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
@@ -414,7 +414,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | Graph reasoning strategy label. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | Virtual directory (io://...) for DeepSearch artifacts (runs + tools), mapped to LocalDB under `IO_STORE_BASE_PATH`. |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch artifacts directory for runs + tools. Accepts `io://...` (mapped via IOManager to LocalDB/MinIO) or a local filesystem path (useful for tests/scripts). |
 | `DEEPSEARCH_LLM_DUMP_PATH` | _(empty)_ | Optional debug dump root. When set to an `io://...` virtual directory, DeepSearch writes one JSON object per LLM event via IOManager (request/response/error). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
@@ -481,8 +481,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/image parse mode: `native` (no OCR; PDF text extraction only), `dotsocr` (local OCR), `mineru` (remote MinerU service). |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Unified virtual base directory (io://...) for parser outputs (native/dots_ocr/vlm_ocr/mineru subfolders), persisted via IO backend (`localdb` or `minio`). |
-| `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory. |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Parser output base directory for native/dots_ocr/vlm_ocr/mineru artifacts. Supports `io://...` (preferred) or a local filesystem path. |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory (supports `io://...` or a local filesystem path). |
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `MINERU_SERVER_URL` | _(empty)_ | Required when `PARSER_PARSE_MODE=mineru`: MinerU server base URL (e.g. `http://127.0.0.1:8899`). |
@@ -490,7 +490,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_REUSE_CACHE` | `1` | When re-indexing, reuse existing MinerU markdown artifacts under `PARSER_OUTPUT_DIR/mineru/<file_id>/` if present (skip remote MinerU call). |
 | `MINERU_SHARED_CACHE_ENABLED` | `1` | Enable global (cross-owner/tenant) MinerU parse cache reuse when file bytes are identical (sha256 match). |
-| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root. Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
+| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root (supports `io://...` or a local filesystem path). Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
 | `MINERU_SHARED_CACHE_MODE` | `symlink` | How to materialize shared cache into per-file output dirs: `symlink` (preferred) or `copy`. |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |

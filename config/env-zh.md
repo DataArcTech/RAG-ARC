@@ -357,8 +357,8 @@ Benchmark/实验模式：
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
 | `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Redis 内联存储的最大 JSON 字节数；超过后自动外置存储（IOManager/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。该限制同时作用于任务结果与超大 progress/trace payload。 |
-| `MQ_RESULT_STORE` | `io` | 结果外置存储后端：`io`（IOManager，Phase 1 映射到 LocalDB）或 `minio`（TODO）。 |
-| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | `MQ_RESULT_STORE=io` 时的外置结果虚拟目录（io://...，映射到 LocalDB）。 |
+| `MQ_RESULT_STORE` | `io` | 结果外置存储后端：`io`（IOManager，使用 `io://...`）/ `local`（本地文件系统，不依赖 IOManager）/ `minio`（TODO）。 |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | 结果目录：当 `MQ_RESULT_STORE=io` 时必须是 `io://...` 虚拟目录；当 `MQ_RESULT_STORE=local` 时可以是本地路径（也接受 `io://...` 并映射到 LocalDB 根目录，便于单测隔离）。 |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
 | `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
 | `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
@@ -412,7 +412,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | 图推理策略。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch 产物虚拟目录（runs + tools；io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch 运行产物目录（runs + tools）。支持 `io://...`（通过 IOManager 映射到 LocalDB/MinIO），也支持本地文件系统路径（便于单测/脚本）。 |
 | `DEEPSEARCH_LLM_DUMP_PATH` | _(空)_ | 可选调试输出根目录：当设置为 `io://...` 虚拟目录时，DeepSearch 会通过 IOManager 写入 LLM 调试事件（request/response/error），每个事件一个 JSON 对象。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
@@ -479,8 +479,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/图片解析方式：`native`（不做 OCR；仅 PDF 文本抽取）、`dotsocr`（本地 DotsOCR OCR）、`mineru`（远程 MinerU 服务）。 |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 统一解析输出虚拟目录（io://...，native/dots_ocr/vlm_ocr/mineru 会落到子目录），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
-| `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖。 |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 解析产物基目录（native/dots_ocr/vlm_ocr/mineru 会落到子目录）。支持 `io://...`（推荐）或本地文件系统路径。 |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖（支持 `io://...` 或本地路径）。 |
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `MINERU_SERVER_URL` | _(空)_ | 当 `PARSER_PARSE_MODE=mineru` 时必填：MinerU 服务地址（例如 `http://127.0.0.1:8899`）。 |
@@ -488,7 +488,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_REUSE_CACHE` | `1` | 重新入库时，如果 `PARSER_OUTPUT_DIR/mineru/<file_id>/` 下已有 MinerU markdown，则复用缓存（跳过远程 MinerU 调用）。 |
 | `MINERU_SHARED_CACHE_ENABLED` | `1` | 启用 MinerU 的全局（跨 owner/tenant）解析缓存复用：当文件 bytes 完全一致（sha256 匹配）时跳过远程 MinerU 调用。 |
-| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
+| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录（支持 `io://...` 或本地路径）；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
 | `MINERU_SHARED_CACHE_MODE` | `symlink` | 共享缓存物化到每个 file 输出目录的方式：`symlink`（优先）或 `copy`。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
