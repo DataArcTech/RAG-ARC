@@ -525,7 +525,7 @@ async def list_files(
     page: Optional[int] = Query(default=1, ge=1, description="Page number (starts from 1)"),
     pagesize: Optional[int] = Query(default=100, ge=1, le=1000, description="Number of files per page"),
     search: Optional[str] = Query(default=None, description="Search keyword for filename (fuzzy match)"),
-    status: Optional[str] = Query(default=None, description="Filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)"),
+    status_filter: Optional[str] = Query(default=None, alias="status", description="Filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)"),
 ):
     """
     Get all files accessible to the current user (files with permissions only).
@@ -544,7 +544,7 @@ async def list_files(
         page: Page number (starts from 1, default: 1)
         pagesize: Number of files per page (default: 100, max: 1000)
         search: Optional search keyword for filename fuzzy matching
-        status: Optional filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)
+        status_filter: Optional filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)
         
     Returns:
         FileListResponse with list of files and total count
@@ -557,13 +557,13 @@ async def list_files(
     try:
         # Parse status parameter if provided
         status_enum = None
-        if status:
+        if status_filter:
             try:
-                status_enum = FileStatus[status.upper()]
+                status_enum = FileStatus[status_filter.upper()]
             except KeyError:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid status value: {status}. Valid values are: STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED"
+                    detail=f"Invalid status value: {status_filter}. Valid values are: STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED"
                 )
         
         # Calculate offset from page number
@@ -574,7 +574,7 @@ async def list_files(
         offset = (page - 1) * pagesize
         
         # Log pagination parameters for debugging
-        logger.debug(f"List files pagination: page={page}, pagesize={pagesize}, offset={offset}, status={status}")
+        logger.debug(f"List files pagination: page={page}, pagesize={pagesize}, offset={offset}, status={status_filter}")
         
         # Get files for current page (async, non-blocking)
         files = await get_knowledge_handler().list_user_files_async(
