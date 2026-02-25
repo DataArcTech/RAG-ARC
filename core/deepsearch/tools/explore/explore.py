@@ -65,10 +65,10 @@ class ExploreTool(GraphTool):
         name="explore",
         channel="graph",
         description=(
-            "Graph-first exploration orchestrator. Runs action lists in parallel: "
-            "graph.ops (safe Cypher + templates), locate, web.search, and structured reads "
-            "(read.pages). "
-            "Good: actions with graph.ops + read.pages. Bad: empty action list."
+            "Execute one or more retrieval/navigation actions in parallel. "
+            "Pass a list of actions, each specifying a tool name and its args. "
+            "Available tools: locate, toc.tree, tree.root, tree.children, tree.node, tree.open, "
+            "graph.ops, graph.beam_search, graph.llm_chain_explorer, read.pages, web.search."
         ),
         speed="medium",
         cost="medium",
@@ -84,13 +84,19 @@ class ExploreTool(GraphTool):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string", "description": "Optional action id for tracking."},
-                            "tool": {"type": "string", "description": "Tool name (locate/toc/tree/graph.ops/read.pages)."},
-                            "args": {"type": "object", "description": "Tool-specific args (passed as extra)."},
+                            "id": {"type": "string", "description": "Optional action id for tracking in results."},
+                            "tool": {
+                                "type": "string",
+                                "description": "Tool name to execute (e.g. 'locate', 'read.pages', 'toc.tree').",
+                            },
+                            "args": {
+                                "type": "object",
+                                "description": "Arguments passed to the tool. See each tool's schema for available parameters.",
+                            },
                         },
                         "required": ["tool"],
                     },
-                    "description": "Action list executed in parallel.",
+                    "description": "List of actions to execute. Independent actions run in parallel.",
                 },
                 "max_concurrency": {
                     "type": "integer",

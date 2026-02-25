@@ -32,7 +32,11 @@ class TocTreeTool(GraphTool):
     descriptor = ToolDescriptor(
         name="toc.tree",
         channel="graph",
-        description="List a file's section tree (ToC) reconstructed from PageIndex-enriched chunk metadata.",
+        description=(
+            "Show the Table of Contents (section hierarchy) of a file. "
+            "Returns an indented tree of section headings with page ranges. "
+            "Use this to understand document structure before drilling into specific pages."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("toc", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -42,9 +46,17 @@ class TocTreeTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "Target file_id (required)."},
-                "max_depth": {"type": "integer", "minimum": 1, "description": "Max ToC depth to print."},
-                "max_nodes": {"type": "integer", "minimum": 1, "description": "Max nodes to print before truncating."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) to show the ToC for."},
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum heading depth to display (e.g. 2 shows only L1 and L2 sections). Defaults to all levels.",
+                },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of sections to display before truncating. Defaults to 200.",
+                },
             },
             required_extra_fields=("file_id",),
         ),

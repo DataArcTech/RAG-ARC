@@ -35,8 +35,13 @@ class BeamSearchTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.beam_search",
         channel="graph",
-        description="Think-on-Graph style beam search that enumerates candidate KG paths, scores them, and "
-        "returns ranked path summaries plus supporting chunks before committing to longer reasoning chains.",
+        description=(
+            "Explore multi-hop reasoning paths in the knowledge graph. "
+            "Starting from seed entities, expands outward along relations, scores candidate paths, "
+            "and returns ranked path summaries with supporting evidence. "
+            "Use this for complex questions requiring multi-step entity connections. "
+            "Slow and LLM-heavy — prefer locate or graph.ops for simpler queries."
+        ),
         speed="slow",
         cost="high",
         strategy_tags=("beam_search", "tog", "graph_reasoning", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM),
@@ -49,15 +54,24 @@ class BeamSearchTool(GraphTool):
                 "seed_entities": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional seed entities for initializing the beam.",
+                    "description": (
+                        "Entity names to start the search from (e.g. ['OpenAI', 'GPT-4']). "
+                        "When omitted, entities are automatically extracted from the question using an LLM."
+                    ),
                 },
                 "seed_entity_top_k": {
                     "type": "integer",
-                    "description": "Max entities to extract with LLM when no seeds are provided.",
                     "minimum": 0,
+                    "description": "Maximum number of entities to extract from the question when seed_entities is not provided. Defaults to 5.",
                 },
-                "beam_size": {"type": "integer", "description": "Override default beam size."},
-                "max_depth": {"type": "integer", "description": "Override default reasoning depth."},
+                "beam_size": {
+                    "type": "integer",
+                    "description": "Number of candidate paths to keep at each expansion step. Higher = more thorough but slower. Defaults to 3.",
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum number of hops to expand from seed entities. Defaults to 2.",
+                },
             }
         ),
         example_args={

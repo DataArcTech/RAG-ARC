@@ -42,11 +42,11 @@ class GraphOpsTool(GraphTool):
         name="graph.ops",
         channel="graph",
         description=(
-            "Unified graph operator: run read-only Cypher safely or use a named template "
-            "for deterministic reasoning (paths, intersections, aggregates, rule checks, "
-            "relation-path explore/ground, schema/terms). "
-            "Good: template=path_exists with source/target. "
-            "Bad: custom cypher without $owner_id/$global_owner or any write."
+            "Query the knowledge graph using named templates or custom read-only Cypher. "
+            "Templates provide deterministic operations: check if a path exists between entities, "
+            "find intersections, aggregate relations, explore/ground relation paths, and inspect schema. "
+            "Use mode='template' with a template name (recommended), or mode='cypher' for custom queries. "
+            "Custom Cypher must include $owner_id or $global_owner filters and be read-only."
         ),
         speed="fast",
         cost="low",
@@ -60,20 +60,29 @@ class GraphOpsTool(GraphTool):
                 "mode": {
                     "type": "string",
                     "enum": ["template", "cypher"],
-                    "description": "Execution mode: template (recommended) or custom read-only cypher.",
+                    "description": "Execution mode. 'template' (recommended): use a predefined operation. 'cypher': run a custom read-only Cypher query.",
                 },
                 "template": {
                     "type": "string",
-                    "description": "Template name (see template catalog).",
+                    "description": "Template name to execute. Each template has specific required args — see template_args.",
                     "enum": template_names(),
                 },
-                "template_args": {"type": "object", "description": "Template-specific arguments."},
-                "cypher": {"type": "string", "description": "Custom read-only Cypher query."},
-                "params": {"type": "object", "description": "Parameters for custom Cypher."},
+                "template_args": {
+                    "type": "object",
+                    "description": "Arguments for the chosen template (e.g. {\"source\": \"OpenAI\", \"target\": \"Microsoft\"} for path_exists).",
+                },
+                "cypher": {
+                    "type": "string",
+                    "description": "A custom read-only Cypher query. Must reference $owner_id or $global_owner for tenant isolation.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Parameters to bind in the custom Cypher query (e.g. {\"entity_name\": \"Apple Inc.\"}).",
+                },
                 "max_rows": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Override max rows returned (applies to custom cypher diagnostics).",
+                    "description": "Maximum number of rows to return. Defaults to 50.",
                 },
             }
         ),

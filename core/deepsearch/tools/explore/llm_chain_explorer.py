@@ -23,8 +23,10 @@ class LLMChainExplorerTool(GraphTool):
         name="graph.llm_chain_explorer",
         channel="graph",
         description=(
-            "LLM-managed chain-of-exploration that decides next graph hops. "
-            "Evidence: derived hop summaries (NOT citeable; use deterministic graph tools for citations)."
+            "LLM-guided chain-of-exploration through the knowledge graph. "
+            "An LLM decides which graph hops to take at each step, building a reasoning chain. "
+            "Returns derived hop summaries — NOT citeable evidence. "
+            "Slow and expensive — prefer locate or graph.ops for simpler queries."
         ),
         speed="slow",
         cost="high",

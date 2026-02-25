@@ -300,9 +300,9 @@ class ReadPagesTool(GraphTool):
         name="read.pages",
         channel="graph",
         description=(
-            "Read all chunks overlapping a page range (requires PageIndex page metadata). "
-            "IMPORTANT: page_start/page_end are 0-based indices (page 0 is the first page). "
-            "If a user mentions 'page N' (human 1-based), convert to index N-1 when calling this tool."
+            "Read the full text of specific pages from a file. This is the ONLY tool that returns "
+            "citeable source evidence. All page indices are 0-based (page 0 = first page of the PDF). "
+            "Always call this before concluding — navigation tools (locate, toc.tree, tree.*) only provide snippets."
         ),
         speed="fast",
         cost="low",
@@ -313,10 +313,21 @@ class ReadPagesTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "Target file_id (required)."},
-                "page_start": {"type": "integer", "minimum": 0, "description": "Start page index (0-based, inclusive)."},
-                "page_end": {"type": "integer", "minimum": 0, "description": "End page index (0-based, inclusive)."},
-                "goal": {"type": "string", "description": "Why you are reading these pages (for provenance)."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) to read from."},
+                "page_start": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Start page index, 0-based inclusive (e.g. 0 = first page). Required.",
+                },
+                "page_end": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "End page index, 0-based inclusive. Must be >= page_start. Required.",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "Brief note on why these pages are being read (e.g. 'extract revenue table'). Stored in provenance.",
+                },
             },
             required_extra_fields=("file_id", "page_start", "page_end"),
         ),

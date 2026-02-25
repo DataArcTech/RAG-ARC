@@ -295,9 +295,10 @@ class CodePythonTool(GraphTool):
         name="code.python",
         channel="text",
         description=(
-            "Execute deterministic Python for math/finance verification (returns code + outputs). "
-            "Evidence: derived computation results (NOT citeable). "
-            "Good: provide full code + INPUTS and set result. Bad: placeholder code."
+            "Execute Python code for deterministic math, finance, or data verification. "
+            "The code runs in a sandboxed subprocess with limited imports (math, statistics, decimal, json, re, datetime, collections). "
+            "Returns stdout, the value of a variable named 'result' (if set), and any errors. "
+            "Provide complete, runnable code — not pseudocode or placeholders."
         ),
         speed="medium",
         cost="low",
@@ -308,10 +309,25 @@ class CodePythonTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "code": {"type": "string", "description": "Python source code to execute."},
-                "inputs": {"type": "object", "description": "Optional JSON inputs injected as INPUTS."},
-                "purpose": {"type": "string", "description": "Optional brief purpose shown in traces."},
-                "expected": {"type": ["object", "string"], "description": "Optional expected result / assertion hint."},
+                "code": {
+                    "type": "string",
+                    "description": "Complete Python source code to execute. Set a variable named 'result' to capture the final output.",
+                },
+                "inputs": {
+                    "type": "object",
+                    "description": (
+                        "JSON data injected into the code as a dict variable named INPUTS. "
+                        "Access values via INPUTS['key']. Example: {\"cashflows\": [-100, 30, 40, 50]}."
+                    ),
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "Brief description of what this computation verifies (e.g. 'IRR verification'). Stored in provenance.",
+                },
+                "expected": {
+                    "type": ["object", "string"],
+                    "description": "Expected result for comparison. Not enforced — used for diagnostics only.",
+                },
             },
             required_extra_fields=("code",),
         ),

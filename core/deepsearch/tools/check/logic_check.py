@@ -107,8 +107,9 @@ class LogicCheckTool(GraphTool):
         name="logic.check",
         channel="graph",
         description=(
-            "Review the reasoning DAG for logic errors (evidence gaps, conflicts, plan coverage, "
-            "missing deterministic tools). Does NOT gather new evidence or judge report quality."
+            "Review the reasoning chain for logical errors: evidence gaps, contradictions, "
+            "uncovered plan items, and missing deterministic verifications. "
+            "Returns a list of issues found. Does NOT gather new evidence or evaluate report quality."
         ),
         speed="slow",
         cost="low",
@@ -124,17 +125,25 @@ class LogicCheckTool(GraphTool):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "key": {"type": "string"},
-                            "value": {"type": "string"},
-                            "polarity": {"type": "string"},
-                            "evidence_ids": {"type": "array", "items": {"type": "string"}},
-                            "branch": {"type": "string"},
+                            "key": {"type": "string", "description": "Claim identifier (e.g. 'revenue_2024')."},
+                            "value": {"type": "string", "description": "The claimed value or statement."},
+                            "polarity": {"type": "string", "description": "Expected truth value: 'affirm' or 'deny'."},
+                            "evidence_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "IDs of evidence chunks supporting this assertion.",
+                            },
+                            "branch": {"type": "string", "description": "Reasoning branch this assertion belongs to."},
                         },
                         "required": ["key"],
                     },
-                    "description": "Optional structured claims for strict checks.",
+                    "description": "Structured claims to verify against collected evidence. Each assertion is checked for support and consistency.",
                 },
-                "max_issues": {"type": "integer", "minimum": 0, "description": "Limit returned issues."},
+                "max_issues": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum number of issues to return. Defaults to 10.",
+                },
             }
         ),
         example_args={

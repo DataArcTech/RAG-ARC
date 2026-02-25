@@ -198,9 +198,9 @@ class ThinkTool(GraphTool):
         name="think",
         channel="graph",
         description=(
-            "Structured pause that digests current context before the next hop. "
-            "Evidence: derived think notes (NOT citeable). "
-            "Good: summarize gaps + propose next tool calls. Bad: invent facts or call think."
+            "Structured reasoning step that analyzes accumulated evidence, identifies gaps, "
+            "and plans the next exploration actions. Returns a reasoning trace with tool_calls to execute. "
+            "This is the core control loop — do NOT call think from within think."
         ),
         speed="slow",
         cost="low",

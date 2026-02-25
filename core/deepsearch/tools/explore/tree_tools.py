@@ -63,7 +63,11 @@ class TreeRootTool(GraphTool):
     descriptor = ToolDescriptor(
         name="tree.root",
         channel="graph",
-        description="Show top-level sections and TreeNode stats for a file (display-only).",
+        description=(
+            "Show the top-level sections of a file with page ranges and node counts. "
+            "Returns section titles, page spans, and node_ids for further drill-down. "
+            "Use this as an overview before calling tree.children or read.pages."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("tree", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -73,8 +77,12 @@ class TreeRootTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "Target file_id (required)."},
-                "max_roots": {"type": "integer", "minimum": 1, "description": "Max root sections to print."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) to inspect."},
+                "max_roots": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of top-level sections to return. Defaults to 20.",
+                },
             },
             required_extra_fields=("file_id",),
         ),
@@ -213,7 +221,11 @@ class TreeChildrenTool(GraphTool):
     descriptor = ToolDescriptor(
         name="tree.children",
         channel="graph",
-        description="List children TreeNodes under a section or a TreeNode.",
+        description=(
+            "List child nodes under a section or tree node. "
+            "Returns sub-sections or content nodes with page ranges. "
+            "Provide either section_id (from toc.tree) or node_id (from tree.root/tree.children) — not both."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("tree", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -223,10 +235,23 @@ class TreeChildrenTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "Target file_id (required for section lookup)."},
-                "section_id": {"type": "string", "description": "Section id to list child TreeNodes."},
-                "node_id": {"type": "string", "description": "TreeNode id to list child TreeNodes."},
-                "max_nodes": {"type": "integer", "minimum": 1, "description": "Max nodes to return."},
+                "file_id": {
+                    "type": "string",
+                    "description": "The file_id (UUID). Required when using section_id.",
+                },
+                "section_id": {
+                    "type": "string",
+                    "description": "A section ID (from toc.tree output) to list children of. Mutually exclusive with node_id.",
+                },
+                "node_id": {
+                    "type": "string",
+                    "description": "A node_id (from tree.root or tree.children output) to list children of. Mutually exclusive with section_id.",
+                },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of child nodes to return. Defaults to 50.",
+                },
             },
             required_extra_fields=(),
         ),
@@ -358,7 +383,11 @@ class TreeNodeTool(GraphTool):
     descriptor = ToolDescriptor(
         name="tree.node",
         channel="graph",
-        description="Show metadata for a TreeNode (display-only; use read.pages for evidence).",
+        description=(
+            "Show metadata for a single tree node: title, page range, node type, and summary. "
+            "Use this to inspect a node before deciding whether to read its pages. "
+            "Does NOT return citeable evidence — use read.pages for that."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("tree", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -368,7 +397,7 @@ class TreeNodeTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "node_id": {"type": "string", "description": "TreeNode id (required)."},
+                "node_id": {"type": "string", "description": "The node_id to inspect (from tree.root or tree.children output)."},
             },
             required_extra_fields=("node_id",),
         ),
@@ -451,7 +480,12 @@ class TreeOpenTool(GraphTool):
     descriptor = ToolDescriptor(
         name="tree.open",
         channel="graph",
-        description="Open a TreeNode summary + resource hints (display-only; use read.pages for evidence).",
+        description=(
+            "Open a tree node to see its summary and page hints (page_start, page_end). "
+            "Use these page hints to decide which pages to read next. "
+            "Provide node_id directly, or file_id + section_id as a fallback. "
+            "Does NOT return citeable evidence — use read.pages for that."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("tree", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -461,9 +495,18 @@ class TreeOpenTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "node_id": {"type": "string", "description": "TreeNode id (preferred)."},
-                "file_id": {"type": "string", "description": "Target file_id (required when using section_id)."},
-                "section_id": {"type": "string", "description": "Section id fallback (use when node_id unknown)."},
+                "node_id": {
+                    "type": "string",
+                    "description": "The node_id to open (preferred). Obtained from tree.root or tree.children.",
+                },
+                "file_id": {
+                    "type": "string",
+                    "description": "The file_id (UUID). Required when using section_id instead of node_id.",
+                },
+                "section_id": {
+                    "type": "string",
+                    "description": "A section ID (from toc.tree). Use as fallback when node_id is not available.",
+                },
             },
             required_extra_fields=(),
         ),
