@@ -123,6 +123,9 @@ Benchmark/实验模式：
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
 | `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
+| `RERANK_API_KEY` | _(空)_ | DashScope API rerank 密钥（DeepSearch `locate` 工具使用）。 |
+| `RERANK_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1` | DashScope 兼容 rerank 端点的 Base URL。 |
+| `RERANK_MODEL_NAME` | `qwen3-rerank` | API rerank 模型名称（如 `qwen3-rerank`）。 |
 | `OPENAI_API_KEY` | _(空)_ | 全局备用 Key（当各组件 `*_API_KEY` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_KEY`，则该项 **必填**。 |
 | `OPENAI_BASE_URL` | _(空)_ | 全局备用 Base URL（当各组件 `*_API_BASE_URL` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_BASE_URL`，则该项 **必填**。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |

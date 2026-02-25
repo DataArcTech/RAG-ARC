@@ -41,7 +41,6 @@ DEFAULT_RUN_TOOL_MEMO_INCLUDE_PREFIXES = (
     "locate",
     "toc.tree",
     "tree.",
-    "section.select",
     "read.pages",
     "graph.ops",
 )

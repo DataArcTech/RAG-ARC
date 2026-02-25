@@ -159,7 +159,7 @@ class DeepSearchServiceRunMixin:
     ) -> List[EvidenceChunk]:
         """Run a minimal navigation backbone and expose it as diagnostic evidence.
 
-        Why: models often skip `toc.tree` / `section.select` / `read.pages` unless they are visible and
+        Why: models often skip `toc.tree` / `read.pages` unless they are visible and
         immediately available. This stage makes long-doc navigation the default path while staying
         observable and configurable.
         """
@@ -223,9 +223,9 @@ class DeepSearchServiceRunMixin:
             if not file_id:
                 continue
 
-            # 2) Within-file navigation: toc.tree + section.select.
+            # 2) Within-file navigation: toc.tree + locate(file=X).
             #
-            # Note: toc.tree / read.pages are implemented as explore sub-tools and
+            # Note: toc.tree / locate are implemented as explore sub-tools and
             # are not registered as top-level tools in the tool manager. Invoke via explore to
             # keep bootstrap compatible with local-only (no MCP) deployments.
             try:
@@ -247,9 +247,9 @@ class DeepSearchServiceRunMixin:
                                 },
                             },
                             {
-                                "id": "sec",
-                                "tool": "section.select",
-                                "args": {"file_id": file_id, "top_k": max(1, int(cfg["section_top_k"]))},
+                                "id": "page_locate",
+                                "tool": "locate",
+                                "args": {"file": file_id, "top_k": max(1, int(cfg["section_top_k"]))},
                             },
                         ],
                     },
@@ -263,15 +263,15 @@ class DeepSearchServiceRunMixin:
             explore_diag = getattr(explore, "diagnostics", None)
             actions = explore_diag.get("actions") if isinstance(explore_diag, dict) else None
             toc_action = None
-            sec_action = None
+            page_locate_action = None
             if isinstance(actions, list):
                 for item in actions:
                     if not isinstance(item, dict):
                         continue
                     if item.get("id") == "toc" or item.get("tool") == "toc.tree":
                         toc_action = item
-                    if item.get("id") == "sec" or item.get("tool") == "section.select":
-                        sec_action = item
+                    if item.get("id") == "page_locate" or item.get("tool") == "locate":
+                        page_locate_action = item
 
             if isinstance(toc_action, dict) and toc_action.get("status") == "ok":
                 toc_summaries[file_id] = str(toc_action.get("summary") or "")
@@ -280,13 +280,13 @@ class DeepSearchServiceRunMixin:
             else:
                 toc_summaries[file_id] = "(toc.tree missing)"
 
-            if isinstance(sec_action, dict) and sec_action.get("status") == "ok":
-                sec_diag = sec_action.get("diagnostics")
-                section_results[file_id] = sec_diag if isinstance(sec_diag, dict) else {}
-            elif isinstance(sec_action, dict):
-                section_results[file_id] = {"error": str(sec_action.get("error") or sec_action.get("summary") or "").strip()}
+            if isinstance(page_locate_action, dict) and page_locate_action.get("status") == "ok":
+                loc_diag = page_locate_action.get("diagnostics")
+                section_results[file_id] = loc_diag if isinstance(loc_diag, dict) else {}
+            elif isinstance(page_locate_action, dict):
+                section_results[file_id] = {"error": str(page_locate_action.get("error") or page_locate_action.get("summary") or "").strip()}
             else:
-                section_results[file_id] = {"error": "section.select missing"}
+                section_results[file_id] = {"error": "locate(file) missing"}
 
         # Produce a single diagnostic evidence chunk that the think tool can reference.
         lines: List[str] = []
@@ -312,7 +312,7 @@ class DeepSearchServiceRunMixin:
             else:
                 lines.append("(empty)")
             lines.append("")
-            lines.append(f"[file_id={file_id}] section.select:")
+            lines.append(f"[file_id={file_id}] locate(file) page candidates:")
             sec_diag = section_results.get(file_id)
             cand_rows = sec_diag.get("candidates") if isinstance(sec_diag, dict) else None
             if isinstance(cand_rows, list) and cand_rows:
@@ -781,7 +781,7 @@ class DeepSearchServiceRunMixin:
             #
             # Important: do NOT surface this gate as a user-visible "error report" by default.
             # Instead, feed the failure back into the next reasoning attempt so the LLM can
-            # retry tool calls (e.g., routing -> section.select -> read.pages).
+            # retry tool calls (e.g., locate -> toc.tree -> read.pages).
             # ------------------------------------------------------------------
             gate_cfg = {}
             try:
@@ -897,7 +897,7 @@ class DeepSearchServiceRunMixin:
                             coverage_delta=None,
                             next_actions=[
                                 "Use explore + locate to pick a real file_id (UUID) if not already known.",
-                                "Use toc.tree / tree.root / section.select to locate likely sections and page ranges.",
+                                "Use toc.tree / locate(file=X) to find likely page ranges.",
                                 "Call read.pages on those pages (full-page evidence), then continue reasoning.",
                             ],
                             metadata={

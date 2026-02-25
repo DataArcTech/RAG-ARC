@@ -443,7 +443,7 @@ class DeepSearchToolManager:
             request = self._build_request(payload)
             summary = (
                 "web.search is disabled in benchmark/experiment mode (bench_mode=1). "
-                "Use file-grounded DeepSearch tools (locate → toc/tree/section.select → read.pages) instead."
+                "Use file-grounded DeepSearch tools (locate → toc.tree → read.pages) instead."
             )
             result = ToolResultPayload(
                 tool_name=str(tool_name or "web.search"),

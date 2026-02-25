@@ -289,7 +289,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                                     "suggested_next_steps": [
                                         "Finalization requires citeable page evidence: call read.pages at least once.",
                                         "Use explore + locate to obtain a real file_id (UUID) if not already known.",
-                                        "Use toc.tree / tree.root / tree.open / section.select to locate likely pages, then read.pages.",
+                                        "Use toc.tree / tree.root / tree.open / locate(file=X) to locate likely pages, then read.pages.",
                                     ],
                                 }
                             ]
@@ -332,7 +332,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                                 "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
                                 "suggested_next_steps": [
                                     "Use explore + locate to obtain a real file_id (UUID).",
-                                    "Use toc.tree / tree.root / tree.open / section.select to locate likely pages.",
+                                    "Use toc.tree / tree.root / tree.open / locate(file=X) to locate likely pages.",
                                     "Call read.pages on those pages (at least once) before stopping.",
                                 ],
                             }

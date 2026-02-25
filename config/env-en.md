@@ -123,6 +123,9 @@ How secrets flow into configs:
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
 | `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
+| `RERANK_API_KEY` | _(empty)_ | DashScope API key for API-based reranking (used by DeepSearch `locate` tool). |
+| `RERANK_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1` | Base URL for the DashScope-compatible rerank endpoint. |
+| `RERANK_MODEL_NAME` | `qwen3-rerank` | Model name for API reranking (e.g. `qwen3-rerank`). |
 | `OPENAI_API_KEY` | _(empty)_ | Shared fallback key (used when component-specific keys are empty). **Required** when any OpenAI-compatible module runs with its `*_API_KEY` unset. |
 | `OPENAI_BASE_URL` | _(empty)_ | Shared fallback base URL (used when component-specific base URLs are empty). **Required** when any OpenAI-compatible module runs with its `*_API_BASE_URL` unset. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |

@@ -47,6 +47,7 @@
             },
             {
                 "type": "pruned_hipporag_neo4j_retrieval",
+                "preset": "balanced",
                 "graph_config": {
                     "type": "pruned_hipporag_neo4j",
                     "url": "${NEO4J_URL}",

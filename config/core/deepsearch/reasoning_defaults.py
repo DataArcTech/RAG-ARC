@@ -12,7 +12,7 @@ TRACE_REFLECTION_DEFAULT_TEMPERATURE = 0.2
 # Think tool catalogs are truncated for prompt budgeting; always include a small set of
 # high-value tools even when the catalog is long.
 #
-# Rationale: in long-document DeepSearch, `locate` + `toc.tree` + `section.select` + `read.pages`
+# Rationale: in long-document DeepSearch, `locate` + `toc.tree` + `read.pages`
 # are the default navigation backbone. If these hints are truncated away, models tend to fall back
 # to snippet-only guessing.
 THINK_TOOL_CATALOG_ALWAYS_INCLUDE: tuple[str, ...] = (

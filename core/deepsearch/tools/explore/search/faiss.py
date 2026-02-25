@@ -42,12 +42,16 @@ class _FaissChannel:
 
         override = request.extra.get("faiss_top_k")
         effective_top_k = self._resolve_top_k(override, top_k)
+        # Prefetch more chunks so that multiple files enter the candidate pool.
+        # The downstream sum(score)/sqrt(n+1) aggregation handles file-level
+        # scoring; we just need enough raw chunks for it to see diverse files.
+        prefetch_k = max(effective_top_k * 4, 100)
 
         async def _call_one(owner_id: str, query_text: str) -> List[Chunk]:
             return await get_thread_pool().run_blocking(
                 retrievers.dense.invoke,
                 query_text,
-                k=effective_top_k,
+                k=prefetch_k,
                 owner_id=owner_id,
                 with_score=True,
             )
@@ -101,7 +105,7 @@ class _FaissChannel:
 
         evidences: List[EvidenceChunk] = []
         results: List[Dict[str, Any]] = []
-        for idx, chunk in enumerate(chunks[:effective_top_k]):
+        for idx, chunk in enumerate(chunks):
             content = self._chunk_content(chunk)
             meta = self._chunk_meta(chunk)
             snippet = self._summary_window(content)
@@ -138,6 +142,7 @@ class _FaissChannel:
             "query": query,
             "query_variants": query_variants,
             "top_k": effective_top_k,
+            "prefetch_k": prefetch_k,
             "retrieved": len(chunks),
             "file_scope_dropped": dropped,
             "section_scope": sorted(section_scope),

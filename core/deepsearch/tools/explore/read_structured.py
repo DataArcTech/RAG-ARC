@@ -1,7 +1,7 @@
 """Structured reading tools for long documents.
 
 DeepSearch contract:
-- Routing/navigation outputs (locate/toc/tree/section.select) are navigation-only and MUST NOT be cited.
+- Routing/navigation outputs (locate/toc/tree) are navigation-only and MUST NOT be cited.
 - `read.pages` is the primary evidence path and MUST return *full-page* content.
 
 Implementation note:
