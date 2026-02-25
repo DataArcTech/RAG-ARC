@@ -242,8 +242,10 @@ FILE_SEARCH_DEFAULT_TOP_K = 5
 FILE_SEARCH_CHANNEL_TOP_K = 25
 # Rank fusion (RRF) constant used to aggregate chunk ranks into a per-file score.
 FILE_SEARCH_RRF_K = 60
-# LLM rerank defaults (intent alignment)
+# LLM rerank defaults (intent alignment) -- kept for backward-compat / normal RAG
 FILE_SEARCH_ENABLE_LLM_RERANK_DEFAULT = True
+# API rerank defaults (DashScope qwen3-rerank; used by DeepSearch locate)
+FILE_SEARCH_ENABLE_API_RERANK_DEFAULT = True
 FILE_SEARCH_RERANK_TOP_K = 10
 FILE_SEARCH_RERANK_TEMPERATURE = 0.1
 # Rerank skip rule: when the top candidate score is confidently above the runner-up,
@@ -275,54 +277,23 @@ FILE_SEARCH_MAX_SNIPPETS_PER_FILE = 3
 # Hard cap for each snippet shown in the summary (diagnostics keep the full snippet returned by channel tool).
 FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS = 260
 
-# -----------------------------
-# section.select defaults (LLM-assisted section selection)
-# -----------------------------
-SECTION_SELECT_CANDIDATE_TOP_K = 8
-SECTION_SELECT_MAX_SECTIONS = 120
-SECTION_SELECT_ENTITY_HINTS_MAX = 6
-SECTION_SELECT_SUBTREE_PREVIEW_MAX = 24
-SECTION_SELECT_TEMPERATURE = 0.1
-SECTION_SELECT_DEFAULT_MAX_DEPTH = 2
-SECTION_SELECT_SEED_MAX = 24
+# Structure channel (page-level locate): tree propagation weight.
+# After RRF fusion, boost non-hit pages in sections that contain hit pages.
+# PropRAG uses PPR damping 0.45-0.75; HippoRAG uses 0.5.  Our propagation is
+# simpler (linear boost, not PPR), so we use a lower value.
+STRUCTURE_TREE_PROPAGATION_WEIGHT = 0.35
 
 # -----------------------------
-# section.select graph-signal defaults
+# page-level locate defaults
 # -----------------------------
-# `section.select` uses graph as a *signal* to rank candidate sections (navigation-only).
-# Prefer deterministic matches (canonical/alias tables) and keep this configurable.
-SECTION_SELECT_GRAPH_ENTITY_MATCH_ENABLE_CONTAINS = True
-SECTION_SELECT_GRAPH_ENTITY_MATCH_PER_TERM_ENTITY_LIMIT = 8
-SECTION_SELECT_GRAPH_ENTITY_MATCH_MAX_TERMS = 6
-
-# Light bridge (online / deterministic): use entity canonicalization + embedding-nearest neighbors
-# to expand query terms into candidate entities, then project them back to file-scoped sections.
-# Output is navigation-only (never citeable evidence).
-SECTION_SELECT_GRAPH_BRIDGE_ENABLED = True
-SECTION_SELECT_GRAPH_BRIDGE_MAX_TERMS = 4
-SECTION_SELECT_GRAPH_BRIDGE_CANDIDATES_PER_TERM = 6
-SECTION_SELECT_GRAPH_BRIDGE_MAX_ENTITY_IDS = 32
-
-# When query entities fail to match (aliases/casing/language drift), optionally fall back to adapter retrieval
-# (embedding/PPR-informed) to collect additional chunk signals scoped to the current file.
-SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_ENABLED = True
-SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_TOP_K_CHUNKS = 12
-# Hybrid tree search loop controls
-SECTION_SELECT_MAX_ROUNDS = 4
-SECTION_SELECT_CONSUMER_BATCH_SIZE = 6
-SECTION_SELECT_TREE_SEARCH_MAX_TOKENS = 600
-SECTION_SELECT_CONSUMER_MAX_TOKENS = 700
-
-# Cross-document bridging (suggested actions only; not auto-executed).
-# When enabled, section.select may suggest a global graph search to discover related files
-# via seed_entities; this keeps GFPE: graph for routing, read.pages for evidence.
-SECTION_SELECT_CROSS_DOC_BRIDGE_SUGGEST_ENABLED = True
-SECTION_SELECT_CROSS_DOC_BRIDGE_TOP_K = 10
-# Value-based tree search (PageIndex hybrid tree search)
-# - Use chunk-level retrieval to score sections by NodeScore = sum(scores) / sqrt(N+1)
-# - Channels default to dense+bm25 for speed; can be tuned here.
-SECTION_SELECT_VALUE_TOP_K = 25
-SECTION_SELECT_VALUE_CHANNELS = ("faiss", "bm25")
+# When `locate(file=X)` is called, these override the file-level defaults.
+# Research consensus (ColPali, HippoRAG, RankRAG): page-level top_k = 5-10.
+PAGE_LOCATE_DEFAULT_TOP_K = 10
+# Broader chunk pool per channel within a single file for better page coverage.
+# Research (SBERT, ZeroEntropy): 50-100 candidates for rerank pipeline.
+PAGE_LOCATE_CHANNEL_TOP_K = 50
+# Reranker sees more page candidates than file-level (file-level is OFF).
+PAGE_LOCATE_RERANK_TOP_K = 20
 
 # -----------------------------
 # section tree/node-type hints
@@ -397,7 +368,7 @@ EXPLORE_READ_MAX_CHARS = 6000
 # navigation bootstrap defaults (service-side; long-doc navigation)
 # -----------------------------
 # Deterministic preflight steps executed before graph reasoning:
-# locate -> toc.tree/section.select (Top-N candidate files)
+# locate -> toc.tree (Top-N candidate files)
 # Default off: let the LLM decide whether to route files/sections (prevents unnecessary retrieval
 # for questions that do not require consulting the user's corpus).
 NAV_BOOTSTRAP_ENABLED = False
