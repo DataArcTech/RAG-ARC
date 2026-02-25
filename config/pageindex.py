@@ -220,14 +220,6 @@ def doc_routing_bm25_index_path(default: str = "io://doc_routing_bm25_index") ->
     return default
 
 
-def section_level_conflict_ratio(default: float = 0.4) -> float:
-    return _env_float("SECTION_LEVEL_CONFLICT_RATIO", default, minimum=0.0, maximum=1.0)
-
-
-def section_level_force_flat_if_uniform() -> bool:
-    return _env_bool("SECTION_LEVEL_FORCE_FLAT_IF_UNIFORM", True)
-
-
 def section_level_max(default: int = 6) -> int:
     return _env_int("SECTION_LEVEL_MAX", default, minimum=1)
 
@@ -322,8 +314,6 @@ __all__ = [
     "section_faiss_two_stage_enabled",
     "section_faiss_two_stage_prefetch_k",
     "section_bm25_index_path",
-    "section_level_conflict_ratio",
-    "section_level_force_flat_if_uniform",
     "section_level_max",
     "section_numbering_enabled",
     "section_numbering_max_level",

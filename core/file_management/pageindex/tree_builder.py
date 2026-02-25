@@ -122,48 +122,33 @@ def _resolve_level(
     )
 
 
-def _apply_level_conflicts(
+def _normalize_levels(
     signals: List[HeadingSignal],
-    *,
-    conflict_ratio: float,
-    force_flat_if_uniform: bool,
 ) -> tuple[List[HeadingSignal], float, bool]:
+    """Min-level normalization: offset so min heading becomes L1."""
     if not signals:
         return signals, 0.0, False
-    conflict_count = 0
-    for signal in signals:
-        candidates = {
-            level
-            for level in (
-                signal.numbering_level,
-                signal.text_level,
-                signal.markdown_level,
-            )
-            if isinstance(level, int) and level > 0
-        }
-        if len(candidates) > 1:
-            conflict_count += 1
+    # Conflict ratio — diagnostic only, never flattens
+    conflict_count = sum(
+        1 for s in signals
+        if len({l for l in (s.numbering_level, s.text_level, s.markdown_level)
+                if isinstance(l, int) and l > 0}) > 1
+    )
     ratio = conflict_count / max(len(signals), 1)
-    uniform_flattened = False
-    if ratio >= conflict_ratio:
-        for signal in signals:
-            signal.resolved_level = 1
-            signal.level_source = "conflict_flatten"
-        return signals, ratio, True
-
-    levels = {signal.resolved_level for signal in signals}
-    if force_flat_if_uniform and len(levels) == 1 and 1 not in levels:
-        for signal in signals:
-            signal.resolved_level = 1
-            signal.level_source = "uniform_flatten"
-        uniform_flattened = True
-    return signals, ratio, uniform_flattened
+    # Min-level normalization
+    min_level = min(s.resolved_level for s in signals)
+    offset = min_level - 1
+    if offset > 0:
+        for s in signals:
+            s.resolved_level = s.resolved_level - offset
+    return signals, ratio, False
 
 
 def _assign_page_ranges(
     signals: List[HeadingSignal],
     *,
     max_page_idx: Optional[int],
+    max_span: int,
 ) -> Dict[int, tuple[Optional[int], Optional[int]]]:
     if not signals:
         return {}
@@ -183,6 +168,9 @@ def _assign_page_ranges(
                 end = max_page_idx
             else:
                 end = start
+            # Clamp to max_span
+            if end - start > max_span:
+                end = start + max_span
         ranges[idx] = (start, end)
     return ranges
 
@@ -291,11 +279,7 @@ def build_section_tree(
         )
         signals.append(signal)
 
-    signals, conflict_ratio, uniform_flattened = _apply_level_conflicts(
-        signals,
-        conflict_ratio=pageindex_cfg.section_level_conflict_ratio(),
-        force_flat_if_uniform=pageindex_cfg.section_level_force_flat_if_uniform(),
-    )
+    signals, conflict_ratio, uniform_flattened = _normalize_levels(signals)
 
     nodes: List[SectionNode] = []
     offsets: List[int] = []
@@ -329,12 +313,39 @@ def build_section_tree(
             uniform_level_flattened=uniform_flattened,
         )
 
-    ranges = _assign_page_ranges(signals, max_page_idx=max_page_idx)
+    max_span = pageindex_cfg.max_page_num_each_node()
+    ranges = _assign_page_ranges(signals, max_page_idx=max_page_idx, max_span=max_span)
 
     stack: List[SectionNode] = []
     section_counter = 0
     path_delimiter = pageindex_cfg.section_path_delimiter()
+
+    # Front-matter node: content before first heading
+    if signals[0].char_start > 0:
+        section_counter += 1
+        first_page = ranges.get(0, (None, None))[0]
+        fm_end = max(first_page - 1, 0) if isinstance(first_page, int) else None
+        fm_node = SectionNode(
+            section_id=f"{file_id}:sec:{section_counter}",
+            file_id=file_id,
+            title="Front Matter",
+            path="Front Matter",
+            level=1,
+            parent_id=None,
+            page_start=0 if max_page_idx is not None else None,
+            page_end=fm_end,
+            heading_start=0,
+            heading_end=signals[0].char_start,
+            level_source="front_matter",
+        )
+        nodes.append(fm_node)
+        offsets.append(0)
+        ids.append(fm_node.section_id)
+
     for idx, signal in enumerate(signals):
+        # Level-jump capping: prevent jumps > 1 level deeper than parent
+        if stack and signal.resolved_level > stack[-1].level + 1:
+            signal.resolved_level = stack[-1].level + 1
         while stack and signal.resolved_level <= stack[-1].level:
             stack.pop()
         parent = stack[-1] if stack else None
@@ -366,14 +377,16 @@ def build_section_tree(
         end = node.page_end
         for child_id in node.children:
             child = node_map[child_id]
-            child_range = _inherit_range(child, node_map)
-            child_start, child_end = child_range
+            child_start, child_end = _inherit_range(child, node_map)
             if child_start is not None:
                 if start is None or child_start < start:
                     start = child_start
             if child_end is not None:
                 if end is None or child_end > end:
                     end = child_end
+        # Clamp parent span
+        if start is not None and end is not None and end - start > max_span:
+            end = start + max_span
         node.page_start = start
         node.page_end = end
         return start, end
