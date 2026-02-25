@@ -3,9 +3,9 @@ import sys
 import uuid
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
@@ -57,16 +57,18 @@ def app(monkeypatch):
 
 
 @pytest.fixture
-def client(app):
-    return TestClient(app)
+async def client(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
-def _register_and_login(client: TestClient):
+async def _register_and_login(client: httpx.AsyncClient):
     username = f"u_{uuid.uuid4().hex[:8]}"
     password = "pw"
-    resp = client.post("/auth/register", json={"name": "n", "user_name": username, "password": password})
+    resp = await client.post("/auth/register", json={"name": "n", "user_name": username, "password": password})
     assert resp.status_code == 200
-    token_resp = client.post(
+    token_resp = await client.post(
         "/auth/token",
         data={"username": username, "password": password},
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -76,27 +78,27 @@ def _register_and_login(client: TestClient):
     return username, token
 
 
-def test_user_me_requires_auth(client):
-    resp = client.get("/user/me")
+async def test_user_me_requires_auth(client):
+    resp = await client.get("/user/me")
     assert resp.status_code == 401
 
 
-def test_auth_token_allows_user_me(client):
-    _, token = _register_and_login(client)
-    resp = client.get("/user/me", headers={"Authorization": f"Bearer {token}"})
+async def test_auth_token_allows_user_me(client):
+    _, token = await _register_and_login(client)
+    resp = await client.get("/user/me", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["user_name"].startswith("u_")
 
 
-def test_session_create_requires_auth(client):
-    resp = client.post("/session")
+async def test_session_create_requires_auth(client):
+    resp = await client.post("/session")
     assert resp.status_code in {401, 422}
 
 
-def test_knowledge_upload_requires_auth(client, tmp_path):
+async def test_knowledge_upload_requires_auth(client, tmp_path):
     file_path = tmp_path / "a.txt"
     file_path.write_text("hello", encoding="utf-8")
     with file_path.open("rb") as f:
-        resp = client.post("/knowledge", files={"file": ("a.txt", f, "text/plain")})
+        resp = await client.post("/knowledge", files={"file": ("a.txt", f, "text/plain")})
     assert resp.status_code == 401

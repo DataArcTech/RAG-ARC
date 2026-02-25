@@ -418,12 +418,12 @@ DeepSearch is optimized for long documents (manuals, standards, policies, contra
 the think→explore loop will first narrow down the right file, then the right section, then read the full block before answering.
 
 Key navigation tools (internal to DeepSearch explore):
-- `search.file`: doc-level routing (evidence-driven relevant-file aggregation)
+- `locate`: doc-level routing (evidence-driven relevant-file aggregation)
 - `toc.tree` / `section.select`: section-level routing and selection (ToC + hybrid tree search)
 - `read.pages`: read full context around the target pages
 
-If PageIndex is disabled or section/page metadata is missing, DeepSearch falls back to `search.*` and explicitly reports
-the limitation in diagnostics.
+If PageIndex is disabled or section/page metadata is missing, DeepSearch still uses `locate` + tree navigation and explicitly
+reports limitations in diagnostics.
 
 ```bash
 # Get Token (Login)

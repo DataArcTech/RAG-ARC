@@ -434,11 +434,11 @@ DeepSearch 对长文档（手册/标准/政策/合同等）做了优化。当 Pa
 think→explore 会先选文件，再选章节，再读完整段落后回答。
 
 关键导航工具（DeepSearch explore 内部使用）：
-- `search.file`：文档级路由（基于检索证据聚合的相关文件定位）
+- `locate`：文档级路由（基于检索证据聚合的相关文件定位）
 - `toc.tree` / `section.select`：章节级路由与选择（目录 + 混合树搜索）
 - `read.pages`：读取目标页的完整上下文
 
-若 PageIndex 关闭或缺少章节/页元数据，DeepSearch 会回退到 `search.*`，并在诊断信息中明确提示能力受限。
+若 PageIndex 关闭或缺少章节/页元数据，DeepSearch 仍会使用 `locate` + 树导航，并在诊断信息中明确提示能力受限。
 
 ```bash
 # 获取Token（登录）

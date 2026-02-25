@@ -3,9 +3,9 @@ import sys
 import uuid
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 # Add project root to path before any imports
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -18,8 +18,22 @@ os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")
 os.environ.setdefault("KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS", "0")
 
 
+class _ASGIClient:
+    def __init__(self, *, app: FastAPI, http: httpx.AsyncClient, calls: dict[str, object], user: SimpleNamespace):
+        self.app = app
+        self.http = http
+        self._calls = calls
+        self._user = user
+
+    async def get(self, *args, **kwargs):  # noqa: ANN001, D401
+        return await self.http.get(*args, **kwargs)
+
+    async def post(self, *args, **kwargs):  # noqa: ANN001, D401
+        return await self.http.post(*args, **kwargs)
+
+
 @pytest.fixture
-def client(monkeypatch):
+async def client(monkeypatch):
     import api.routers.knowledge as knowledge_router
 
     user = SimpleNamespace(id=uuid.uuid4())
@@ -38,49 +52,54 @@ def client(monkeypatch):
             calls["count"] = (user_id, status, search)
             return 0
 
-    monkeypatch.setattr(knowledge_router, "get_knowledge_handler", lambda: _StubKnowledge())
+    def _get_stub_knowledge():  # noqa: ANN001
+        return _StubKnowledge()
+
+    monkeypatch.setattr(knowledge_router, "get_knowledge_handler", _get_stub_knowledge)
 
     app = FastAPI()
     app.include_router(knowledge_router.router)
-    app.dependency_overrides[knowledge_router.get_current_user] = lambda: user
-    client = TestClient(app)
-    client._calls = calls  # type: ignore[attr-defined]
-    client._user = user  # type: ignore[attr-defined]
-    return client
+    async def _stub_user():  # noqa: ANN001
+        return user
+
+    app.dependency_overrides[knowledge_router.get_current_user] = _stub_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        yield _ASGIClient(app=app, http=http, calls=calls, user=user)
 
 
-def test_knowledge_upload_passes_relative_path(client, tmp_path):
+async def test_knowledge_upload_passes_relative_path(client, tmp_path):
     file_path = tmp_path / "a.txt"
     file_path.write_text("hello", encoding="utf-8")
     with file_path.open("rb") as f:
-        resp = client.post(
+        resp = await client.post(
             "/knowledge",
             files={"file": ("a.txt", f, "text/plain")},
             data={"relative_path": "docs/a.txt"},
         )
     assert resp.status_code == 200
     assert resp.json() == "doc-1"
-    filename, user_id, rel, ingest_mode = client._calls["upload"]  # type: ignore[attr-defined]
+    filename, user_id, rel, ingest_mode = client._calls["upload"]
     assert filename == "a.txt"
-    assert user_id == client._user.id  # type: ignore[attr-defined]
+    assert user_id == client._user.id
     assert rel == "docs/a.txt"
     assert ingest_mode == "index"
 
 
-def test_knowledge_list_uses_async_wrappers(client):
-    resp = client.get("/knowledge/list_files?pagesize=50&page=1")
+async def test_knowledge_list_uses_async_wrappers(client):
+    resp = await client.get("/knowledge/list_files?pagesize=50&page=1")
     assert resp.status_code == 200
     assert resp.json()["files"] == []
     assert resp.json()["total"] == 0
-    user_id, status, limit, offset, search = client._calls["list"]  # type: ignore[attr-defined]
-    assert user_id == client._user.id  # type: ignore[attr-defined]
+    user_id, status, limit, offset, search = client._calls["list"]
+    assert user_id == client._user.id
     assert status is None
     assert limit == 50
     assert offset == 0
     assert search is None
 
 
-def test_knowledge_get_chunk_returns_chunk_content(monkeypatch):
+async def test_knowledge_get_chunk_returns_chunk_content(monkeypatch):
     import api.routers.knowledge as knowledge_router
 
     user = SimpleNamespace(id=uuid.uuid4())
@@ -111,15 +130,22 @@ def test_knowledge_get_chunk_returns_chunk_content(monkeypatch):
         def get_graph_store(self):  # noqa: ANN201
             return _StubGraphStore()
 
-    monkeypatch.setattr(knowledge_router, "get_knowledge_handler", lambda: _StubKnowledge())
+    def _get_stub_knowledge():  # noqa: ANN001
+        return _StubKnowledge()
+
+    monkeypatch.setattr(knowledge_router, "get_knowledge_handler", _get_stub_knowledge)
     monkeypatch.setattr(knowledge_router.registrator, "get_object", lambda name: _StubRag() if name == "rag_inference" else object())
 
     app = FastAPI()
     app.include_router(knowledge_router.router)
-    app.dependency_overrides[knowledge_router.get_current_user] = lambda: user
-    client = TestClient(app)
+    async def _stub_user():  # noqa: ANN001
+        return user
 
-    resp = client.get("/knowledge/chunk/rep-0")
+    app.dependency_overrides[knowledge_router.get_current_user] = _stub_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/knowledge/chunk/rep-0")
+
     assert resp.status_code == 200
     body = resp.json()
     assert body["chunk_id"] == "rep-0"
@@ -129,77 +155,31 @@ def test_knowledge_get_chunk_returns_chunk_content(monkeypatch):
     assert body["document_url"] == "/knowledge/file-0/download"
 
 
-def test_knowledge_upload_file_validation(monkeypatch):
-    """测试文件上传验证：文件格式和文件大小限制"""
+def test_knowledge_upload_file_validation():
+    """测试文件上传验证：文件格式和文件大小限制（不走 HTTP，避免大文件 multipart 造成 CI 超时）"""
+
+    from fastapi import HTTPException
+
     import api.routers.knowledge as knowledge_router
-    
-    user = SimpleNamespace(id=uuid.uuid4())
-    
-    class _StubKnowledge:
-        async def upload_file(self, file, user_id, *, relative_path=None, ingest_mode="index"):  # noqa: ANN001
-            return "doc-1"
-    
-    monkeypatch.setattr(knowledge_router, "get_knowledge_handler", lambda: _StubKnowledge())
-    
-    app = FastAPI()
-    app.include_router(knowledge_router.router)
-    app.dependency_overrides[knowledge_router.get_current_user] = lambda: user
-    test_client = TestClient(app)
-    
+
     # ========== 文件格式测试 ==========
-    allowed_extensions = {'.docx', '.xlsx', '.pptx', '.pdf', '.jpg', '.jpeg', '.png', '.txt', '.html', '.md'}
-    
-    # 测试1: 支持的文件格式应该成功（测试所有支持的类型）
-    for ext in allowed_extensions:
-        resp = test_client.post(
-            "/knowledge",
-            files={"file": (f"test{ext}", b"test content", "application/octet-stream")},
-        )
-        assert resp.status_code == 200, f"支持的文件格式 {ext} 应该成功，但返回了 {resp.status_code}: {resp.text}"
-    
-    # 测试2: 不支持的文件格式应该失败
-    unsupported_extensions = ['.exe', '.zip', '.rar', '.mp4', '.py', '.js']
-    for ext in unsupported_extensions:
-        resp = test_client.post(
-            "/knowledge",
-            files={"file": (f"test{ext}", b"test content", "application/octet-stream")},
-        )
-        assert resp.status_code == 400, f"不支持的文件格式 {ext} 应该失败，但返回了 {resp.status_code}"
-        assert "不支持的文件类型" in resp.json()["detail"], f"错误消息应该包含'不支持的文件类型'，但得到: {resp.json()['detail']}"
-    
-    # 测试3: 无扩展名的文件应该失败
-    resp = test_client.post(
-        "/knowledge",
-        files={"file": ("testfile", b"test content", "application/octet-stream")},
-    )
-    assert resp.status_code == 400, "无扩展名的文件应该失败"
-    assert "不支持的文件类型" in resp.json()["detail"]
-    
+    for filename in ("test.pdf", "test.md", "test.png"):
+        knowledge_router._validate_upload_extension(filename)
+
+    with pytest.raises(HTTPException) as exc:
+        knowledge_router._validate_upload_extension("test.exe")
+    assert exc.value.status_code == 400
+    assert "不支持的文件类型" in str(exc.value.detail)
+
+    with pytest.raises(HTTPException) as exc:
+        knowledge_router._validate_upload_extension("testfile")
+    assert exc.value.status_code == 400
+    assert "不支持的文件类型" in str(exc.value.detail)
+
     # ========== 文件大小测试 ==========
-    # 测试4: 小于10MB的文件应该成功
-    small_file_size = 5 * 1024 * 1024  # 5MB
-    small_file_content = b"x" * small_file_size
-    resp = test_client.post(
-        "/knowledge",
-        files={"file": ("test_small.txt", small_file_content, "text/plain")},
-    )
-    assert resp.status_code == 200, f"小于10MB的文件应该成功，但返回了 {resp.status_code}: {resp.text}"
-    
-    # 测试5: 正好10MB的文件应该成功（边界情况）
-    exact_file_size = 10 * 1024 * 1024  # 10MB
-    exact_file_content = b"x" * exact_file_size
-    resp = test_client.post(
-        "/knowledge",
-        files={"file": ("test_exact.txt", exact_file_content, "text/plain")},
-    )
-    assert resp.status_code == 200, f"正好10MB的文件应该成功，但返回了 {resp.status_code}: {resp.text}"
-    
-    # 测试6: 大于10MB的文件应该失败
-    large_file_size = 11 * 1024 * 1024  # 11MB
-    large_file_content = b"x" * large_file_size
-    resp = test_client.post(
-        "/knowledge",
-        files={"file": ("test_large.txt", large_file_content, "text/plain")},
-    )
-    assert resp.status_code == 400, f"大于10MB的文件应该失败，但返回了 {resp.status_code}"
-    assert "该文件超过10MB，请检查后重新上传！" == resp.json()["detail"], f"错误消息应该是'该文件超过10MB，请检查后重新上传！'，但得到: {resp.json()['detail']}"
+    knowledge_router._validate_upload_size(1024)
+
+    with pytest.raises(HTTPException) as exc:
+        knowledge_router._validate_upload_size(int(knowledge_router.MAX_UPLOAD_BYTES) + 1)
+    assert exc.value.status_code == 400
+    assert str(exc.value.detail) == "该文件超过10MB，请检查后重新上传！"

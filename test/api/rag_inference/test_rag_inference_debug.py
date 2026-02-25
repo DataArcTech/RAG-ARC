@@ -3,9 +3,9 @@ import sys
 import uuid
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from encapsulation.data_model.schema import Chunk
 
@@ -31,11 +31,13 @@ def app():
 
 
 @pytest.fixture
-def client(app):
-    return TestClient(app)
+async def client(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
-def test_rag_debug_endpoint_collects_debug(monkeypatch, client):
+async def test_rag_debug_endpoint_collects_debug(monkeypatch, client):
     import api.routers.rag_inference_handlers as handlers
 
     class FakeRAG:
@@ -78,7 +80,7 @@ def test_rag_debug_endpoint_collects_debug(monkeypatch, client):
     monkeypatch.setattr(handlers, "_rag_inference_handler", fake_rag)
 
     owner_id = uuid.uuid4()
-    resp = client.post(
+    resp = await client.post(
         "/rag_inference/debug",
         json={
             "query": "hello",

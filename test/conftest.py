@@ -7,6 +7,21 @@ import pytest
 from framework.runtime_warnings import configure_runtime_warnings
 
 
+def pytest_addoption(parser) -> None:  # noqa: ANN001
+    """Provide a lightweight `--timeout` flag for hermetic CI runs.
+
+    The upstream `pytest-timeout` plugin is not a hard dependency for this repo, but
+    some verification commands use `--timeout` to guard against hangs.
+    """
+
+    parser.addoption(
+        "--timeout",
+        action="store",
+        default=None,
+        help="Per-test timeout in seconds (best-effort; implemented via SIGALRM on Unix).",
+    )
+
+
 def pytest_configure() -> None:
     """
     Keep unit tests hermetic.
@@ -33,6 +48,12 @@ def pytest_configure() -> None:
     os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")
     # Avoid filesystem/object-store probes in unit tests unless explicitly enabled.
     os.environ.setdefault("KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS", "0")
+    # PageIndex section summaries use an LLM and must never run in hermetic unit tests.
+    # Disable them even if the host environment has API keys configured.
+    os.environ["SECTION_SUMMARY_ENABLED"] = "0"
+    # Ensure unit tests do not accidentally use host-provided API keys.
+    os.environ.pop("OPENAI_API_KEY", None)
+    os.environ.pop("CHAT_API_KEY", None)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -63,6 +84,36 @@ def _register_io_manager_for_tests(tmp_path_factory) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     config_path = repo_root / "config" / "json_configs" / "io_manager.json"
     registrator.register(config_path=str(config_path), app_name="io_manager", config_type=IOManagerConfig)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):  # noqa: ANN001,ARG001
+    timeout_raw = item.config.getoption("timeout")
+    try:
+        timeout_s = int(timeout_raw) if timeout_raw is not None else 0
+    except Exception:
+        timeout_s = 0
+
+    if timeout_s <= 0:
+        yield
+        return
+
+    import signal
+
+    class _TestTimeout(Exception):
+        pass
+
+    def _handler(signum, frame):  # noqa: ARG001
+        raise _TestTimeout(f"Test exceeded timeout={timeout_s}s")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, float(timeout_s))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def pytest_runtest_setup(item) -> None:  # noqa: ANN001

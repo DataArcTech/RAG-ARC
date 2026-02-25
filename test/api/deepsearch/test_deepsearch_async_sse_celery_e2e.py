@@ -20,6 +20,11 @@ from core.deepsearch.state import DeepSearchState
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires networking + celery worker; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable.",
+)
+
 
 def _parse_stream_id(value: str) -> tuple[int, int]:
     left, right = value.split("-", 1)

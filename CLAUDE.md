@@ -277,7 +277,7 @@ Based on HippoRAG2 with enhancements:
 
 DeepSearch uses PageIndex for efficient navigation of long documents:
 
-1. **Document-level routing**: `search.file` aggregates relevant files
+1. **Document-level routing**: `locate` aggregates relevant files
 2. **Section-level routing**: `toc.tree` / `section.select` for ToC navigation
 3. **Page-level reading**: `read.pages` for full context
 
@@ -292,11 +292,11 @@ Controlled via `.env`:
 Graph-first reasoning system with think→explore→report loop:
 
 - **Think**: Plan exploration strategy
-- **Explore**: Execute tools (search, graph traversal, web search)
+- **Explore**: Execute tools (locate, graph traversal, web search)
 - **Report**: Synthesize findings
 
 **Tools**:
-- `search.file`: Document-level routing
+- `locate`: Document-level routing
 - `toc.tree` / `section.select`: Section navigation
 - `read.pages`: Full page reading
 - `web.search`: Real-time web search (Tavily)

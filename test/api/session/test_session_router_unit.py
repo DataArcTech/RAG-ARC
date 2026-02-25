@@ -4,15 +4,15 @@ import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 @pytest.fixture
-def client(monkeypatch):
+async def client(monkeypatch):
     import api.routers.session as session_router
 
     user = SimpleNamespace(id=uuid.uuid4())
@@ -55,27 +55,32 @@ def client(monkeypatch):
 
     app = FastAPI()
     app.include_router(session_router.router)
-    app.dependency_overrides[session_router.get_current_user] = lambda: user
-    return TestClient(app)
+    async def _stub_user():  # noqa: ANN001
+        return user
+
+    app.dependency_overrides[session_router.get_current_user] = _stub_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
-def test_session_create_list_and_post_message(client):
-    create = client.post("/session")
+async def test_session_create_list_and_post_message(client):
+    create = await client.post("/session")
     assert create.status_code == 200
     session_id = create.json()
 
-    sessions = client.get("/session")
+    sessions = await client.get("/session")
     assert sessions.status_code == 200
     assert any(s["id"] == session_id for s in sessions.json())
 
-    msg = client.post(f"/session/{session_id}/messages", json={"content": "hi"})
+    msg = await client.post(f"/session/{session_id}/messages", json={"content": "hi"})
     assert msg.status_code == 200
     payload = msg.json()
     assert payload["content"]["role"] == "user"
     assert payload["content"]["content"] == "hi"
 
 
-def test_session_message_rejects_wrong_user(monkeypatch):
+async def test_session_message_rejects_wrong_user(monkeypatch):
     import api.routers.session as session_router
 
     user = SimpleNamespace(id=uuid.uuid4())
@@ -91,8 +96,11 @@ def test_session_message_rejects_wrong_user(monkeypatch):
 
     app = FastAPI()
     app.include_router(session_router.router)
-    app.dependency_overrides[session_router.get_current_user] = lambda: user
-    client = TestClient(app)
+    async def _stub_user():  # noqa: ANN001
+        return user
 
-    resp = client.post(f"/session/{session_id}/messages", json={"content": "hi"})
+    app.dependency_overrides[session_router.get_current_user] = _stub_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(f"/session/{session_id}/messages", json={"content": "hi"})
     assert resp.status_code == 401

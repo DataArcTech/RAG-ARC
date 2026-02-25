@@ -74,7 +74,7 @@ class _FileRoutingToolManager(_StubToolManager):
         if tool_name != "explore":
             return await super().invoke(tool_name, payload=payload)
 
-        # Simulate explore(action=search.file) returning file candidates.
+        # Simulate explore(action=locate) returning file candidates.
         return ToolResultPayload(
             tool_name="explore",
             namespace="stub::explore",
@@ -86,10 +86,10 @@ class _FileRoutingToolManager(_StubToolManager):
             diagnostics={
                 "actions": [
                     {
-                        "id": "auto_search_file",
-                        "tool": "search.file",
+                        "id": "auto_locate",
+                        "tool": "locate",
                         "status": "ok",
-                        "summary": "search.file ok",
+                        "summary": "locate ok",
                         "diagnostics": {
                             "results": [{"file_id": fid} for fid in self._routed_file_ids],
                         },
@@ -400,7 +400,7 @@ async def test_file_scope_is_locked_in_from_search_file_results() -> None:
         {
             "reasoning": "Route to a file.",
             "tool_calls": [
-                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search.file"}]}, "rationale": "route", "parallelizable": True}
+                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "locate"}]}, "rationale": "route", "parallelizable": True}
             ],
             "plan": [],
         },

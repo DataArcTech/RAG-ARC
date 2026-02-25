@@ -25,7 +25,7 @@ def test_instantiate_template_plan_renders_slots_and_question() -> None:
     assert any("IRR" in item["text"] for item in plan_items)
     assert tool_calls and tool_calls[0]["tool_name"] == "explore"
     actions = tool_calls[0]["tool_args"]["actions"]
-    assert actions[0]["tool"] == "search.file"
+    assert actions[0]["tool"] == "locate"
     assert actions[0]["args"]["query"] == "Which term has the highest IRR?"
 
 
