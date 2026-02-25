@@ -110,7 +110,7 @@ docker network create ${NETWORK_NAME} 2>/dev/null || echo "  ✅ 网络已存在
 echo ""
 
 echo "🗄️  处理PostgreSQL容器 [${POSTGRES_CONTAINER_NAME}]..."
-if docker ps -a | grep -q "${POSTGRES_CONTAINER_NAME}"; then
+if docker ps -a --format '{{.Names}}' | grep -qx "${POSTGRES_CONTAINER_NAME}"; then
     docker stop ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧PostgreSQL容器"
     docker update --restart always ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
     docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据，已启用自动重启）"
@@ -133,7 +133,7 @@ REDIS_CMD="redis-server --appendonly yes"
 if [[ -n "${REDIS_PASSWORD}" ]]; then
     REDIS_CMD="redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}"
 fi
-if docker ps -a | grep -q "${REDIS_CONTAINER_NAME}"; then
+if docker ps -a --format '{{.Names}}' | grep -qx "${REDIS_CONTAINER_NAME}"; then
     docker stop ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Redis容器"
     docker update --restart always ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
     docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据，已启用自动重启）"
@@ -149,7 +149,7 @@ fi
 echo ""
 
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
-if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
+if docker ps -a --format '{{.Names}}' | grep -qx "${NEO4J_CONTAINER_NAME}"; then
     docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
     docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
     docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
