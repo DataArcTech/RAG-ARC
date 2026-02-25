@@ -21,7 +21,6 @@ from .read_structured import ReadPagesTool
 from .web_search import WebSearchTool
 from .beam_search import BeamSearchTool
 from .llm_chain_explorer import LLMChainExplorerTool
-from .section_select import SectionSelectTool
 from core.deepsearch.tooling.file_scope_policy import (
     is_global_action_tool,
     strip_file_scope_from_graph_context,
@@ -35,7 +34,6 @@ _ALLOWED_TOOL_NAMES = {
     "tree.children",
     "tree.node",
     "tree.open",
-    "section.select",
     "graph.ops",
     "graph.beam_search",
     "graph.llm_chain_explorer",
@@ -46,7 +44,6 @@ _ALLOWED_TOOL_NAMES = {
 _LLM_REQUIRED_ACTIONS = {
     "graph.beam_search",
     "graph.llm_chain_explorer",
-    "section.select",
 }
 
 
@@ -69,7 +66,7 @@ class ExploreTool(GraphTool):
         channel="graph",
         description=(
             "Graph-first exploration orchestrator. Runs action lists in parallel: "
-            "graph.ops (safe Cypher + templates), locate, section.select, web.search, and structured reads "
+            "graph.ops (safe Cypher + templates), locate, web.search, and structured reads "
             "(read.pages). "
             "Good: actions with graph.ops + read.pages. Bad: empty action list."
         ),
@@ -88,7 +85,7 @@ class ExploreTool(GraphTool):
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "description": "Optional action id for tracking."},
-                            "tool": {"type": "string", "description": "Tool name (locate/toc/tree/section.select/graph.ops/read.pages)."},
+                            "tool": {"type": "string", "description": "Tool name (locate/toc/tree/graph.ops/read.pages)."},
                             "args": {"type": "object", "description": "Tool-specific args (passed as extra)."},
                         },
                         "required": ["tool"],
@@ -202,8 +199,6 @@ class ExploreTool(GraphTool):
             self._tools["tree.node"] = TreeNodeTool()
         if "tree.open" not in self._tools:
             self._tools["tree.open"] = TreeOpenTool()
-        if "section.select" not in self._tools:
-            self._tools["section.select"] = SectionSelectTool(llm_connector=self.llm_connector)
         if "graph.ops" not in self._tools:
             self._tools["graph.ops"] = GraphOpsTool()
         if "graph.beam_search" not in self._tools and self.llm_connector is not None:
@@ -550,16 +545,8 @@ class ExploreTool(GraphTool):
             steps.extend(
                 [
                     "Use node_id/section_id/path hints to narrow to the most relevant subtree.",
-                    "Use section.select to shortlist page ranges for target terms.",
+                    "Use locate(file=<file_id>) to get page-level candidates.",
                     "Then call read.pages for citeable evidence.",
-                ]
-            )
-        elif tool_name == "section.select":
-            steps.extend(
-                [
-                    "Treat selected nodes as routing hints (not evidence).",
-                    "Open supporting pages via read.pages using the node/section page hints.",
-                    "Optionally pass subtree_section_ids as section_ids to graph tools to keep reasoning within the selected subtree.",
                 ]
             )
         elif tool_name.startswith("graph."):

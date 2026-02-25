@@ -8,7 +8,6 @@ from .tree_tools import TreeRootTool, TreeChildrenTool, TreeNodeTool, TreeOpenTo
 from .read_structured import ReadPagesTool
 from .beam_search import BeamSearchTool
 from .llm_chain_explorer import LLMChainExplorerTool
-from .section_select import SectionSelectTool
 
 __all__ = [
     "ExploreTool",
@@ -19,7 +18,6 @@ __all__ = [
     "TreeChildrenTool",
     "TreeNodeTool",
     "TreeOpenTool",
-    "SectionSelectTool",
     "ReadPagesTool",
     "WebSearchTool",
     "BeamSearchTool",

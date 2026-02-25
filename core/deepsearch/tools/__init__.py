@@ -11,7 +11,6 @@ from .explore import (
     TreeChildrenTool,
     TreeNodeTool,
     TreeOpenTool,
-    SectionSelectTool,
     ReadPagesTool,
     WebSearchTool,
     BeamSearchTool,
@@ -34,7 +33,6 @@ __all__ = [
     "TreeChildrenTool",
     "TreeNodeTool",
     "TreeOpenTool",
-    "SectionSelectTool",
     "ReadPagesTool",
     "ThinkTool",
     "LogicCheckTool",
@@ -58,7 +56,6 @@ _BUILTIN_CLASSES = [
     TreeChildrenTool,
     TreeNodeTool,
     TreeOpenTool,
-    SectionSelectTool,
     ReadPagesTool,
     LogicCheckTool,
     ThinkTool,
@@ -70,7 +67,6 @@ _BUILTIN_CLASSES = [
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
-    SectionSelectTool,
     ThinkTool,
     LogicCheckTool,
     BeamSearchTool,
