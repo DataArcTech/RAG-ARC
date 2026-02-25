@@ -1,39 +1,27 @@
-"""search.file tool: relevant-file routing via global chunk-level retrieval.
-
-`search.file` answers: "Which file(s) should we scope to next?"
-
-Behavior:
-- runs chunk-level retrieval globally (faiss/bm25/graph_chunk) across allowed owner scopes
-- aggregates hits by file_id (RRF over ranks)
-- optionally reranks candidates with LLM using macro+micro signals
-- returns candidate file_ids with short "why relevant" snippets for routing decisions
-"""
+"""Unified locate tool: file-level routing via multi-channel retrieval."""
+import asyncio
 import json
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from config.core.deepsearch import tool_defaults
-from core.deepsearch.utils.owner_visibility import resolve_owner_visibility
+from core.deepsearch.utils.file_scope import FileScope
+from core.deepsearch.utils.ids import coerce_uuid_list
 from core.prompts.deepsearch.search_file import (
     SEARCH_FILE_RERANK_SYSTEM_PROMPT_EN,
     SEARCH_FILE_RERANK_USER_PROMPT_TEMPLATE_EN,
 )
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
-
-from ...base import (
-    GraphTool,
-    ToolDescriptor,
-    ToolResult,
-    ToolRunRequest,
-    build_input_schema,
-)
-from ...governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
 from core.deepsearch.utils.llm_json import call_llm_json_with_retry
-from .base import _SearchToolBase
-from .bm25 import _Bm25Channel
-from .faiss import _FaissChannel
-from .graph_chunk import _GraphChunkChannel
+
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
+from .search.base import _ChannelResult, _SearchToolBase
+from .search.bm25 import _Bm25Channel
+from .search.faiss import _FaissChannel
+from .search.graph_chunk import _GraphChunkChannel
+from .search.regex import _RegexChannel
 
 
 def _coerce_file_id(meta: Mapping[str, Any]) -> Optional[str]:
@@ -61,7 +49,6 @@ def _macro_filename(value: Optional[str]) -> Optional[str]:
 
 
 def _rrf(rank: int, *, k: int) -> float:
-    # Standard RRF: 1 / (k + rank). rank is 1-based.
     return 1.0 / float(max(1, int(k) + int(rank)))
 
 
@@ -74,8 +61,8 @@ class _Hit:
     snippet: str
 
 
-class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, GraphTool):
-    """Relevant-file routing tool (evidence-driven)."""
+class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, _RegexChannel, GraphTool):
+    """Unified locate tool: find relevant files via multi-channel retrieval + RRF fusion."""
 
     @staticmethod
     def _query_has_rerank_skip_block_cues(query: str) -> bool:
@@ -123,8 +110,6 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
             diag["reason"] = "blocked_by_query_cue"
             return False, diag
 
-        # Skip condition: (top1 - top2) / top1 > threshold
-        # (more conservative than dividing by top2; reduces accidental skips).
         denom = max(abs(top1), 1e-9)
         margin_ratio = (top1 - top2) / denom
         diag["margin_ratio"] = margin_ratio
@@ -136,92 +121,199 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         return False, diag
 
     descriptor = ToolDescriptor(
-        name="search.file",
+        name="locate",
         channel="graph",
         description=(
-            "Find relevant file candidates by running global chunk-level retrieval "
-            "(faiss + bm25 + graph_chunk), aggregating hits by file_id, and returning "
-            "candidate files with short 'why relevant' snippets. "
-            "Optionally reranks candidates with LLM to align with user intent. "
-            "Use this to pick file_id(s), then use tree/toc + read.pages for evidence exploration."
+            "Find relevant files by running parallel chunk retrieval across 4 channels "
+            "(dense, bm25, graph_chunk, regex), aggregating by file_id via RRF fusion. "
+            "Uses QuerySpec (from initial_think) to seed search channels automatically. "
+            "Returns ranked file candidates with snippets for routing decisions."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "file_search", "relevant_files", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
+        strategy_tags=("search", "locate", "file_search", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
-        namespace="rag-arc.deepsearch.tools.search.file",
+        namespace="rag-arc.deepsearch.tools.locate",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
+                "file": {"type": "string", "description": "Optional file_id to scope results to a single file."},
                 "top_k": {"type": "integer", "minimum": 0, "description": "How many files to return."},
-                "enable_llm_rerank": {"type": "boolean", "description": "Enable LLM rerank of file candidates."},
-                "rerank_top_k": {"type": "integer", "minimum": 0, "description": "How many candidates to send to LLM."},
-                "channels": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Channels: faiss, bm25, graph_chunk (or 'graph' alias). Defaults to all.",
-                },
                 "owner_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Owner ids to search (e.g. [me, share]). Must be authorized by code-side whitelist.",
+                    "description": "Owner ids to search (e.g. [me, share]).",
                 },
-                "faiss_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
-                "bm25_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
-                "graph_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
-                "use_ppr": {"type": "boolean", "description": "Only for graph_chunk channel."},
             }
         ),
         example_args={
             "question": "Which PDF mentions multi-currency switching?",
             "plan_step": "plan_01",
-            "extra": {"top_k": 5, "channels": ["bm25", "faiss", "graph"], "owner_ids": ["<me-owner-id>"]},
+            "extra": {"top_k": 5, "owner_ids": ["<me-owner-id>"]},
         },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
-        visibility = resolve_owner_visibility(
-            extra=request.extra,
-            access_scope=request.access_scope,
-            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
-        )
-        diagnostics: Dict[str, Any] = {"query": query, "owner_visibility": visibility.as_dict()}
+
+        query_spec: Dict[str, Any] = {}
+        if request.graph_context and isinstance(request.graph_context.metadata, dict):
+            raw = request.graph_context.metadata.get("query_spec")
+            if isinstance(raw, dict):
+                query_spec = dict(raw)
+
+        hyde_query = str(query_spec.get("hyde_query") or "").strip()
+        dense_query = hyde_query if hyde_query else query
+
+        raw_bm25_terms = query_spec.get("bm25_terms") or []
+        if not isinstance(raw_bm25_terms, (list, tuple)):
+            raw_bm25_terms = []
+        bm25_extra_terms = [str(x).strip() for x in raw_bm25_terms if str(x).strip()]
+
+        raw_regex = query_spec.get("regex_patterns") or []
+        if not isinstance(raw_regex, (list, tuple)):
+            raw_regex = []
+        regex_patterns = [str(x).strip() for x in raw_regex if str(x).strip()]
+
+        visibility = self._resolve_owner_visibility(request)
+        diagnostics: Dict[str, Any] = {
+            "query": query,
+            "dense_query": dense_query,
+            "bm25_extra_terms": bm25_extra_terms,
+            "regex_patterns": regex_patterns,
+            "owner_visibility": visibility.as_dict(),
+            "query_spec_present": bool(query_spec),
+        }
 
         if not visibility.enabled:
             return ToolResult(
-                summary="search.file skipped: missing owner scope.",
+                summary="locate skipped: missing owner scope.",
                 diagnostics={**diagnostics, "reason": "owner_scope_missing"},
             )
 
-        # Which chunk-retrieval channels to use for routing.
-        channels, unknown = self._resolve_channels(request.extra or {})
-        diagnostics["channels"] = channels
-        diagnostics["unknown_channels"] = unknown
-        if not channels:
-            return ToolResult(
-                summary="search.file skipped: no channels selected.",
-                diagnostics={**diagnostics, "reason": "channels_empty"},
-            )
+        file_scope = None
+        file_arg = (request.extra or {}).get("file")
+        if file_arg:
+            file_ids_coerced, invalid = coerce_uuid_list([str(file_arg)])
+            if file_ids_coerced:
+                file_scope = FileScope(file_ids=frozenset(file_ids_coerced), filename_contains=(), source="locate_arg")
+            diagnostics["file_scope"] = {"file": str(file_arg), "valid": bool(file_ids_coerced), "invalid": invalid}
 
-        # How many candidate files to return (final).
-        top_k_files = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)
-        # Retrieval depth for chunks (per channel). We rely on channel-specific overrides when present.
+        top_k_files = self._resolve_top_k((request.extra or {}).get("top_k"), tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)
         top_k_chunks = int(tool_defaults.FILE_SEARCH_CHANNEL_TOP_K)
 
-        # Run selected channels and collect chunk evidences for routing-only aggregation.
+        dense_extra = dict(request.extra or {})
+        dense_extra["focus_query"] = dense_query
+        dense_request = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=dense_extra,
+            graph_context=request.graph_context,
+            coverage_metrics=request.coverage_metrics,
+        )
+
+        async def _run_bm25_seeded() -> _ChannelResult:
+            variants = [query] + [t for t in bm25_extra_terms if t != query]
+            parts = await asyncio.gather(
+                *[
+                    self._run_bm25(request=request, query=qv, top_k=top_k_chunks, file_scope=file_scope)
+                    for qv in variants
+                ],
+                return_exceptions=True,
+            )
+            merged_evidences: List[Any] = []
+            merged_diags: Dict[str, Any] = {"variants": []}
+            summaries: List[str] = []
+            for qv, part in zip(variants, parts):
+                if isinstance(part, Exception):
+                    merged_diags["variants"].append({"query": qv, "error": str(part)})
+                    continue
+                summaries.append(part.summary)
+                merged_evidences.extend(part.evidences or [])
+                merged_diags["variants"].append({"query": qv, "diagnostics": dict(part.diagnostics or {})})
+            summary = " ".join([s for s in summaries if s]).strip() or "BM25 search completed."
+            return _ChannelResult(
+                channel="bm25",
+                evidences=merged_evidences,
+                diagnostics={"query": query, "seeded_variants": variants, **merged_diags},
+                summary=summary,
+            )
+
+        tasks: List[tuple[str, asyncio.Task]] = []
+        tasks.append(
+            (
+                "faiss",
+                asyncio.create_task(
+                    self._run_faiss(request=dense_request, query=dense_query, top_k=top_k_chunks, file_scope=file_scope)
+                ),
+            )
+        )
+        tasks.append(("bm25", asyncio.create_task(_run_bm25_seeded())))
+        tasks.append(
+            (
+                "graph_chunk",
+                asyncio.create_task(
+                    self._run_graph_chunk(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
+                ),
+            )
+        )
+        if regex_patterns:
+            tasks.append(
+                (
+                    "regex",
+                    asyncio.create_task(
+                        self._run_regex(
+                            request=request,
+                            query=query,
+                            top_k=top_k_chunks,
+                            file_scope=file_scope,
+                            regex_patterns=regex_patterns,
+                        )
+                    ),
+                )
+            )
+
+        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
         channel_summaries: List[str] = []
         channel_diags: Dict[str, Any] = {}
+        channel_results: Dict[str, Any] = {}
+        for (channel, _), result in zip(tasks, results):
+            if isinstance(result, Exception):
+                channel_summaries.append(f"{channel} search failed.")
+                channel_diags[channel] = {"query": query, "error": str(result)}
+                continue
+            channel_results[channel] = result
+            channel_summaries.append(result.summary)
+            channel_diags[channel] = dict(result.diagnostics or {})
 
-        # File-scope is intentionally disabled for search.file (global routing).
-        file_scope = None
+        diagnostics["channels_summary"] = channel_summaries
+        diagnostics["channels_diagnostics"] = channel_diags
 
         hits: Dict[str, Dict[str, Any]] = {}
         seen_chunk_ids_by_file: Dict[str, set[str]] = {}
         per_channel_scores: Dict[str, Dict[str, List[float]]] = {}
         rrf_k = int(tool_defaults.FILE_SEARCH_RRF_K)
+
+        # File-level dedup: merge different file_ids that share the same
+        # physical filename so re-indexed or stale-index chunks aggregate
+        # into a single result row instead of appearing as duplicates.
+        _filename_to_canonical_fid: Dict[str, str] = {}
+
+        def _canonical_file_id(raw_fid: str, meta: Mapping[str, Any]) -> str:
+            """Return the canonical file_id for a given raw file_id + metadata."""
+            macro = _macro_filename(_coerce_filename(meta))
+            if not macro:
+                return raw_fid
+            existing = _filename_to_canonical_fid.get(macro)
+            if existing is not None:
+                return existing
+            _filename_to_canonical_fid[macro] = raw_fid
+            return raw_fid
 
         async def _consume(channel: str, evidences: Sequence[Any], *, diag: Mapping[str, Any]) -> None:
             channel_diags[channel] = dict(diag or {})
@@ -229,9 +321,10 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
                 provenance = getattr(ev, "provenance", None) or {}
                 meta = provenance.get("metadata") if isinstance(provenance, dict) else None
                 meta = dict(meta or {}) if isinstance(meta, dict) else {}
-                file_id = _coerce_file_id(meta)
-                if not file_id:
+                raw_fid = _coerce_file_id(meta)
+                if not raw_fid:
                     continue
+                file_id = _canonical_file_id(raw_fid, meta)
 
                 chunk_id = str(getattr(ev, "chunk_id", "") or "").strip()
                 if not chunk_id:
@@ -281,33 +374,19 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
                     ).__dict__
                 )
 
-        # faiss
-        if "faiss" in channels:
-            result = await self._run_faiss(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
-            channel_summaries.append(result.summary)
+        if "faiss" in channel_results:
+            result = channel_results["faiss"]
             await _consume("faiss", result.evidences, diag=result.diagnostics)
-
-        # bm25
-        if "bm25" in channels:
-            result = await self._run_bm25(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
-            channel_summaries.append(result.summary)
+        if "bm25" in channel_results:
+            result = channel_results["bm25"]
             await _consume("bm25", result.evidences, diag=result.diagnostics)
+        if "graph_chunk" in channel_results:
+            result = channel_results["graph_chunk"]
+            await _consume("graph_chunk", result.evidences, diag=result.diagnostics)
+        if "regex" in channel_results:
+            result = channel_results["regex"]
+            await _consume("regex", result.evidences, diag=result.diagnostics)
 
-        # graph_chunk
-        if "graph_chunk" in channels:
-            try:
-                result = await self._run_graph_chunk(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
-                channel_summaries.append(result.summary)
-                await _consume("graph_chunk", result.evidences, diag=result.diagnostics)
-            except Exception as exc:  # noqa: BLE001
-                # Keep this observable; graph channel may be unavailable in some deployments.
-                channel_summaries.append("graph_chunk search failed.")
-                channel_diags["graph_chunk"] = {"query": query, "error": str(exc)}
-
-        diagnostics["channels_summary"] = channel_summaries
-        diagnostics["channels_diagnostics"] = channel_diags
-
-        # DocScore per channel: sum(scores) / sqrt(N+1)
         channel_doc_scores: Dict[str, Dict[str, float]] = {}
         channel_doc_ranks: Dict[str, Dict[str, int]] = {}
         fused_scores: Dict[str, float] = {}
@@ -329,7 +408,6 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
                 fused_scores[file_id] = float(fused_scores.get(file_id) or 0.0) + _rrf(idx, k=rrf_k)
             channel_doc_ranks[channel] = ranks
 
-        # Attach fused score to rows for ordering.
         for file_id, row in hits.items():
             row["score"] = float(fused_scores.get(file_id) or 0.0)
             row["per_channel_docscore"] = {ch: channel_doc_scores.get(ch, {}).get(file_id) for ch in channel_doc_scores}
@@ -341,9 +419,9 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         all_results = sorted(hits.values(), key=lambda row: float(row.get("score") or 0.0), reverse=True)
         rerank_diag: Dict[str, Any] = {}
         rerank_enabled = self._coerce_bool(
-            request.extra.get("enable_llm_rerank"), tool_defaults.FILE_SEARCH_ENABLE_LLM_RERANK_DEFAULT
+            (request.extra or {}).get("enable_llm_rerank"), tool_defaults.FILE_SEARCH_ENABLE_LLM_RERANK_DEFAULT
         )
-        rerank_top_k = self._resolve_top_k(request.extra.get("rerank_top_k"), tool_defaults.FILE_SEARCH_RERANK_TOP_K)
+        rerank_top_k = self._resolve_top_k((request.extra or {}).get("rerank_top_k"), tool_defaults.FILE_SEARCH_RERANK_TOP_K)
         if rerank_enabled and self.llm_connector is not None and all_results and rerank_top_k != 0:
             skip, skip_diag = self._should_skip_llm_rerank(query=query, candidates=all_results)
             if skip:
@@ -365,28 +443,26 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         if rerank_diag:
             diagnostics["llm_rerank"] = rerank_diag
 
-        results = all_results[:top_k_files] if top_k_files > 0 else []
+        results_out = all_results[:top_k_files] if top_k_files > 0 else []
+        diagnostics["results"] = results_out
 
-        diagnostics["results"] = results
-
-        if not results:
+        if not results_out:
             reason = "empty_hit"
             if visibility.owner_ids_rejected:
                 reason = "owner_ids_rejected"
             return ToolResult(
                 summary=build_llm_envelope(
-                    thinking="Global file routing via chunk retrieval produced no usable file candidates.",
+                    thinking="File routing via multi-channel chunk retrieval produced no usable file candidates.",
                     answer=[],
-                    extra={"reason": reason, "next_step": "Revise query terms or broaden owner_ids/channels; then rerun search.file."},
+                    extra={"reason": reason, "next_step": "Revise query terms or broaden owner_ids; then rerun locate."},
                 ),
                 diagnostics={**diagnostics, "reason": reason},
             )
 
-        # Human-readable preview for routing decisions (embedded into the JSON envelope).
         max_hits = max(1, int(tool_defaults.FILE_SEARCH_MAX_SNIPPETS_PER_FILE))
         max_preview = max(0, int(tool_defaults.FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS))
         preview_rows: List[Dict[str, Any]] = []
-        for idx, row in enumerate(results[: min(len(results), 5)]):
+        for idx, row in enumerate(results_out[: min(len(results_out), 5)]):
             preview = {
                 "rank": idx + 1,
                 "file_id": row.get("file_id"),
@@ -426,9 +502,9 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         if isinstance(llm_rerank, dict):
             rerank_thinking = str(llm_rerank.get("thinking") or llm_rerank.get("reasoning") or "").strip() or None
 
-        ranked_file_ids = [str(row.get("file_id")) for row in results if row.get("file_id")]
+        ranked_file_ids = [str(row.get("file_id")) for row in results_out if row.get("file_id")]
         summary = build_llm_envelope(
-            thinking="Aggregate global chunk hits into file candidates (routing only), optionally rerank by user intent.",
+            thinking="Aggregate chunk hits into file candidates (routing only), optionally rerank by user intent.",
             answer=ranked_file_ids,
             extra={
                 "preview": preview_rows,

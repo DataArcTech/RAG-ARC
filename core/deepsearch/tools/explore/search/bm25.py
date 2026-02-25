@@ -9,9 +9,8 @@ from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from framework.thread_pool import get_thread_pool
 
-from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ...governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase, resolve_explicit_file_scope, strip_file_scope_from_graph_context
+from ...base import ToolRunRequest
+from .base import _ChannelResult, _SearchToolBase
 
 
 class _Bm25Channel:
@@ -263,111 +262,3 @@ class _Bm25Channel:
         }
         return _ChannelResult(channel="bm25", evidences=evidences, diagnostics=diagnostics, summary=summary)
 
-
-class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
-    """BM25-only search tool."""
-
-    descriptor = ToolDescriptor(
-        name="search.scoped.bm25",
-        channel="graph",
-        description="BM25-only lexical search scoped to a file_id/file_ids (prevents cross-document noise).",
-        speed="fast",
-        cost="low",
-        strategy_tags=("search", "bm25", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
-        profile="F",
-        determinism="deterministic",
-        namespace="rag-arc.deepsearch.tools.search.scoped.bm25",
-        mcp_callable=True,
-        input_schema=build_input_schema(
-            extra_properties={
-                "focus_query": {"type": "string", "description": "Optional query override."},
-                "file_id": {"type": "string", "description": "Restrict results to a specific file_id (required unless file_ids provided)."},
-                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids (required unless file_id provided)."},
-                "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
-                "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
-                "owner_ids": {"type": "array", "items": {"type": "string"}, "description": "Owner ids to search (me/share)."},
-                "top_k": {"type": "integer", "minimum": 0, "description": "Top-k results to return."},
-                "bm25_top_k": {"type": "integer", "minimum": 0, "description": "Alias of top_k."},
-                "bm25_use_phrase_query": {"type": "boolean", "description": "Use phrase query for BM25."},
-            }
-        ),
-        example_args={
-            "question": "HippoRAG retrieval",
-            "plan_step": "plan_01",
-            "extra": {"top_k": 10},
-        },
-    )
-
-    async def run(self, request: ToolRunRequest) -> ToolResult:
-        query = self._resolve_query(request)
-        extra = request.extra or {}
-        file_scope, invalid, raw_ids = resolve_explicit_file_scope(extra)
-        if invalid:
-            return ToolResult(
-                summary="search.scoped.bm25 skipped: invalid file_id(s) (expected UUID; use search.file to obtain file_id).",
-                diagnostics={
-                    "reason": "invalid_file_id_format",
-                    "query": query,
-                    "invalid_file_ids": invalid[:20],
-                    "file_ids_filter_raw": raw_ids[:20],
-                },
-            )
-        if file_scope is None or not getattr(file_scope, "file_ids", None):
-            return ToolResult(
-                summary="search.scoped.bm25 skipped: missing file_id/file_ids (call search.file first).",
-                diagnostics={"reason": "missing_file_scope", "query": query},
-            )
-        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
-        result = await self._run_bm25(request=request, query=query, top_k=top_k, file_scope=file_scope)
-        return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
-
-
-class SearchGlobalBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
-    """BM25-only global search tool (explicitly ignores inherited file_scope)."""
-
-    descriptor = ToolDescriptor(
-        name="search.global.bm25",
-        channel="graph",
-        description=(
-            "BM25-only lexical search across all accessible documents. "
-            "Warning: may introduce cross-document/company noise. Prefer search.scoped.bm25."
-        ),
-        speed="fast",
-        cost="low",
-        strategy_tags=("search", "bm25", "global", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
-        profile="F",
-        determinism="deterministic",
-        namespace="rag-arc.deepsearch.tools.search.global.bm25",
-        mcp_callable=True,
-        input_schema=SearchBM25Tool.descriptor.input_schema,
-        example_args={
-            "question": "Find keyword matches globally",
-            "plan_step": "plan_01",
-            "extra": {"channels": ["bm25"], "top_k": 10},
-        },
-    )
-
-    async def run(self, request: ToolRunRequest) -> ToolResult:
-        query = self._resolve_query(request)
-        patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
-        extra = dict(request.extra or {})
-        for key in ("file_id", "file_ids", "source_file_id", "source_file_ids", "filename_contains"):
-            extra.pop(key, None)
-        file_scope = None
-        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
-        patched = ToolRunRequest(
-            question=request.question,
-            plan_step=request.plan_step,
-            context_evidences=request.context_evidences,
-            adapter=request.adapter,
-            access_scope=request.access_scope,
-            extra=extra,
-            graph_context=patched_ctx,
-            coverage_metrics=request.coverage_metrics,
-        )
-        result = await self._run_bm25(request=patched, query=query, top_k=top_k, file_scope=file_scope)
-        risk = "global_search_may_introduce_cross_doc_noise"
-        diagnostics = {**dict(result.diagnostics or {}), "search_mode": "global", "risk": risk}
-        summary = (result.summary or "BM25 search completed.").rstrip()
-        summary = summary + f" NOTE: {risk}."
-        return ToolResult(summary=summary, evidences=result.evidences, diagnostics=diagnostics)

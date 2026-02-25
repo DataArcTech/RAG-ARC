@@ -1,7 +1,7 @@
-"""Prompt templates for search.file rerank."""
+"""Prompt templates for locate rerank."""
 
 SEARCH_FILE_RERANK_SYSTEM_PROMPT_EN = (
-    "Role: DeepSearch search.file reranker.\n"
+    "Role: DeepSearch locate reranker.\n"
     "Task: reorder candidate files so the best match to the user's intent comes first (routing only).\n"
     "\n"
     "Signals:\n"

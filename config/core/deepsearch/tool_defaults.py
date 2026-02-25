@@ -156,16 +156,10 @@ THINK_BUDGET_CRITICAL_REMAINING_RATIO = 0.05
 # "Global tools" are explicitly allowed to ignore file_scope so they can be used to *discover* the
 # right files (routing) or search the web.
 DEEPSEARCH_GLOBAL_ACTION_TOOL_NAMES = (
-    "search.file",
-    "search.global",
-    "search.global.faiss",
-    "search.global.bm25",
-    "search.global.graph",
+    "locate",
     "web.search",
 )
-DEEPSEARCH_GLOBAL_ACTION_TOOL_PREFIXES = (
-    "search.global.",
-)
+DEEPSEARCH_GLOBAL_ACTION_TOOL_PREFIXES = ()
 
 # -----------------------------
 # logic.check defaults
@@ -239,10 +233,10 @@ SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 480
 SEARCH_ENTITY_EXTRACT_JSON_REPAIR_ATTEMPTS = 4
 
 # -----------------------------
-# search.file defaults (relevant files routing)
+# locate defaults (relevant files routing)
 # -----------------------------
-# `search.file` is a *routing* tool: it searches globally for relevant chunks, aggregates them by
-# file_id, and returns candidate files + brief "why relevant" snippets.
+# `locate` is a *routing* tool: it searches globally for relevant chunks, aggregates them by file_id,
+# and returns candidate files + brief "why relevant" snippets.
 FILE_SEARCH_DEFAULT_TOP_K = 5
 # Retrieval depth per channel (faiss/bm25/graph_chunk). Higher values improve recall but cost more.
 FILE_SEARCH_CHANNEL_TOP_K = 25
@@ -403,7 +397,7 @@ EXPLORE_READ_MAX_CHARS = 6000
 # navigation bootstrap defaults (service-side; long-doc navigation)
 # -----------------------------
 # Deterministic preflight steps executed before graph reasoning:
-# search.file -> toc.tree/section.select (Top-N candidate files)
+# locate -> toc.tree/section.select (Top-N candidate files)
 # Default off: let the LLM decide whether to route files/sections (prevents unnecessary retrieval
 # for questions that do not require consulting the user's corpus).
 NAV_BOOTSTRAP_ENABLED = False

@@ -74,7 +74,7 @@ class _SearchToolBase:
     @staticmethod
     def _require_adapter(adapter: GraphDeepSearchAdapter | None) -> GraphDeepSearchAdapter:
         if adapter is None:
-            raise RuntimeError("search.scoped.graph requires a GraphDeepSearchAdapter instance")
+            raise RuntimeError("graph_chunk channel requires a GraphDeepSearchAdapter instance")
         return adapter
 
     def _resolve_retrievers(self) -> _RetrieverBundle:

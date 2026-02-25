@@ -1,17 +1,7 @@
 """Explore tool package (graph-first orchestration)."""
 from .explore import ExploreTool
 from .graph_ops import GraphOpsTool
-from .search.file_search import FileSearchTool
-from .search import (
-    SearchScopedTool,
-    SearchGlobalTool,
-    SearchFaissTool,
-    SearchGlobalFaissTool,
-    SearchBM25Tool,
-    SearchGlobalBM25Tool,
-    SearchGraphChunkTool,
-    SearchGlobalGraphTool,
-)
+from .locate import LocateTool
 from .web_search import WebSearchTool
 from .toc_tree import TocTreeTool
 from .tree_tools import TreeRootTool, TreeChildrenTool, TreeNodeTool, TreeOpenTool
@@ -23,7 +13,7 @@ from .section_select import SectionSelectTool
 __all__ = [
     "ExploreTool",
     "GraphOpsTool",
-    "FileSearchTool",
+    "LocateTool",
     "TocTreeTool",
     "TreeRootTool",
     "TreeChildrenTool",
@@ -31,14 +21,6 @@ __all__ = [
     "TreeOpenTool",
     "SectionSelectTool",
     "ReadPagesTool",
-    "SearchScopedTool",
-    "SearchGlobalTool",
-    "SearchFaissTool",
-    "SearchGlobalFaissTool",
-    "SearchBM25Tool",
-    "SearchGlobalBM25Tool",
-    "SearchGraphChunkTool",
-    "SearchGlobalGraphTool",
     "WebSearchTool",
     "BeamSearchTool",
     "LLMChainExplorerTool",
