@@ -1,7 +1,7 @@
 """Structured reading tools for long documents.
 
 DeepSearch contract:
-- `search.*` outputs are navigation-only and MUST NOT be cited.
+- Routing/navigation outputs (locate/toc/tree/section.select) are navigation-only and MUST NOT be cited.
 - `read.pages` is the primary evidence path and MUST return *full-page* content.
 
 Implementation note:
@@ -339,7 +339,7 @@ class ReadPagesTool(GraphTool):
             if file_id_raw and not file_id:
                 reason = "invalid_file_id_format"
             return ToolResult(
-                summary="read.pages skipped: missing/invalid file_id or missing page range (use search.file/page.select).",
+                summary="read.pages skipped: missing/invalid file_id or missing page range (use locate/page.select).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None, "page_start": page_start, "page_end": page_end},
             )
 

@@ -186,7 +186,7 @@ def _inject_search_retrievers(payload: Dict[str, Any], *, dense: Any | None, bm2
             return None
         return params
 
-    for tool_name in ("search", "search.faiss", "search.bm25", "explore"):
+    for tool_name in ("locate", "explore"):
         params = _ensure_params(tool_name)
         if params is None:
             continue

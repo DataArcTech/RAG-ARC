@@ -71,7 +71,7 @@ class GraphLoopRuntimeMixin:
         return list(valid)
 
     @staticmethod
-    def _extract_file_ids_from_search_file_diagnostics(diagnostics: Any) -> list[str]:
+    def _extract_file_ids_from_locate_diagnostics(diagnostics: Any) -> list[str]:
         if not isinstance(diagnostics, dict):
             return []
         results = diagnostics.get("results")
@@ -87,12 +87,12 @@ class GraphLoopRuntimeMixin:
 
     @classmethod
     def _extract_file_ids_from_tool_result(cls, *, tool_name: str, result: Any) -> list[str]:
-        """Extract candidate file_ids from tool results (search.file inside explore)."""
+        """Extract candidate file_ids from tool results (locate inside explore)."""
 
         name = str(tool_name or "").strip()
         diag = getattr(result, "diagnostics", None)
-        if name == "search.file":
-            out = cls._extract_file_ids_from_search_file_diagnostics(diag)
+        if name == "locate":
+            out = cls._extract_file_ids_from_locate_diagnostics(diag)
             if out:
                 return out
             # Fallback to parsing the JSON envelope in summary.
@@ -112,12 +112,12 @@ class GraphLoopRuntimeMixin:
             for action in actions:
                 if not isinstance(action, dict):
                     continue
-                if str(action.get("tool") or "").strip() != "search.file":
+                if str(action.get("tool") or "").strip() != "locate":
                     continue
                 if str(action.get("status") or "").strip() != "ok":
                     continue
                 action_diag = action.get("diagnostics")
-                collected.extend(cls._extract_file_ids_from_search_file_diagnostics(action_diag))
+                collected.extend(cls._extract_file_ids_from_locate_diagnostics(action_diag))
             valid, _invalid = coerce_uuid_list(collected)
             return list(valid)
         return []
@@ -134,7 +134,7 @@ class GraphLoopRuntimeMixin:
 
         Rules:
         - Prefer explicit tool args (file_id/file_ids) since they represent a deliberate selection.
-        - Otherwise, accept candidates from search.file outputs (routing stage).
+        - Otherwise, accept candidates from locate outputs (routing stage).
         """
 
         explicit = self._extract_file_ids_from_tool_args(tool_name, tool_args)
@@ -158,7 +158,7 @@ class GraphLoopRuntimeMixin:
         meta["file_scope"] = {
             "file_ids": list(file_ids),
             "filename_contains": [],
-            "source": "tool_args" if explicit else "search_file",
+            "source": "tool_args" if explicit else "locate",
         }
         context.metadata = meta
         await emit_trace(

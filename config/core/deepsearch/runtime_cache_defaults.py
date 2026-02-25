@@ -38,7 +38,7 @@ DEFAULT_RUN_TOOL_MEMO_ENABLED = True
 DEFAULT_RUN_TOOL_MEMO_MAX_ENTRIES = 512
 # Cache only navigation/retrieval tools by default; never cache LLM think/code tools.
 DEFAULT_RUN_TOOL_MEMO_INCLUDE_PREFIXES = (
-    "search.",
+    "locate",
     "toc.tree",
     "tree.",
     "section.select",

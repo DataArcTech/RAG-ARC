@@ -229,7 +229,7 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         if not file_id:
             reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
             return ToolResult(
-                summary="section.select skipped: invalid/missing file_id (expected UUID; use search.file).",
+                summary="section.select skipped: invalid/missing file_id (expected UUID; use locate).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
             )
 
@@ -452,28 +452,23 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         payload["suggested_reads"] = suggested_reads
         payload["suggested_actions"] = [
             {
-                "tool": "search.scoped.graph",
-                "args": {
-                    "file_id": file_id,
-                    "section_ids": subtree_ids,
-                    "seed_entities": seed_entities,
-                    "focus_query": query,
-                },
-                "why": "Project graph retrieval onto the selected subtree to avoid drifting across unrelated sections/files.",
+                "tool": "locate",
+                "args": {"focus_query": query, "file": file_id, "top_k": int(tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)},
+                "why": "Refine page-level locate within the current file using graph + dense + bm25 + regex channels.",
             },
             *(
                 [
                     {
-                        "tool": "search.global.graph",
+                        "tool": "locate",
                         "args": {
-                            "seed_entities": seed_entities,
                             "focus_query": query,
                             "top_k": int(getattr(tool_defaults, "SECTION_SELECT_CROSS_DOC_BRIDGE_TOP_K", 10) or 10),
-                            "use_ppr": False,
-                            "enable_llm_rerank": False,
-                            "enable_entity_fallback": False,
                         },
-                        "why": "Cross-document graph bridging (routing only): discover other files likely related to the current subtree via shared entities; then route to the new file_id(s) and read.pages for evidence.",
+                        "why": (
+                            "Cross-document bridging: seed entities "
+                            + str(seed_entities[:3])
+                            + " may appear in other files; locate globally to discover related documents."
+                        ),
                     }
                 ]
                 if seed_entities and bool(getattr(tool_defaults, "SECTION_SELECT_CROSS_DOC_BRIDGE_SUGGEST_ENABLED", True))

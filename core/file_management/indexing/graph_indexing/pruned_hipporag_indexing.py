@@ -72,14 +72,17 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             # - Computing synonymy edges (if enabled)
             # - Building graph structure
             # - Rebuilding chunk embeddings array
-            loop = asyncio.get_running_loop()
             t_update0 = time.perf_counter()
             store_stats = None
             update_with_stats = getattr(self.graph_store, "update_index_with_stats", None)
             if callable(update_with_stats):
-                success, store_stats = await loop.run_in_executor(None, update_with_stats, extracted_chunks)
+                from core.utils.thread_pool import run_blocking
+
+                success, store_stats = await run_blocking(update_with_stats, extracted_chunks)
             else:
-                success = await loop.run_in_executor(None, self.graph_store.update_index, extracted_chunks)
+                from core.utils.thread_pool import run_blocking
+
+                success = await run_blocking(self.graph_store.update_index, extracted_chunks)
             t_update = time.perf_counter() - t_update0
 
             if not success:
@@ -92,8 +95,9 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             t_save = 0.0
             if hasattr(self.graph_store, 'storage_path') and self.graph_store.storage_path:
                 t_save0 = time.perf_counter()
-                await asyncio.get_running_loop().run_in_executor(
-                    None,
+                from core.utils.thread_pool import run_blocking
+
+                await run_blocking(
                     self.graph_store.save_index,
                     self.graph_store.storage_path,
                     self.graph_store.index_name,

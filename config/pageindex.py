@@ -171,7 +171,7 @@ def section_bm25_index_path(default: str = "io://section_bm25_index") -> str:
 
 
 def doc_routing_enabled() -> bool:
-    # Doc routing is handled by DeepSearch `search.file` (relevant-file routing).
+    # Doc routing is handled by DeepSearch `locate` (relevant-file routing).
     return False
 
 

@@ -81,7 +81,7 @@ class TocTreeTool(GraphTool):
         if not file_id:
             reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
             return ToolResult(
-                summary="toc.tree skipped: invalid/missing file_id (expected UUID; use search.file to obtain file_id).",
+                summary="toc.tree skipped: invalid/missing file_id (expected UUID; use locate to obtain file_id).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
             )
 

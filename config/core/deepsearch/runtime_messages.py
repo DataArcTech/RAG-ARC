@@ -19,10 +19,8 @@ COMPUTABLE_HARD_GATE_MESSAGE: Final[str] = (
 MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE: Final[str] = (
     "DeepSearch report generation requires at least one successful read.pages call (full-page evidence). "
     "This run produced no citeable page evidence. "
-    "Next step: use explore to route to the right file (search.file), then navigate (toc.tree / tree.* / section.select), "
-    "optionally refine with search.scoped/search.global (or their channel-specific variants: "
-    "search.scoped.faiss/search.scoped.bm25/search.scoped.graph and search.global.faiss/search.global.bm25/search.global.graph) "
-    "(navigation-only) and/or graph tools (graph.ops / graph.beam_search / graph.llm_chain_explorer), "
+    "Next step: use explore to route to the right file (locate), then navigate (toc.tree / tree.* / section.select), "
+    "and/or graph tools (graph.ops / graph.beam_search / graph.llm_chain_explorer), "
     "and finally read the relevant pages via read.pages. "
     "Search snippets are navigation-only and cannot be used as evidence. "
     "After extracting numbers/terms from read.pages, you may use code.python for deterministic verification."

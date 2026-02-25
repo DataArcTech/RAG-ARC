@@ -580,8 +580,9 @@ class OpenAIChatLLM(ChatLLMBase):
         self._validate_messages(messages)
 
         if self.loading_method == "huggingface":
-            import asyncio
-            return await asyncio.to_thread(self.chat, messages, **kwargs)
+            from framework.thread_pool import get_thread_pool
+
+            return await get_thread_pool().run_blocking(self.chat, messages, **kwargs)
 
         def _extract_provider_error(payload: Any) -> Optional[str]:
             if not isinstance(payload, dict):

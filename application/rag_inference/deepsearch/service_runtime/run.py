@@ -176,18 +176,18 @@ class DeepSearchServiceRunMixin:
         # 1) relevant files (global routing)
         try:
             search_file = await self._invoke_tool_for_bootstrap(
-                tool_name="search.file",
+                tool_name="locate",
                 question=question,
                 scope=scope,
                 reasoning_context=reasoning_context,
                 extra={"top_k": max(0, int(cfg["file_top_k"]))},
-                plan_step="nav_bootstrap.search_file",
+                plan_step="nav_bootstrap.locate",
             )
         except Exception as exc:  # noqa: BLE001
             await emit_trace(
                 "think",
-                f"Navigation bootstrap failed at search.file: {exc}",
-                meta={"stage": "nav_bootstrap", "reason": "search_file_error"},
+                f"Navigation bootstrap failed at locate: {exc}",
+                meta={"stage": "nav_bootstrap", "reason": "locate_error"},
             )
             return []
 
@@ -292,7 +292,7 @@ class DeepSearchServiceRunMixin:
         lines: List[str] = []
         lines.append("Navigation bootstrap (deterministic).")
         lines.append("")
-        lines.append("search.file candidates:")
+        lines.append("locate candidates:")
         if not candidate_files:
             lines.append("- (none)")
         else:
@@ -896,7 +896,7 @@ class DeepSearchServiceRunMixin:
                             confidence_delta=None,
                             coverage_delta=None,
                             next_actions=[
-                                "Use explore + search.file to pick a real file_id (UUID) if not already known.",
+                                "Use explore + locate to pick a real file_id (UUID) if not already known.",
                                 "Use toc.tree / tree.root / section.select to locate likely sections and page ranges.",
                                 "Call read.pages on those pages (full-page evidence), then continue reasoning.",
                             ],

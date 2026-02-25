@@ -14,11 +14,7 @@ from config.core.deepsearch import tool_defaults
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 from .graph_ops import GraphOpsTool
-from .search.file_search import FileSearchTool
-from .search.tool import SearchGlobalTool, SearchScopedTool
-from .search.faiss import SearchFaissTool, SearchGlobalFaissTool
-from .search.bm25 import SearchBM25Tool, SearchGlobalBM25Tool
-from .search.graph_chunk import SearchGraphChunkTool, SearchGlobalGraphTool
+from .locate import LocateTool
 from .toc_tree import TocTreeTool
 from .tree_tools import TreeRootTool, TreeChildrenTool, TreeNodeTool, TreeOpenTool
 from .read_structured import ReadPagesTool
@@ -33,21 +29,13 @@ from core.deepsearch.tooling.file_scope_policy import (
 
 
 _ALLOWED_TOOL_NAMES = {
-    "search.file",
+    "locate",
     "toc.tree",
     "tree.root",
     "tree.children",
     "tree.node",
     "tree.open",
     "section.select",
-    "search.scoped",
-    "search.global",
-    "search.scoped.faiss",
-    "search.scoped.bm25",
-    "search.scoped.graph",
-    "search.global.faiss",
-    "search.global.bm25",
-    "search.global.graph",
     "graph.ops",
     "graph.beam_search",
     "graph.llm_chain_explorer",
@@ -56,8 +44,6 @@ _ALLOWED_TOOL_NAMES = {
 }
 
 _LLM_REQUIRED_ACTIONS = {
-    "search.scoped.graph",
-    "search.global.graph",
     "graph.beam_search",
     "graph.llm_chain_explorer",
     "section.select",
@@ -76,14 +62,14 @@ class _ActionResult:
 
 
 class ExploreTool(GraphTool):
-    """Orchestrate graph-first exploration actions (graph.ops + search + structured reads)."""
+    """Orchestrate graph-first exploration actions (graph.ops + locate + structured reads)."""
 
     descriptor = ToolDescriptor(
         name="explore",
         channel="graph",
         description=(
             "Graph-first exploration orchestrator. Runs action lists in parallel: "
-            "graph.ops (safe Cypher + templates), search, section.select, web.search, and structured reads "
+            "graph.ops (safe Cypher + templates), locate, section.select, web.search, and structured reads "
             "(read.pages). "
             "Good: actions with graph.ops + read.pages. Bad: empty action list."
         ),
@@ -102,7 +88,7 @@ class ExploreTool(GraphTool):
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "description": "Optional action id for tracking."},
-                            "tool": {"type": "string", "description": "Tool name (search/tree/section.select/graph.ops/read.pages)."},
+                            "tool": {"type": "string", "description": "Tool name (locate/toc/tree/section.select/graph.ops/read.pages)."},
                             "args": {"type": "object", "description": "Tool-specific args (passed as extra)."},
                         },
                         "required": ["tool"],
@@ -123,8 +109,8 @@ class ExploreTool(GraphTool):
                 "actions": [
                     {
                         "id": "s1",
-                        "tool": "search.scoped",
-                        "args": {"focus_query": "Company A control Company C", "file_id": "REPLACE_WITH_REAL_FILE_ID_UUID", "top_k": 6},
+                        "tool": "locate",
+                        "args": {"focus_query": "Company A control Company C", "top_k": 6},
                     },
                     {
                         "id": "g1",
@@ -200,8 +186,8 @@ class ExploreTool(GraphTool):
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
     def _register_builtin_tools(self) -> None:
-        if "search.file" not in self._tools:
-            self._tools["search.file"] = FileSearchTool(
+        if "locate" not in self._tools:
+            self._tools["locate"] = LocateTool(
                 llm_connector=self.llm_connector,
                 dense_retriever=self.dense_retriever,
                 bm25_retriever=self.bm25_retriever,
@@ -218,30 +204,6 @@ class ExploreTool(GraphTool):
             self._tools["tree.open"] = TreeOpenTool()
         if "section.select" not in self._tools:
             self._tools["section.select"] = SectionSelectTool(llm_connector=self.llm_connector)
-        if "search.scoped" not in self._tools:
-            self._tools["search.scoped"] = SearchScopedTool(
-                llm_connector=self.llm_connector,
-                dense_retriever=self.dense_retriever,
-                bm25_retriever=self.bm25_retriever,
-            )
-        if "search.global" not in self._tools:
-            self._tools["search.global"] = SearchGlobalTool(
-                llm_connector=self.llm_connector,
-                dense_retriever=self.dense_retriever,
-                bm25_retriever=self.bm25_retriever,
-            )
-        if "search.scoped.faiss" not in self._tools:
-            self._tools["search.scoped.faiss"] = SearchFaissTool(dense_retriever=self.dense_retriever)
-        if "search.scoped.bm25" not in self._tools:
-            self._tools["search.scoped.bm25"] = SearchBM25Tool(bm25_retriever=self.bm25_retriever)
-        if "search.scoped.graph" not in self._tools:
-            self._tools["search.scoped.graph"] = SearchGraphChunkTool(llm_connector=self.llm_connector)
-        if "search.global.faiss" not in self._tools:
-            self._tools["search.global.faiss"] = SearchGlobalFaissTool(dense_retriever=self.dense_retriever)
-        if "search.global.bm25" not in self._tools:
-            self._tools["search.global.bm25"] = SearchGlobalBM25Tool(bm25_retriever=self.bm25_retriever)
-        if "search.global.graph" not in self._tools:
-            self._tools["search.global.graph"] = SearchGlobalGraphTool(llm_connector=self.llm_connector)
         if "graph.ops" not in self._tools:
             self._tools["graph.ops"] = GraphOpsTool()
         if "graph.beam_search" not in self._tools and self.llm_connector is not None:
@@ -418,13 +380,13 @@ class ExploreTool(GraphTool):
 
         has_valid_file_id = False
         invalid_file_ids: List[str] = []
-        has_search_file = False
+        has_locate = False
         file_required_tools: List[str] = []
         file_required_actions: List[Dict[str, Any]] = []
         for action in actions:
             tool_name = str(action.get("tool") or "").strip()
-            if tool_name == "search.file":
-                has_search_file = True
+            if tool_name == "locate":
+                has_locate = True
             args = action.get("args") if isinstance(action.get("args"), dict) else {}
             if _requires_file_id(tool_name, args):
                 file_required_actions.append(action)
@@ -451,7 +413,7 @@ class ExploreTool(GraphTool):
             has_valid_file_id = True
 
         # If the user/model only requested tools that do not require a file_id (currently: node-id tree inspection),
-        # do not force search.file.
+        # do not force locate.
         if not file_required_actions:
             return actions, {}
         if has_valid_file_id:
@@ -459,7 +421,7 @@ class ExploreTool(GraphTool):
 
         # When the model passes placeholders / non-UUID file identifiers:
         # - If we already have an inherited file_scope, prefer that scope and strip the invalid ids.
-        # - Otherwise, treat as missing and enforce a search.file-only round.
+        # - Otherwise, treat as missing and enforce a locate-only round.
         if invalid_file_ids:
             if inherited_file_ids:
                 for action in actions:
@@ -493,31 +455,31 @@ class ExploreTool(GraphTool):
                 "reason": "invalid_file_id",
                 "invalid_file_ids": sorted(set(invalid_file_ids))[:8],
             }
-            search_args = {"top_k": int(tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)}
-            return [{"id": "auto_search_file", "tool": "search.file", "args": search_args}], diag
+            locate_args = {"top_k": int(tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)}
+            return [{"id": "auto_locate", "tool": "locate", "args": locate_args}], diag
 
-        if not has_search_file:
+        if not has_locate:
             blocked_tools = [str(a.get("tool") or "").strip() for a in file_required_actions if str(a.get("tool") or "").strip()]
-            search_args = {"top_k": int(tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)}
-            actions = [{"id": "auto_search_file", "tool": "search.file", "args": search_args}]
+            locate_args = {"top_k": int(tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)}
+            actions = [{"id": "auto_locate", "tool": "locate", "args": locate_args}]
             return actions, {
                 "enforced": True,
                 "reason": "missing_file_id",
                 "blocked_actions": blocked_tools,
             }
 
-        # search.file exists but no file_id in any action: enforce search.file only (first step).
+        # locate exists but no file_id in any action: enforce locate only (first step).
         blocked_tools = [
             str(a.get("tool") or "").strip()
             for a in file_required_actions
-            if str(a.get("tool") or "").strip() != "search.file"
+            if str(a.get("tool") or "").strip() != "locate"
         ]
-        search_actions = [a for a in actions if str(a.get("tool") or "").strip() == "search.file"]
-        if not search_actions:
+        locate_actions = [a for a in actions if str(a.get("tool") or "").strip() == "locate"]
+        if not locate_actions:
             return actions, {}
-        for idx, action in enumerate(search_actions):
-            action["id"] = action.get("id") or f"auto_search_file_{idx}"
-        return search_actions, {
+        for idx, action in enumerate(locate_actions):
+            action["id"] = action.get("id") or f"auto_locate_{idx}"
+        return locate_actions, {
             "enforced": True,
             "reason": "file_routing_first",
             "blocked_actions": blocked_tools,
@@ -542,16 +504,6 @@ class ExploreTool(GraphTool):
             tool_name = str(action.get("tool") or "").strip()
             if tool_name in _LLM_REQUIRED_ACTIONS:
                 return True
-            if tool_name == "search":
-                args = action.get("args") if isinstance(action.get("args"), dict) else {}
-                channels = args.get("channels")
-                if channels is None:
-                    return True
-                if isinstance(channels, str):
-                    channels = [c.strip() for c in channels.split(",") if c.strip()]
-                if isinstance(channels, (list, tuple, set)):
-                    if "graph_chunk" in {str(c).strip() for c in channels if str(c).strip()}:
-                        return True
         return False
 
     @staticmethod
@@ -586,7 +538,7 @@ class ExploreTool(GraphTool):
             else:
                 steps.append(f"Retry {tool_name} with corrected args.")
 
-        if tool_name == "search.file":
+        if tool_name == "locate":
             steps.extend(
                 [
                     "Pick the top file_id (UUID) matching the user's intent; treat others as distractors unless a comparison is requested.",
@@ -598,7 +550,7 @@ class ExploreTool(GraphTool):
             steps.extend(
                 [
                     "Use node_id/section_id/path hints to narrow to the most relevant subtree.",
-                    "Use section.select or search.scoped to locate page ranges for target terms.",
+                    "Use section.select to shortlist page ranges for target terms.",
                     "Then call read.pages for citeable evidence.",
                 ]
             )
@@ -607,29 +559,20 @@ class ExploreTool(GraphTool):
                 [
                     "Treat selected nodes as routing hints (not evidence).",
                     "Open supporting pages via read.pages using the node/section page hints.",
-                    "Optionally pass subtree_section_ids as section_ids to search.scoped.graph / graph tools to keep graph reasoning within the selected subtree.",
+                    "Optionally pass subtree_section_ids as section_ids to graph tools to keep reasoning within the selected subtree.",
                 ]
             )
-        elif tool_name.startswith("search."):
-            suggested_reads = diag.get("suggested_reads")
-            if isinstance(suggested_reads, list) and suggested_reads:
-                steps.append("Execute suggested read.pages calls next; search snippets are navigation-only.")
-            else:
-                term_hints = diag.get("term_hints")
-                if isinstance(term_hints, list) and term_hints:
-                    steps.append("Refine the next query using term_hints harvested from the document.")
-                steps.append("After a promising hit, open full pages via read.pages before concluding.")
         elif tool_name.startswith("graph."):
             steps.extend(
                 [
                     "Use graph results as derived guidance (entities/relations) to decide where to read in the document.",
-                    "Locate supporting pages via tree/search, then read.pages to ground the claim in source text.",
+                    "Locate supporting pages via toc.tree/tree.* (and locate if needed), then read.pages to ground the claim in source text.",
                 ]
             )
         elif tool_name == "read.pages":
             if bool(diag.get("truncated")):
                 steps.append("If truncated, narrow the page range or increase read.pages max_chars/max_chunks.")
-            steps.append("Use this page evidence for citations; do not cite search snippets.")
+            steps.append("Use this page evidence for citations; do not cite routing snippets.")
         elif tool_name == "web.search":
             steps.append("If web evidence is used, triangulate with file evidence via read.pages where possible.")
 
@@ -669,26 +612,26 @@ class ExploreTool(GraphTool):
             if reason == "invalid_file_id":
                 next_steps = (
                     "The provided file_id was invalid (placeholder/non-UUID). "
-                    "Next: use search.file results to pick a real file_id (UUID), then rerun explore with "
+                    "Next: use locate results to pick a real file_id (UUID), then rerun explore with "
                     "toc.tree/tree.root and finally read.pages for citeable evidence."
                 )
             elif reason == "invalid_file_id_sanitized":
                 next_steps = (
                     "The action args included an invalid file_id, but an inherited file_scope exists. "
-                    "Next: rely on the locked file_scope or re-run search.file to obtain a real file_id (UUID), "
+                    "Next: rely on the locked file_scope or re-run locate to obtain a real file_id (UUID), "
                     "then proceed with toc.tree/tree.root/tree.open + read.pages."
                 )
             elif reason == "file_routing_first":
                 next_steps = (
                     "File routing is required before running file-scoped tools. "
-                    "Next: pick a file_id from search.file results (UUID), then rerun explore with "
+                    "Next: pick a file_id from locate results (UUID), then rerun explore with "
                     "toc.tree/tree.root/tree.open + read.pages."
                 )
             else:
                 next_steps = "Follow the routing_gate guidance, then rerun explore with a real file_id (UUID) and read.pages."
             thinking = f"Routing gate enforced ({reason}). {next_steps}"
             overall_next_steps = [
-                "Run explore + search.file to obtain a real file_id (UUID).",
+                "Run explore + locate to obtain a real file_id (UUID).",
                 "Navigate to likely pages via toc.tree/tree.root/tree.open, then call read.pages.",
             ]
         else:

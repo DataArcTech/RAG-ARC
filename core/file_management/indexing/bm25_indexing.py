@@ -65,13 +65,11 @@ class BM25Indexer(BaseIndexer):
 
             logger.info(f"Flushing {len(chunks_to_index)} chunks to BM25 index")
 
-            # Perform the actual indexing in a thread pool
-            loop = asyncio.get_running_loop()
-            chunk_ids = await loop.run_in_executor(
-                None,
-                self._build_or_update_index_sync,
-                chunks_to_index
-            )
+            # Perform the actual indexing in a shared thread pool.
+            # Avoid `loop.run_in_executor` here (can hang in constrained runtimes).
+            from core.utils.thread_pool import run_blocking
+
+            chunk_ids = await run_blocking(self._build_or_update_index_sync, chunks_to_index)
 
             logger.info(f"Successfully flushed {len(chunk_ids)} chunks")
             return chunk_ids

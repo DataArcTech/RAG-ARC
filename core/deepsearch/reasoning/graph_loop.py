@@ -286,13 +286,13 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                                 "step_id": f"{think_step_id}_final_gate",
                                 "failure_reason": "missing_primary_page_evidence",
                                 "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Finalization requires citeable page evidence: call read.pages at least once.",
-                                    "Use explore + search.file to obtain a real file_id (UUID) if not already known.",
-                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages, then read.pages.",
-                                ],
-                            }
-                        ]
+                                    "suggested_next_steps": [
+                                        "Finalization requires citeable page evidence: call read.pages at least once.",
+                                        "Use explore + locate to obtain a real file_id (UUID) if not already known.",
+                                        "Use toc.tree / tree.root / tree.open / section.select to locate likely pages, then read.pages.",
+                                    ],
+                                }
+                            ]
                         await emit_trace(
                             "think",
                             "Finalization requested but evidence gate unmet (missing read.pages). Continuing think loop.",
@@ -331,8 +331,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                                 "failure_reason": "missing_primary_page_evidence",
                                 "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
                                 "suggested_next_steps": [
-                                    "Use explore + search.file to obtain a real file_id (UUID).",
-                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages.",
+                                    "Use explore + locate to obtain a real file_id (UUID).",
+                                    "Use toc.tree / tree.root / tree.open / section.select to locate likely pages.",
                                     "Call read.pages on those pages (at least once) before stopping.",
                                 ],
                             }

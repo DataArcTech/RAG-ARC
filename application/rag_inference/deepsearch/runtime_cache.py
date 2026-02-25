@@ -51,10 +51,10 @@ class CachedInitialThink:
     report_style: str
     is_computable: bool
     question_kind: str
-    decomposition: dict[str, Any] | None
     raw: dict[str, Any]
     plan_items: list[dict[str, Any]]
     think_notes_payloads: list[dict[str, Any]]
+    query_spec: dict[str, Any] | None = None
 
 
 class DeepSearchInitialThinkCache:

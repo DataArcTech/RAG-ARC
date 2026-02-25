@@ -26,7 +26,7 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
             "attribute": "What to find/verify (e.g., definition, conditions, scope, rules).",
         },
         "plan_items": [
-            "Route to the most relevant file for: {topic}. Start with search.file using the full user question.",
+            "Route to the most relevant file for: {topic}. Start with locate using the full user question.",
             "Within the selected file, navigate sections via toc.tree / tree.* and prefer section.select to shortlist relevant sections.",
             "Read full evidence with read.pages for the best-matching section(s); expand to adjacent pages if a table spans pages.",
             "Answer ONLY using evidence from read.pages and/or graph triples; if evidence is insufficient, read more pages or ask a clarification question.",
@@ -34,8 +34,8 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         "initial_tool_calls": [
             {
                 "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "search.file", "args": {"query": "{question}", "top_k": 6}}]},
-                "rationale": "Route to the most relevant file(s) first (search.file via explore).",
+                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 6}}]},
+                "rationale": "Route to the most relevant file(s) first (locate via explore).",
                 "parallelizable": False,
             }
         ],
@@ -54,15 +54,15 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         },
         "plan_items": [
             "Extract comparison targets: {targets}; axis: {axis}.",
-            "Use search.file to locate candidate files for each target; start with the single best file first unless the user explicitly asks cross-file comparison.",
+            "Use locate to locate candidate files for each target; start with the single best file first unless the user explicitly asks cross-file comparison.",
             "Use toc.tree / section.select to locate pages covering {axis} for each target, then read full pages via read.pages.",
             "Synthesize a comparison table; cite only from read.pages/graph triples and call out any missing evidence explicitly.",
         ],
         "initial_tool_calls": [
             {
                 "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "search.file", "args": {"query": "{question}", "top_k": 8}}]},
-                "rationale": "Locate candidate file(s) for the comparison (search.file via explore).",
+                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 8}}]},
+                "rationale": "Locate candidate file(s) for the comparison (locate via explore).",
                 "parallelizable": False,
             }
         ],
@@ -81,15 +81,15 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         },
         "plan_items": [
             "Restate the metric to locate: {metric}. Constraints/context: {context}.",
-            "Route to the right file via search.file; then use section.select to find the table/section most likely containing {metric}.",
+            "Route to the right file via locate; then use section.select to find the table/section most likely containing {metric}.",
             "Read full pages with read.pages and expand to continuous adjacent pages until the whole table + footnotes are covered.",
             "Extract the numeric values carefully; if ambiguous, quote the relevant rows/notes and explain the interpretation boundaries.",
         ],
         "initial_tool_calls": [
             {
                 "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "search.file", "args": {"query": "{question}", "top_k": 6}}]},
-                "rationale": "Find the file likely containing the target table/value (search.file via explore).",
+                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 6}}]},
+                "rationale": "Find the file likely containing the target table/value (locate via explore).",
                 "parallelizable": False,
             }
         ],

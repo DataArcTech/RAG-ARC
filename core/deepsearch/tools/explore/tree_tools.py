@@ -111,7 +111,7 @@ class TreeRootTool(GraphTool):
         if not file_id:
             reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
             return ToolResult(
-                summary="tree.root skipped: invalid/missing file_id (expected UUID; use search.file).",
+                summary="tree.root skipped: invalid/missing file_id (expected UUID; use locate).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
             )
 
@@ -302,7 +302,7 @@ class TreeChildrenTool(GraphTool):
             if not file_id:
                 reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
                 return ToolResult(
-                    summary="tree.children skipped: missing/invalid file_id (expected UUID; use search.file).",
+                    summary="tree.children skipped: missing/invalid file_id (expected UUID; use locate).",
                     diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
                 )
             nodes, diagnostics = await fetch_tree_nodes_for_section(
