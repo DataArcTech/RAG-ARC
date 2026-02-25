@@ -310,35 +310,54 @@ class ChatTaskRegistry:
                             pass
 
 
-# 全局注册表实例
-_chat_task_registry: Optional[ChatTaskRegistry] = None
+# Global registry instances.
+#
+# NOTE:
+# `asyncio.Lock` is event-loop bound. Pytest (and some embedded runtimes) may create
+# a new event loop per test/request. If we reuse one global ChatTaskRegistry across
+# loops, acquiring its locks can hang indefinitely. Keep one registry per running
+# loop to guarantee lock affinity.
+_chat_task_registry_by_loop: dict[int, ChatTaskRegistry] = {}
+_chat_task_registry_fallback: Optional[ChatTaskRegistry] = None
+
+
+def _build_registry() -> ChatTaskRegistry:
+    ttl = int(os.getenv("CHAT_TASK_TTL_SECONDS", "3600"))
+    use_redis_events = os.getenv("CHAT_TASK_USE_REDIS_EVENTS", "false").lower() == "true"
+
+    redis_client = None
+    if use_redis_events:
+        try:
+            from app_registration import registry
+            from core.user_management.chat_message import ChatMessageStorage
+
+            message_storage = registry.get_object("chat_message")
+            if isinstance(message_storage, ChatMessageStorage) and message_storage.cache_store:
+                redis_client = message_storage.cache_store
+                logger.info("ChatTaskRegistry initialized with Redis event storage (TTL=%d seconds)", ttl)
+            else:
+                logger.warning("CHAT_TASK_USE_REDIS_EVENTS=true but Redis not configured")
+                use_redis_events = False
+        except Exception as e:
+            logger.warning("Failed to get Redis client: %s", e)
+            use_redis_events = False
+
+    return ChatTaskRegistry(ttl_seconds=ttl, redis_client=redis_client, use_redis_events=use_redis_events)
+
 
 def get_chat_task_registry() -> ChatTaskRegistry:
     """Get global chat task registry with Redis support."""
-    global _chat_task_registry
-    if _chat_task_registry is None:
-        ttl = int(os.getenv("CHAT_TASK_TTL_SECONDS", "3600"))
-        use_redis_events = os.getenv("CHAT_TASK_USE_REDIS_EVENTS", "false").lower() == "true"
-        
-        redis_client = None
-        if use_redis_events:
-            try:
-                from app_registration import registry
-                from core.user_management.chat_message import ChatMessageStorage
-                message_storage = registry.get_object("chat_message")
-                if isinstance(message_storage, ChatMessageStorage) and message_storage.cache_store:
-                    redis_client = message_storage.cache_store
-                    logger.info("ChatTaskRegistry initialized with Redis event storage (TTL=%d seconds)", ttl)
-                else:
-                    logger.warning("CHAT_TASK_USE_REDIS_EVENTS=true but Redis not configured")
-                    use_redis_events = False
-            except Exception as e:
-                logger.warning("Failed to get Redis client: %s", e)
-                use_redis_events = False
-        
-        _chat_task_registry = ChatTaskRegistry(
-            ttl_seconds=ttl,
-            redis_client=redis_client,
-            use_redis_events=use_redis_events
-        )
-    return _chat_task_registry
+    global _chat_task_registry_fallback
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _chat_task_registry_fallback is None:
+            _chat_task_registry_fallback = _build_registry()
+        return _chat_task_registry_fallback
+
+    key = id(loop)
+    registry = _chat_task_registry_by_loop.get(key)
+    if registry is None:
+        registry = _build_registry()
+        _chat_task_registry_by_loop[key] = registry
+    return registry

@@ -73,6 +73,7 @@ from api.routers.knowledge_utils import (
     normalize_file_id,
     use_celery,
 )
+from config.api.knowledge_upload_policy import ALLOWED_UPLOAD_EXTENSIONS, MAX_UPLOAD_BYTES
 from core.presentation.evidence import document_download_url
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,23 @@ def get_account_handler() -> Account:
 def get_knowledge_handler() -> Knowledge:
     """Lazy loading function to get knowledge handler after initialization."""
     return registrator.get_object("knowledge")
+
+
+def _validate_upload_extension(filename: str | None) -> None:
+    file_ext = Path(filename).suffix.lower() if filename else ""
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的文件类型。支持的文件类型: {', '.join(sorted(ALLOWED_UPLOAD_EXTENSIONS))}",
+        )
+
+
+def _validate_upload_size(size_bytes: int) -> None:
+    if int(size_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该文件超过10MB，请检查后重新上传！",
+        )
 @router.post(
     "",
     status_code=status.HTTP_200_OK,
@@ -122,22 +140,11 @@ async def upload_file(
         )
     
     # Validate file type
-    allowed_extensions = {'.docx', '.xlsx', '.pptx', '.pdf', '.jpg', '.jpeg', '.png', '.txt', '.html', '.md'}
-    file_ext = Path(file.filename).suffix.lower() if file.filename else ''
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"不支持的文件类型。支持的文件类型: {', '.join(sorted(allowed_extensions))}"
-        )
+    _validate_upload_extension(file.filename)
     
     # Validate file size (10MB limit)
-    max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
-    if len(file_content) > max_size:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="该文件超过10MB，请检查后重新上传！"
-        )
+    _validate_upload_size(len(file_content))
     
     # Reset file pointer for actual upload
     await file.seek(0)
@@ -407,7 +414,7 @@ async def get_chunk(
     filename = None
     if file_id:
         try:
-            meta = await asyncio.to_thread(get_knowledge_handler().file_storage.get_file_metadata, file_id)
+            meta = await get_thread_pool().run_blocking(get_knowledge_handler().file_storage.get_file_metadata, file_id)
             filename = getattr(meta, "filename", None) if meta is not None else None
         except Exception:  # noqa: BLE001
             filename = None

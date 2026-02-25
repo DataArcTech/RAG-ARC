@@ -43,8 +43,50 @@ _registrator = Register()
 
 _conversation_locks: Dict[str, asyncio.Lock] = {}
 _conversation_last_used: Dict[str, float] = {}
-_locks_guard = asyncio.Lock()
-_global_semaphore = asyncio.Semaphore(int(os.getenv("CHATBOT_MAX_CONCURRENCY", "8")))
+_locks_guard: asyncio.Lock | None = None
+_locks_guard_loop: asyncio.AbstractEventLoop | None = None
+_global_semaphore: asyncio.Semaphore | None = None
+_global_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _resolve_chatbot_max_concurrency() -> int:
+    raw = str(os.getenv("CHATBOT_MAX_CONCURRENCY", "8") or "").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 8
+    return max(1, value)
+
+
+def _ensure_loop_bound_lock(
+    lock: asyncio.Lock | None,
+    *,
+    loop: asyncio.AbstractEventLoop,
+    current_loop: asyncio.AbstractEventLoop | None,
+) -> tuple[asyncio.Lock, asyncio.AbstractEventLoop]:
+    if lock is None or current_loop is not loop:
+        return asyncio.Lock(), loop
+    return lock, current_loop
+
+
+async def _get_locks_guard() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    global _locks_guard, _locks_guard_loop
+    _locks_guard, _locks_guard_loop = _ensure_loop_bound_lock(
+        _locks_guard,
+        loop=loop,
+        current_loop=_locks_guard_loop,
+    )
+    return _locks_guard
+
+
+async def _get_global_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    global _global_semaphore, _global_semaphore_loop
+    if _global_semaphore is None or _global_semaphore_loop is not loop:
+        _global_semaphore = asyncio.Semaphore(_resolve_chatbot_max_concurrency())
+        _global_semaphore_loop = loop
+    return _global_semaphore
 
 
 class ChatbotBootstrapCapabilities(BaseModel):
@@ -175,7 +217,8 @@ def _reset_chatbot_modules_for_tests() -> None:
 
 async def _get_conversation_lock(conversation_id: str) -> asyncio.Lock:
     now = time.time()
-    async with _locks_guard:
+    guard = await _get_locks_guard()
+    async with guard:
         lock = _conversation_locks.get(conversation_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -898,6 +941,7 @@ async def messages(
     async def _event_stream():
         acquired_lock = False
         acquired_global = False
+        semaphore: asyncio.Semaphore | None = None
         stop_event = threading.Event()
         queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         parts: List[str] = []
@@ -933,7 +977,8 @@ async def messages(
                 return
 
             try:
-                await asyncio.wait_for(_global_semaphore.acquire(), timeout=semaphore_timeout_s)
+                semaphore = await _get_global_semaphore()
+                await asyncio.wait_for(semaphore.acquire(), timeout=semaphore_timeout_s)
                 acquired_global = True
             except TimeoutError:
                 logger.warning(
@@ -1152,8 +1197,8 @@ async def messages(
             )
         finally:
             stop_event.set()
-            if acquired_global:
-                _global_semaphore.release()
+            if acquired_global and semaphore is not None:
+                semaphore.release()
             if acquired_lock:
                 lock.release()
 
