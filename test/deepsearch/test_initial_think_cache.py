@@ -30,7 +30,7 @@ class _DummyToolManager:
                 coverage_delta=None,
                 next_actions=[
                     "explore -> locate",
-                    "toc.tree / section.select",
+                    "toc.tree / locate(file=X)",
                     "read.pages",
                 ],
                 metadata={
