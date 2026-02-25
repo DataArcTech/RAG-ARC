@@ -1,7 +1,7 @@
 """Prompt templates for PageIndex section summaries.
 
 PageIndex focuses on long-document navigation (section tree + section summaries). DeepSearch handles
-relevant-file routing online via `search.file`.
+relevant-file routing online via `locate`.
 """
 
 SECTION_SUMMARY_SYSTEM_PROMPT = (
