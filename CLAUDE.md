@@ -278,8 +278,8 @@ Based on HippoRAG2 with enhancements:
 DeepSearch uses PageIndex for efficient navigation of long documents:
 
 1. **Document-level routing**: `locate` aggregates relevant files
-2. **Section-level routing**: `toc.tree` / `section.select` for ToC navigation
-3. **Page-level reading**: `read.pages` for full context
+2. **Structure navigation**: `toc.tree` for headings + page ranges
+3. **Page-level reading**: `read.pages` for full context (citeable evidence)
 
 Controlled via `.env`:
 - `PAGEINDEX_ENABLED=true`
@@ -296,11 +296,11 @@ Graph-first reasoning system with think→explore→report loop:
 - **Report**: Synthesize findings
 
 **Tools**:
-- `locate`: Document-level routing
-- `toc.tree` / `section.select`: Section navigation
-- `read.pages`: Full page reading
+- `locate`: File routing; with `file=<file_id>` it returns page-level candidates
+- `toc.tree`: Table-of-contents navigation
+- `read.pages`: Full page reading (primary citeable evidence)
 - `web.search`: Real-time web search (Tavily)
-- `code.python`: Deterministic math/finance verification
+- `code.python`: Deterministic math/finance verification (required when `query_spec.is_computable=true`)
 
 **Configuration**:
 - `config/json_configs/deepsearch_service.json`

@@ -418,9 +418,11 @@ DeepSearch is optimized for long documents (manuals, standards, policies, contra
 the think→explore loop will first narrow down the right file, then the right section, then read the full block before answering.
 
 Key navigation tools (internal to DeepSearch explore):
-- `locate`: doc-level routing (evidence-driven relevant-file aggregation)
-- `toc.tree` / `section.select`: section-level routing and selection (ToC + hybrid tree search)
-- `read.pages`: read full context around the target pages
+- `locate`: file routing; with `file=<file_id>` it returns page-level candidates within that file
+- `toc.tree`: table-of-contents navigation (headings + page ranges)
+- `read.pages`: read full context around the target pages (the only citeable evidence source)
+
+For computable questions (`query_spec.is_computable=true`), DeepSearch requires a deterministic `code.python` run before stopping.
 
 If PageIndex is disabled or section/page metadata is missing, DeepSearch still uses `locate` + tree navigation and explicitly
 reports limitations in diagnostics.
