@@ -70,12 +70,16 @@ def _configure_logging() -> None:
 
     handler = next((h for h in root.handlers if isinstance(h, IOManagerDailySizeRotatingHandler)), None)
     if handler is None:
+        # flush_bytes=1 表示每条日志立即落盘，便于按 request_id 实时查看
+        flush_kb = int(os.getenv("RAGARC_LOG_FLUSH_KB", "0") or "0")
+        flush_bytes_val = (flush_kb * 1024) if flush_kb > 0 else 1
         handler = IOManagerDailySizeRotatingHandler(
             io_manager=io_manager,
             base_dir=log_dir_virtual,
             maxBytes=10 * 1024 * 1024,
             backupCount=30,
             encoding="utf-8",
+            flush_bytes=flush_bytes_val,
         )
         root.addHandler(handler)
 
