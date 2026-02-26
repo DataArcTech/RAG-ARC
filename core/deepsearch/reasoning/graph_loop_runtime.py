@@ -16,9 +16,7 @@ from core.deepsearch.memory.plan_state import update_plan_from_think_notes
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
 from core.deepsearch.tooling.run_tool_memo import MemoEntry
-from core.deepsearch.tooling.file_scope_policy import is_global_action_tool
 from core.deepsearch.utils.ids import coerce_uuid_list
-from config.core.deepsearch import tool_defaults
 
 from .graph_loop_state import _RUN_THINK_COUNT, _run_plan_state
 from .graph_loop_state import _RUN_TOOL_MEMO
@@ -46,26 +44,6 @@ class GraphLoopRuntimeMixin:
                 raw.extend(list(val))
             else:
                 raw.append(val)
-
-        # explore(...) nests file ids inside action lists.
-        if str(tool_name or "").strip() == "explore":
-            actions = tool_args.get("actions")
-            if isinstance(actions, list):
-                for action in actions:
-                    if not isinstance(action, dict):
-                        continue
-                    action_tool = str(action.get("tool") or "").strip()
-                    if not action_tool or is_global_action_tool(action_tool):
-                        continue
-                    action_args = action.get("args") if isinstance(action.get("args"), dict) else {}
-                    for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
-                        val = action_args.get(key)
-                        if val is None:
-                            continue
-                        if isinstance(val, (list, tuple, set, frozenset)):
-                            raw.extend(list(val))
-                        else:
-                            raw.append(val)
 
         valid, _invalid = coerce_uuid_list(raw)
         return list(valid)
@@ -104,22 +82,6 @@ class GraphLoopRuntimeMixin:
                 return list(valid)
             return []
 
-        if name == "explore" and isinstance(diag, dict):
-            actions = diag.get("actions")
-            if not isinstance(actions, list):
-                return []
-            collected: list[Any] = []
-            for action in actions:
-                if not isinstance(action, dict):
-                    continue
-                if str(action.get("tool") or "").strip() != "locate":
-                    continue
-                if str(action.get("status") or "").strip() != "ok":
-                    continue
-                action_diag = action.get("diagnostics")
-                collected.extend(cls._extract_file_ids_from_locate_diagnostics(action_diag))
-            valid, _invalid = coerce_uuid_list(collected)
-            return list(valid)
         return []
 
     async def _maybe_lock_in_file_scope(
@@ -350,13 +312,6 @@ class GraphLoopRuntimeMixin:
                     return record
 
             async with semaphore:
-                if tool_name == "logic.check":
-                    plan_state = _run_plan_state()
-                    tool_args = dict(tool_args)
-                    tool_args["runtime_snapshot"] = self._build_logic_check_snapshot(
-                        tool_runs=tool_runs,
-                        plan_state=plan_state,
-                    )
                 payload = self._build_tool_payload(
                     plan_step_id=plan_step_id,
                     question=question,
@@ -541,67 +496,6 @@ class GraphLoopRuntimeMixin:
                 }
             )
         return summaries
-
-    def _build_logic_check_snapshot(
-        self,
-        *,
-        tool_runs: Sequence[Dict[str, Any]],
-        plan_state: Any,
-    ) -> Dict[str, Any]:
-        max_items = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX)
-        # External-memory policy: do not truncate tool summaries. If prompt size becomes an issue,
-        # reduce the number of recent runs rather than slicing strings.
-        recent = self._summarize_recent_tool_runs(tool_runs, max_items=max_items)
-        evidence_ids = self._collect_evidence_ids_from_runs(
-            tool_runs,
-            limit=int(tool_defaults.LOGIC_CHECK_EVIDENCE_ID_MAX),
-        )
-        tool_names = self._collect_tool_names_from_runs(tool_runs)
-        return {
-            "plan": list(getattr(plan_state, "items", []) or []),
-            "recent_tool_runs": recent,
-            "tool_names": sorted(tool_names),
-            "evidence_ids": evidence_ids,
-            "tool_run_count": len(tool_runs),
-        }
-
-    @staticmethod
-    def _collect_tool_names_from_runs(tool_runs: Sequence[Dict[str, Any]]) -> Set[str]:
-        names: Set[str] = set()
-        for run in tool_runs:
-            if not isinstance(run, dict):
-                continue
-            name = str(run.get("tool_name") or "").strip()
-            if name:
-                names.add(name)
-        return names
-
-    @staticmethod
-    def _collect_evidence_ids_from_runs(
-        tool_runs: Sequence[Dict[str, Any]],
-        *,
-        limit: int,
-    ) -> List[str]:
-        collected: List[str] = []
-        seen: Set[str] = set()
-        for run in tool_runs:
-            if not isinstance(run, dict):
-                continue
-            result = run.get("result") if isinstance(run.get("result"), dict) else None
-            evidences = result.get("evidences") if isinstance(result, dict) else None
-            if not isinstance(evidences, list):
-                continue
-            for item in evidences:
-                if not isinstance(item, dict):
-                    continue
-                chunk_id = str(item.get("chunk_id") or "").strip()
-                if not chunk_id or chunk_id in seen:
-                    continue
-                seen.add(chunk_id)
-                collected.append(chunk_id)
-                if len(collected) >= max(0, limit):
-                    return collected
-        return collected
 
 
 def _prioritize_tool_catalog(

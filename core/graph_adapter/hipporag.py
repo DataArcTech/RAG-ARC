@@ -792,7 +792,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if isinstance(subgraph_info, dict) and scope_token:
             subgraph_info.setdefault("owner_scope", scope_token)
         # Exporting the full subgraph (nodes/edges) can be expensive on Neo4j. Default to disabled unless explicitly
-        # requested by callers that need visualization/triple context (e.g. explore/graph.ops workflows).
+        # requested by callers that need visualization/triple context.
         export_subgraph = False
         if isinstance(query_options, Mapping) and "export_subgraph" in query_options:
             export_subgraph = bool(query_options.get("export_subgraph"))

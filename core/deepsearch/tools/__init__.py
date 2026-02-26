@@ -3,20 +3,11 @@ from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
 from .explore import (
-    ExploreTool,
-    GraphOpsTool,
     LocateTool,
     TocTreeTool,
-    TreeRootTool,
-    TreeChildrenTool,
-    TreeNodeTool,
-    TreeOpenTool,
     ReadPagesTool,
     WebSearchTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 )
-from .check import LogicCheckTool
 from .think import ThinkTool
 from .code import CodePythonTool
 
@@ -25,19 +16,10 @@ __all__ = [
     "ToolDescriptor",
     "ToolResult",
     "ToolRunRequest",
-    "ExploreTool",
-    "GraphOpsTool",
     "LocateTool",
     "TocTreeTool",
-    "TreeRootTool",
-    "TreeChildrenTool",
-    "TreeNodeTool",
-    "TreeOpenTool",
     "ReadPagesTool",
     "ThinkTool",
-    "LogicCheckTool",
-    "BeamSearchTool",
-    "LLMChainExplorerTool",
     "CodePythonTool",
     "WebSearchTool",
     "build_builtin_tools",
@@ -48,37 +30,24 @@ __all__ = [
 ]
 
 _BUILTIN_CLASSES = [
-    GraphOpsTool,
-    ExploreTool,
     LocateTool,
     TocTreeTool,
-    TreeRootTool,
-    TreeChildrenTool,
-    TreeNodeTool,
-    TreeOpenTool,
     ReadPagesTool,
-    LogicCheckTool,
     ThinkTool,
     CodePythonTool,
     WebSearchTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
     ThinkTool,
-    LogicCheckTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 }
 _LLM_OPTIONAL = {
-    ExploreTool,
     LocateTool,
 }
 
 
-def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, GraphTool]:
+def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, GraphTool]:
     overrides = overrides or {}
     tools: Dict[str, GraphTool] = {}
     for cls in _BUILTIN_CLASSES:

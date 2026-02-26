@@ -75,7 +75,10 @@
       "tool_call_concurrency": 2,
       "tool_catalog_max_items": 12,
       "tool_catalog_allowlist": [
-        "explore",
+        "locate",
+        "toc.tree",
+        "read.pages",
+        "web.search",
         "code.python"
       ],
       "include_llm_tools": true,

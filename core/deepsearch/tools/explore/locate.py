@@ -584,7 +584,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             preview_rows.append(preview)
 
         next_steps = (
-            "Pick the best file_id from answer[0], then use toc.tree/tree.root + tree.children/tree.open "
+            "Pick the best file_id from answer[0], then use toc.tree "
             "to locate relevant pages, and finally use read.pages for citeable evidence."
         )
 

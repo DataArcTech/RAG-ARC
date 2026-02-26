@@ -14,13 +14,9 @@ from typing import Iterable, Mapping, Set
 from core.graph_adapter.base import GraphAdapterMetadata
 
 
-_CYPHER_REQUIRED_TOOLS: Set[str] = {
-    "graph.ops",
-}
+_CYPHER_REQUIRED_TOOLS: Set[str] = set()
 
-_CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {
-    "graph.beam_search": "beam_search",
-}
+_CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {}
 
 
 def cypher_required_tool_names() -> set[str]:

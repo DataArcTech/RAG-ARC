@@ -533,8 +533,8 @@ class ThinkTool(GraphTool):
         """Normalize common function-call style tool schemas into ThinkToolCall schema.
 
         Some models emit tool calls in OpenAI/Anthropic-style "function" formats such as:
-        - {"function": "explore", "arguments": {...}}
-        - {"type": "function", "function": {"name": "explore", "arguments": "{...json...}"}}
+        - {"function": "locate", "arguments": {...}}
+        - {"type": "function", "function": {"name": "locate", "arguments": "{...json...}"}}
         We normalize these into {"tool_name","tool_args","rationale","parallelizable"} and drop irrecoverable entries.
         """
 

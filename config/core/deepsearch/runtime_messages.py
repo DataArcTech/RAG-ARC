@@ -13,15 +13,18 @@ COMPUTABLE_HARD_GATE_MESSAGE: Final[str] = (
     "This question looks computable (numbers/dates/thresholds), but the run produced no deterministic tool evidence. "
     "To avoid returning an unverifiable numeric/time answer, execution was stopped. "
     "Enable deterministic routing (probe/lead tools) or refine the query with explicit entities/predicates so "
-    "deterministic tools like graph.ops templates (latest_truth / aggregate) can be applied."
+    "deterministic tools like code.python can be applied."
 )
 
 MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE: Final[str] = (
     "DeepSearch report generation requires at least one successful read.pages call (full-page evidence). "
     "This run produced no citeable page evidence. "
-    "Next step: use explore to route to the right file (locate), then navigate (toc.tree / tree.* / locate with file), "
-    "and/or graph tools (graph.ops / graph.beam_search / graph.llm_chain_explorer), "
-    "and finally read the relevant pages via read.pages. "
-    "Search snippets are navigation-only and cannot be used as evidence. "
-    "After extracting numbers/terms from read.pages, you may use code.python for deterministic verification."
+    "Next step: use locate to route to the right file_id, then (optionally) toc.tree to understand structure, "
+    "then locate(file=X, focus_query=...) for page candidates, and finally read the relevant pages via read.pages. "
+    "Search snippets are navigation-only and cannot be used as evidence."
+)
+
+MISSING_COMPUTE_EVIDENCE_GATE_MESSAGE: Final[str] = (
+    "This question requires deterministic computation (is_computable=true). "
+    "You must call code.python with the formula before stopping."
 )

@@ -16,7 +16,8 @@ TRACE_REFLECTION_DEFAULT_TEMPERATURE = 0.2
 # are the default navigation backbone. If these hints are truncated away, models tend to fall back
 # to snippet-only guessing.
 THINK_TOOL_CATALOG_ALWAYS_INCLUDE: tuple[str, ...] = (
-    "explore",
+    "locate",
+    "read.pages",
     "code.python",
 )
 
@@ -27,6 +28,10 @@ THINK_RECENT_TOOL_RUNS_MAX = 3
 # we require at least one successful `read.pages` evidence. This keeps the report grounded
 # in full-page context instead of snippet-only navigation.
 REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE = 1
+
+# Hard gate for computable questions: when query_spec.is_computable=true, require at least one
+# successful deterministic computation evidence (e.g., `code.python`) before stopping.
+REPORT_HARD_GATE_MIN_COMPUTE_EVIDENCE = 1
 
 # When the reasoning loop exits without satisfying the report hard gate, the service runtime
 # may re-enter the reasoning stage with an explicit gate-failure note so the LLM can retry.

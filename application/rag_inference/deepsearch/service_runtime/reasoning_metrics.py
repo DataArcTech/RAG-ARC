@@ -84,43 +84,12 @@ def summarize_reasoning_trace(trace: Mapping[str, Any]) -> Dict[str, Any]:
     cache_misses_by_tool: Dict[str, int] = {}
     cache_hits_total = 0
     cache_misses_total = 0
-    explore_actions_total = 0
-    explore_actions_by_tool: Dict[str, int] = {}
-    explore_cache_hits_total = 0
-    explore_cache_misses_total = 0
-    explore_cache_hits_by_tool: Dict[str, int] = {}
-    explore_cache_misses_by_tool: Dict[str, int] = {}
     for entry in tool_results:
         tool_name = str(entry.get("tool_name") or "").strip() or str(entry.get("tool") or "").strip() or "unknown"
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         if not isinstance(diagnostics, dict):
             continue
-
-        # Explore aggregates multiple nested tool calls; count them separately so we can
-        # observe toc/tree cache hits even when the model only calls `explore`.
-        if tool_name == "explore":
-            actions = diagnostics.get("actions")
-            if isinstance(actions, list):
-                for action in actions:
-                    if not isinstance(action, dict):
-                        continue
-                    act_tool = str(action.get("tool") or "").strip() or "unknown"
-                    explore_actions_total += 1
-                    explore_actions_by_tool[act_tool] = explore_actions_by_tool.get(act_tool, 0) + 1
-                    act_diag = action.get("diagnostics")
-                    if not isinstance(act_diag, dict):
-                        continue
-                    act_cache = act_diag.get("cache")
-                    if not isinstance(act_cache, dict):
-                        continue
-                    act_hit = act_cache.get("hit")
-                    if act_hit is True:
-                        explore_cache_hits_total += 1
-                        explore_cache_hits_by_tool[act_tool] = explore_cache_hits_by_tool.get(act_tool, 0) + 1
-                    elif act_hit is False:
-                        explore_cache_misses_total += 1
-                        explore_cache_misses_by_tool[act_tool] = explore_cache_misses_by_tool.get(act_tool, 0) + 1
 
         cache = diagnostics.get("cache")
         if isinstance(cache, dict):
@@ -151,12 +120,6 @@ def summarize_reasoning_trace(trace: Mapping[str, Any]) -> Dict[str, Any]:
         "cache_misses_total": int(cache_misses_total),
         "cache_hits_by_tool": dict(sorted(cache_hits_by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
         "cache_misses_by_tool": dict(sorted(cache_misses_by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "explore_actions_total": int(explore_actions_total),
-        "explore_actions_by_tool": dict(sorted(explore_actions_by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "explore_cache_hits_total": int(explore_cache_hits_total),
-        "explore_cache_misses_total": int(explore_cache_misses_total),
-        "explore_cache_hits_by_tool": dict(sorted(explore_cache_hits_by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "explore_cache_misses_by_tool": dict(sorted(explore_cache_misses_by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
         "tool_memoization": memo_stats,
         "primary_page_evidence_items": int(page_evidence_items),
     }

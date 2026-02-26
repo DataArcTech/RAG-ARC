@@ -225,66 +225,52 @@ class DeepSearchServiceRunMixin:
 
             # 2) Within-file navigation: toc.tree + locate(file=X).
             #
-            # Note: toc.tree / locate are implemented as explore sub-tools and
-            # are not registered as top-level tools in the tool manager. Invoke via explore to
-            # keep bootstrap compatible with local-only (no MCP) deployments.
+            # Call tools directly (no explore wrapper).
+            toc_result = None
+            page_locate_result = None
             try:
-                explore = await self._invoke_tool_for_bootstrap(
-                    tool_name="explore",
+                import asyncio as _aio
+
+                toc_coro = self._invoke_tool_for_bootstrap(
+                    tool_name="toc.tree",
                     question=question,
                     scope=scope,
                     reasoning_context=reasoning_context,
                     extra={
-                        "max_concurrency": 2,
-                        "actions": [
-                            {
-                                "id": "toc",
-                                "tool": "toc.tree",
-                                "args": {
-                                    "file_id": file_id,
-                                    "max_depth": max(1, int(cfg["toc_max_depth"])),
-                                    "max_nodes": max(1, int(cfg["toc_max_nodes"])),
-                                },
-                            },
-                            {
-                                "id": "page_locate",
-                                "tool": "locate",
-                                "args": {"file": file_id, "top_k": max(1, int(cfg["section_top_k"]))},
-                            },
-                        ],
+                        "file_id": file_id,
+                        "max_depth": max(1, int(cfg["toc_max_depth"])),
+                        "max_nodes": max(1, int(cfg["toc_max_nodes"])),
                     },
-                    plan_step=f"nav_bootstrap.explore_nav.{file_id}",
+                    plan_step=f"nav_bootstrap.toc_tree.{file_id}",
                 )
+                loc_coro = self._invoke_tool_for_bootstrap(
+                    tool_name="locate",
+                    question=question,
+                    scope=scope,
+                    reasoning_context=reasoning_context,
+                    extra={"file": file_id, "top_k": max(1, int(cfg["section_top_k"]))},
+                    plan_step=f"nav_bootstrap.page_locate.{file_id}",
+                )
+                toc_result, page_locate_result = await _aio.gather(toc_coro, loc_coro, return_exceptions=True)
             except Exception as exc:  # noqa: BLE001
                 toc_summaries[file_id] = f"toc.tree failed: {exc}"
                 section_results[file_id] = {"error": str(exc)}
                 continue
 
-            explore_diag = getattr(explore, "diagnostics", None)
-            actions = explore_diag.get("actions") if isinstance(explore_diag, dict) else None
-            toc_action = None
-            page_locate_action = None
-            if isinstance(actions, list):
-                for item in actions:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("id") == "toc" or item.get("tool") == "toc.tree":
-                        toc_action = item
-                    if item.get("id") == "page_locate" or item.get("tool") == "locate":
-                        page_locate_action = item
-
-            if isinstance(toc_action, dict) and toc_action.get("status") == "ok":
-                toc_summaries[file_id] = str(toc_action.get("summary") or "")
-            elif isinstance(toc_action, dict):
-                toc_summaries[file_id] = str(toc_action.get("error") or toc_action.get("summary") or "").strip() or "(toc.tree failed)"
+            # Process toc.tree result.
+            if isinstance(toc_result, Exception):
+                toc_summaries[file_id] = f"toc.tree failed: {toc_result}"
+            elif toc_result is not None:
+                toc_summaries[file_id] = str(getattr(toc_result, "summary", "") or "")
             else:
                 toc_summaries[file_id] = "(toc.tree missing)"
 
-            if isinstance(page_locate_action, dict) and page_locate_action.get("status") == "ok":
-                loc_diag = page_locate_action.get("diagnostics")
+            # Process locate(file) result.
+            if isinstance(page_locate_result, Exception):
+                section_results[file_id] = {"error": str(page_locate_result)}
+            elif page_locate_result is not None:
+                loc_diag = getattr(page_locate_result, "diagnostics", None)
                 section_results[file_id] = loc_diag if isinstance(loc_diag, dict) else {}
-            elif isinstance(page_locate_action, dict):
-                section_results[file_id] = {"error": str(page_locate_action.get("error") or page_locate_action.get("summary") or "").strip()}
             else:
                 section_results[file_id] = {"error": "locate(file) missing"}
 

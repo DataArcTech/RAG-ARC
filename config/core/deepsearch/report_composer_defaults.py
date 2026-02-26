@@ -31,12 +31,10 @@ DEFAULT_REPORT_EVIDENCE_DIVERSIFY_BY_FILE = True
 DEFAULT_REPORT_EVIDENCE_MAX_FILES = 3
 DEFAULT_REPORT_EVIDENCE_MIN_ITEMS_PER_FILE = 1
 
-TOOLISH_CHUNK_ID_PREFIXES: tuple[str, ...] = ("graph.", "tool:", "think")
+TOOLISH_CHUNK_ID_PREFIXES: tuple[str, ...] = ("tool:", "think")
 TOOLISH_SOURCE_NAMES: frozenset[str] = frozenset(
     {
-        "graph.beam_search",
         "think",
-        "graph.llm_chain_explorer",
     }
 )
 

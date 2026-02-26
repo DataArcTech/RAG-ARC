@@ -33,9 +33,9 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         ],
         "initial_tool_calls": [
             {
-                "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 6}}]},
-                "rationale": "Route to the most relevant file(s) first (locate via explore).",
+                "tool_name": "locate",
+                "tool_args": {"query": "{question}", "top_k": 6},
+                "rationale": "Route to the most relevant file(s) first.",
                 "parallelizable": False,
             }
         ],
@@ -60,9 +60,9 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         ],
         "initial_tool_calls": [
             {
-                "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 8}}]},
-                "rationale": "Locate candidate file(s) for the comparison (locate via explore).",
+                "tool_name": "locate",
+                "tool_args": {"query": "{question}", "top_k": 8},
+                "rationale": "Locate candidate file(s) for the comparison.",
                 "parallelizable": False,
             }
         ],
@@ -87,9 +87,9 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         ],
         "initial_tool_calls": [
             {
-                "tool_name": "explore",
-                "tool_args": {"actions": [{"tool": "locate", "args": {"query": "{question}", "top_k": 6}}]},
-                "rationale": "Find the file likely containing the target table/value (locate via explore).",
+                "tool_name": "locate",
+                "tool_args": {"query": "{question}", "top_k": 6},
+                "rationale": "Find the file likely containing the target table/value.",
                 "parallelizable": False,
             }
         ],
