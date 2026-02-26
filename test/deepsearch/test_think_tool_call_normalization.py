@@ -21,7 +21,7 @@ class _StubLLM:
 async def test_think_tool_normalizes_function_call_style_tool_calls_without_repair() -> None:
     payload = {
         "reasoning": "need to explore next",
-        "tool_calls": [{"function": "explore", "arguments": {"query": "section 5.2 table"}}],
+        "tool_calls": [{"function": "locate", "arguments": {"query": "section 5.2 table"}}],
         "plan": [{"text": "Locate section 5.2 table", "checked": False}],
     }
     llm = _StubLLM([json.dumps(payload)])
@@ -41,7 +41,7 @@ async def test_think_tool_normalizes_function_call_style_tool_calls_without_repa
     meta = result.think_notes[0].metadata
     calls = meta.get("tool_calls")
     assert isinstance(calls, list) and calls
-    assert calls[0]["tool_name"] == "explore"
+    assert calls[0]["tool_name"] == "locate"
     assert calls[0]["tool_args"] == {"query": "section 5.2 table"}
     assert isinstance(calls[0]["rationale"], str) and calls[0]["rationale"]
 

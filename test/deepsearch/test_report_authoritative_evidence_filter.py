@@ -5,9 +5,9 @@ from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_INFERE
 def test_report_filters_tool_generated_evidence_from_authoritative_bundle():
     evidences = [
         {
-            "chunk_id": "graph.llm_chain_explorer:plan_01:rollup:abc123",
-            "source": "graph.llm_chain_explorer",
-            "content": "LLM rollup output that should not be citable.",
+            "chunk_id": "web.search:plan_01:rollup:abc123",
+            "source": "web.search",
+            "content": "Web search output that should not be citable.",
         },
         {
             "chunk_id": "read.pages:1",
@@ -15,8 +15,8 @@ def test_report_filters_tool_generated_evidence_from_authoritative_bundle():
             "content": "Authoritative page evidence.",
         },
         {
-            "chunk_id": "graph.ops:plan_01:path:xyz",
-            "source": "graph.ops",
+            "chunk_id": "locate:plan_01:path:xyz",
+            "source": "locate",
             "content": "A->rel->B",
             "provenance": {"evidence_class": EVIDENCE_CLASS_GRAPH_INFERENCE},
         },
@@ -29,8 +29,8 @@ def test_report_filters_tool_generated_evidence_from_authoritative_bundle():
 
     authoritative, tool_generated = _split_authoritative_evidences(evidences)
 
-    assert [ev["chunk_id"] for ev in authoritative] == ["read.pages:1", "graph.ops:plan_01:path:xyz"]
+    assert [ev["chunk_id"] for ev in authoritative] == ["read.pages:1", "locate:plan_01:path:xyz"]
     assert {ev["chunk_id"] for ev in tool_generated} == {
-        "graph.llm_chain_explorer:plan_01:rollup:abc123",
+        "web.search:plan_01:rollup:abc123",
         "ext-1",
     }

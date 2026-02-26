@@ -36,15 +36,28 @@ class _StubToolManager:
                 diagnostics={},
                 think_notes=[note],
             )
-        if tool_name == "explore":
-            chunk = EvidenceChunk(chunk_id="e1", source="explore", content="evidence")
+        if tool_name == "locate":
+            chunk = EvidenceChunk(chunk_id="e1", source="locate", content="evidence")
             return ToolResultPayload(
-                tool_name="explore",
-                namespace="stub::explore",
+                tool_name="locate",
+                namespace="stub::locate",
                 channel="graph",
                 profile="X",
                 determinism="hybrid",
-                summary="explore ok",
+                summary="locate ok",
+                evidences=[chunk],
+                diagnostics={},
+                think_notes=[],
+            )
+        if tool_name == "read.pages":
+            chunk = EvidenceChunk(chunk_id="p1", source="read.pages", content="page 1")
+            return ToolResultPayload(
+                tool_name="read.pages",
+                namespace="stub::read_pages",
+                channel="graph",
+                profile="X",
+                determinism="hybrid",
+                summary="read.pages ok",
                 evidences=[chunk],
                 diagnostics={},
                 think_notes=[],
@@ -71,30 +84,20 @@ class _FileRoutingToolManager(_StubToolManager):
         self._routed_file_ids = list(routed_file_ids)
 
     async def invoke(self, tool_name: str, *, payload: dict) -> ToolResultPayload:
-        if tool_name != "explore":
+        if tool_name != "locate":
             return await super().invoke(tool_name, payload=payload)
 
-        # Simulate explore(action=locate) returning file candidates.
+        # Simulate locate returning file candidates.
         return ToolResultPayload(
-            tool_name="explore",
-            namespace="stub::explore",
+            tool_name="locate",
+            namespace="stub::locate",
             channel="graph",
             profile="X",
             determinism="hybrid",
-            summary="explore ok",
+            summary="locate ok",
             evidences=[],
             diagnostics={
-                "actions": [
-                    {
-                        "id": "auto_locate",
-                        "tool": "locate",
-                        "status": "ok",
-                        "summary": "locate ok",
-                        "diagnostics": {
-                            "results": [{"file_id": fid} for fid in self._routed_file_ids],
-                        },
-                    }
-                ]
+                "results": [{"file_id": fid} for fid in self._routed_file_ids],
             },
             think_notes=[],
         )
@@ -133,37 +136,13 @@ def _strategy_config(*, think_overrides: dict | None = None) -> dict:
     return base
 
 
-class _ReadPagesAwareToolManager(_StubToolManager):
-    async def invoke(self, tool_name: str, *, payload: dict) -> ToolResultPayload:
-        if tool_name != "explore":
-            return await super().invoke(tool_name, payload=payload)
-
-        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
-        actions = extra.get("actions") if isinstance(extra.get("actions"), list) else []
-        wants_pages = any(isinstance(a, dict) and a.get("tool") == "read.pages" for a in actions)
-        if wants_pages:
-            chunk = EvidenceChunk(chunk_id="p1", source="read.pages", content="page 1")
-            return ToolResultPayload(
-                tool_name="explore",
-                namespace="stub::explore",
-                channel="graph",
-                profile="X",
-                determinism="hybrid",
-                summary="read.pages ok",
-                evidences=[chunk],
-                diagnostics={},
-                think_notes=[],
-            )
-        return await super().invoke(tool_name, payload=payload)
-
-
 @pytest.mark.asyncio
 async def test_think_loop_executes_tool_calls_and_updates_plan() -> None:
     think_payloads = [
         {
-            "reasoning": "Need evidence; will explore.",
+            "reasoning": "Need evidence; will locate files.",
             "tool_calls": [
-                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search"}]}, "rationale": "fetch data", "parallelizable": True}
+                {"tool_name": "locate", "tool_args": {"focus_query": "search"}, "rationale": "fetch data", "parallelizable": True}
             ],
             "plan": [{"text": "Collect evidence", "checked": False}],
         },
@@ -190,10 +169,10 @@ async def test_think_loop_executes_tool_calls_and_updates_plan() -> None:
 
     tool_names = [name for name, _ in tool_manager.calls]
     assert tool_names.count("think") == 2
-    assert "explore" in tool_names
-    explore_payload = next(payload for name, payload in tool_manager.calls if name == "explore")
-    assert explore_payload.get("access_scope").scope_id == "owner"
-    assert explore_payload.get("adapter") is loop.adapter
+    assert "locate" in tool_names
+    locate_payload = next(payload for name, payload in tool_manager.calls if name == "locate")
+    assert locate_payload.get("access_scope").scope_id == "owner"
+    assert locate_payload.get("adapter") is loop.adapter
     assert any(ev.get("chunk_id") == "e1" for ev in result.get("evidences") or [])
 
     plan = result.get("runtime_plan") or {}
@@ -223,7 +202,7 @@ async def test_think_loop_skips_unknown_tools() -> None:
         llm_connector=None,
         strategy_config=_strategy_config(
             think_overrides={
-                "tool_catalog_allowlist": ["explore", "code.python"],
+                "tool_catalog_allowlist": ["locate", "toc.tree", "read.pages", "web.search", "code.python"],
             }
         ),
         tool_manager=tool_manager,
@@ -249,7 +228,7 @@ async def test_think_loop_honors_is_final_stop_signal_and_skips_tool_calls() -> 
         {
             "reasoning": "We already have enough evidence; stop now.",
             "tool_calls": [
-                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search"}]}, "rationale": "should be skipped", "parallelizable": True}
+                {"tool_name": "locate", "tool_args": {"focus_query": "search"}, "rationale": "should be skipped", "parallelizable": True}
             ],
             "plan": [],
             "is_final": True,
@@ -294,8 +273,8 @@ async def test_think_loop_final_signal_requires_read_pages_evidence() -> None:
             "reasoning": "Need page evidence; will read pages.",
             "tool_calls": [
                 {
-                    "tool_name": "explore",
-                    "tool_args": {"actions": [{"tool": "read.pages", "args": {"file_id": "f1", "page_start": 1, "page_end": 1}}]},
+                    "tool_name": "read.pages",
+                    "tool_args": {"file_id": "f1", "page_start": 1, "page_end": 1},
                     "rationale": "collect citeable evidence",
                     "parallelizable": False,
                 }
@@ -309,7 +288,7 @@ async def test_think_loop_final_signal_requires_read_pages_evidence() -> None:
             "is_final": True,
         },
     ]
-    tool_manager = _ReadPagesAwareToolManager(think_payloads)
+    tool_manager = _StubToolManager(think_payloads)
     loop = GraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
@@ -359,7 +338,7 @@ async def test_think_tool_call_concurrency_zero_is_sequential() -> None:
         {
             "reasoning": "Run two tool calls.",
             "tool_calls": [
-                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search"}]}, "rationale": "call 1", "parallelizable": True},
+                {"tool_name": "locate", "tool_args": {"focus_query": "search"}, "rationale": "call 1", "parallelizable": True},
                 {"tool_name": "code.python", "tool_args": {"code": "1+2"}, "rationale": "call 2", "parallelizable": True},
             ],
             "plan": [{"text": "Do two calls", "checked": False}],
@@ -400,7 +379,7 @@ async def test_file_scope_is_locked_in_from_search_file_results() -> None:
         {
             "reasoning": "Route to a file.",
             "tool_calls": [
-                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "locate"}]}, "rationale": "route", "parallelizable": True}
+                {"tool_name": "locate", "tool_args": {"focus_query": "route"}, "rationale": "route", "parallelizable": True}
             ],
             "plan": [],
         },
@@ -416,7 +395,7 @@ async def test_file_scope_is_locked_in_from_search_file_results() -> None:
         llm_connector=None,
         strategy_config=_strategy_config(
             think_overrides={
-                "tool_catalog_allowlist": ["explore", "code.python"],
+                "tool_catalog_allowlist": ["locate", "toc.tree", "read.pages", "web.search", "code.python"],
                 "tool_call_concurrency": 1,
                 "max_rounds_per_checkpoint": 2,
             }

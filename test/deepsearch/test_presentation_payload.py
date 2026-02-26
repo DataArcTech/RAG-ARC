@@ -200,13 +200,12 @@ def test_deepsearch_report_prefers_reasoning_answer():
     assert report.final_answer == "Graph RAG is managed by the RAG-ARC core team."
 
 
-def test_deepsearch_report_uses_llm_chain_explorer_when_available():
+def test_deepsearch_report_falls_back_to_highlights_when_answer_empty():
     payload = _sample_result()
     payload["report"]["answer"] = ""
     payload["reasoning"]["final_answer"] = ""
-    payload["report"]["evidences"][0]["source"] = "graph.llm_chain_explorer"
-    payload["report"]["evidences"][0]["content"] = "SAS 提供完善的 AP 课程与课外活动。"
 
     report = DeepSearchReport.from_payload(payload, graph_chain_builder=None)
 
-    assert report.final_answer == "SAS 提供完善的 AP 课程与课外活动。"
+    # With no answer and no final_answer, should fall back to highlights.
+    assert "Key findings" in report.final_answer

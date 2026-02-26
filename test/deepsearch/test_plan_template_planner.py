@@ -23,10 +23,8 @@ def test_instantiate_template_plan_renders_slots_and_question() -> None:
     )
     assert signature
     assert any("IRR" in item["text"] for item in plan_items)
-    assert tool_calls and tool_calls[0]["tool_name"] == "explore"
-    actions = tool_calls[0]["tool_args"]["actions"]
-    assert actions[0]["tool"] == "locate"
-    assert actions[0]["args"]["query"] == "Which term has the highest IRR?"
+    assert tool_calls and tool_calls[0]["tool_name"] == "locate"
+    assert tool_calls[0]["tool_args"]["query"] == "Which term has the highest IRR?"
 
 
 @pytest.mark.asyncio

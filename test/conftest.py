@@ -54,6 +54,7 @@ def pytest_configure() -> None:
     # Ensure unit tests do not accidentally use host-provided API keys.
     os.environ.pop("OPENAI_API_KEY", None)
     os.environ.pop("CHAT_API_KEY", None)
+    os.environ.pop("RERANK_API_KEY", None)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -117,6 +118,8 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ANN001,ARG001
 
 
 def pytest_runtest_setup(item) -> None:  # noqa: ANN001
+    # Ensure unit tests do not accidentally pick up host/dotenv-provided API keys mid-run.
+    os.environ.pop("RERANK_API_KEY", None)
     # Clear in-process caches between tests to avoid cross-test coupling.
     try:
         from config.core.retrieval.dense_config import DenseRetrieverConfig
