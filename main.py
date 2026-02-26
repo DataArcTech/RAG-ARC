@@ -35,7 +35,8 @@ from api.routers import mcp
 from api.routers import rag_inference
 from api.routers import session as session_router
 from api.routers import user as user_router
-from api.utils.logging_handler import IOManagerDailySizeRotatingHandler
+from api.utils.logging_handler import DailySizeRotatingHandler
+from framework.virtual_paths import localdb_root_dir
 from asgi_correlation_id import CorrelationIdMiddleware, correlation_id
 from asgi_correlation_id.log_filters import CorrelationIdFilter
 from asgi_correlation_id.middleware import is_valid_uuid4
@@ -53,14 +54,8 @@ class BeijingFormatter(logging.Formatter):
 
 
 def _configure_logging() -> None:
-    """Configure application logging without monkey patching."""
-
+    """日志落到 IO_STORE_BASE_PATH/IO_LOG，由 IO_LOG 配置日志子目录。"""
     correlation_filter = CorrelationIdFilter(uuid_length=36, default_value="NO-ID")
-
-    log_dir_virtual = str(os.getenv("RAGARC_LOG_DIR", "io://logs") or "").strip() or "io://logs"
-    io_manager = app_registration.registrator.get_object("io_manager")
-    if io_manager is None:
-        raise RuntimeError("io_manager is required for logging")
 
     fmt = "%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
     formatter = BeijingFormatter(fmt)
@@ -68,18 +63,15 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
-    handler = next((h for h in root.handlers if isinstance(h, IOManagerDailySizeRotatingHandler)), None)
+    handler = next((h for h in root.handlers if isinstance(h, DailySizeRotatingHandler)), None)
     if handler is None:
-        # flush_bytes=1 表示每条日志立即落盘，便于按 request_id 实时查看
-        flush_kb = int(os.getenv("RAGARC_LOG_FLUSH_KB", "0") or "0")
-        flush_bytes_val = (flush_kb * 1024) if flush_kb > 0 else 1
-        handler = IOManagerDailySizeRotatingHandler(
-            io_manager=io_manager,
-            base_dir=log_dir_virtual,
+        io_log = str(os.getenv("IO_LOG", "logs") or "logs").strip() or "logs"
+        log_dir = localdb_root_dir() / io_log
+        handler = DailySizeRotatingHandler(
+            base_dir=log_dir,
             maxBytes=10 * 1024 * 1024,
             backupCount=30,
             encoding="utf-8",
-            flush_bytes=flush_bytes_val,
         )
         root.addHandler(handler)
 
@@ -93,9 +85,8 @@ def _configure_logging() -> None:
 
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         target_logger = logging.getLogger(name)
-        if any(isinstance(h, IOManagerDailySizeRotatingHandler) for h in target_logger.handlers):
-            continue
-        target_logger.addHandler(handler)
+        target_logger.handlers.clear()
+        target_logger.propagate = True
 
 
 _configure_logging()
@@ -135,6 +126,8 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI startup/shutdown."""
     # Set system-level correlation_id for startup/shutdown logs
     correlation_id.set(str(uuid.uuid4()))
+    # 在 uvicorn 启动后重新应用日志配置，保证所有日志都打到 RAGARC_LOG_DIR（io://logs）
+    _configure_logging()
     logger.info("Application starting up...")
     try:
         from core.utils.dependency_health import check_dependencies

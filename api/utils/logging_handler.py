@@ -180,6 +180,7 @@ class IOManagerDailySizeRotatingHandler(logging.Handler):
 
         self._current_date = datetime.now().date()
         self._seq = 1
+        self._current_file_bytes = 0  # 当前序号文件已写入字节数，仅超过 maxBytes 时递增 _seq
         self._buffer = bytearray()
 
         # Best-effort flush on interpreter exit.
@@ -204,6 +205,7 @@ class IOManagerDailySizeRotatingHandler(logging.Handler):
             self.flush()
             self._current_date = today
             self._seq = 1
+            self._current_file_bytes = 0
             self._cleanup_old_logs()
 
     def _cleanup_old_logs(self) -> None:
@@ -253,12 +255,14 @@ class IOManagerDailySizeRotatingHandler(logging.Handler):
         payload = bytes(self._buffer)
         self._buffer.clear()
         try:
+            # 仅当当前“文件”累计大小将超过 maxBytes 时才轮转（递增 _seq），避免每次 flush 都新建文件
+            if self._current_file_bytes + len(payload) > self._max_bytes and self._current_file_bytes > 0:
+                self._seq += 1
+                self._current_file_bytes = 0
             key = self._object_key()
-            # Use IOManager helpers to resolve namespace/prefix.
             self._io_manager.put_bytes_path(key, payload=payload, content_type="text/plain; charset=utf-8")
-            self._seq += 1
+            self._current_file_bytes += len(payload)
         except Exception:
-            # If we cannot persist logs, do not crash the process.
             return
 
     def close(self) -> None:
