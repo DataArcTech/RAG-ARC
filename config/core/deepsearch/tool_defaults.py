@@ -276,20 +276,6 @@ SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (
 )
 
 # -----------------------------
-# navigation bootstrap defaults (service-side; long-doc navigation)
-# -----------------------------
-# Deterministic preflight steps executed before graph reasoning:
-# locate -> toc.tree (Top-N candidate files)
-# Default off: let the LLM decide whether to route files/sections (prevents unnecessary retrieval
-# for questions that do not require consulting the user's corpus).
-NAV_BOOTSTRAP_ENABLED = False
-NAV_BOOTSTRAP_FILE_TOP_K = 5
-NAV_BOOTSTRAP_CANDIDATE_FILES = 2
-NAV_BOOTSTRAP_TOC_MAX_DEPTH = 2
-NAV_BOOTSTRAP_TOC_MAX_NODES = 120
-NAV_BOOTSTRAP_SECTION_TOP_K = 6
-
-# -----------------------------
 # toc + structured reading defaults (PageIndex navigation)
 # -----------------------------
 TOC_TREE_DEFAULT_MAX_DEPTH = 2

@@ -23,19 +23,3 @@ THINK_TOOL_CATALOG_ALWAYS_INCLUDE: tuple[str, ...] = (
 
 # Recent tool runs forwarded to think checkpoints (metadata/envelopes only; no truncation).
 THINK_RECENT_TOOL_RUNS_MAX = 3
-
-# Hard gate for report-style DeepSearch: before the runtime proceeds to report composition,
-# we require at least one successful `read.pages` evidence. This keeps the report grounded
-# in full-page context instead of snippet-only navigation.
-REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE = 1
-
-# Hard gate for computable questions: when query_spec.is_computable=true, require at least one
-# successful deterministic computation evidence (e.g., `code.python`) before stopping.
-REPORT_HARD_GATE_MIN_COMPUTE_EVIDENCE = 1
-
-# When the reasoning loop exits without satisfying the report hard gate, the service runtime
-# may re-enter the reasoning stage with an explicit gate-failure note so the LLM can retry.
-# This is a safety net for brittle model/tool interactions (JSON parse failures, early stop, etc.).
-#
-# Keep this value configurable (service config can override) and conservative by default.
-REPORT_HARD_GATE_MAX_REASONING_RETRIES = 2

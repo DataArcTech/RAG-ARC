@@ -10,7 +10,6 @@ from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
 
-from config.core.deepsearch.computable_gate_defaults import DEFAULT_COMPUTABLE_POLICY
 from config.core.deepsearch import runtime_cache_defaults
 from application.rag_inference.deepsearch.service import DeepSearchService
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
@@ -457,64 +456,6 @@ class RemoteToolDescriptorConfig(BaseModel):
     strategy_tags: List[str] = Field(default_factory=list, description="Optional strategy hints for the tool catalog.")
 
 
-class DeterministicRoutingConfig(BaseModel):
-    """Application-layer routing + gates for 'computable' questions."""
-
-    enabled: bool = Field(
-        False,
-        description="Enable computable-question classification + deterministic evidence gating.",
-    )
-    classifier: Literal["llm", "heuristic", "hybrid"] = Field(
-        "llm",
-        description=(
-            "Classifier mode: "
-            "`llm` uses a low-cost LLM to decide computability; "
-            "`heuristic` uses configured keyword/operator cues; "
-            "`hybrid` tries LLM then falls back to heuristic."
-        ),
-    )
-    fail_on_classifier_error: bool = Field(
-        False,
-        description=(
-            "When true, abort the request if the configured classifier fails "
-            "(avoids silently bypassing computable gating)."
-        ),
-    )
-    hard_gate_missing_deterministic_tools: bool = Field(
-        False,
-        description=(
-            "When true and the question is classified as computable, fail-fast if no deterministic tool runs occurred "
-            "(prevents returning non-verifiable numeric/time answers)."
-        ),
-    )
-    # Heuristic-only tuning (empty by default; set explicitly in json_configs for domain deployments).
-    computable_keywords: List[str] = Field(
-        default_factory=list,
-        description="Keyword cues used by the heuristic computable-question classifier (lowercased substring matching).",
-    )
-    computable_operators: List[str] = Field(
-        default_factory=list,
-        description="Operator/constraint cues used by the heuristic computable-question classifier.",
-    )
-    computable_policy: Dict[str, Any] = Field(
-        default_factory=lambda: dict(DEFAULT_COMPUTABLE_POLICY),
-        description="Policy knobs for the heuristic classifier (min hits / require weak cue).",
-    )
-    llm_model_name: Optional[str] = Field(
-        None,
-        description=(
-            "Optional model override for LLM classification (e.g. from env LOW_COST_MODEL). "
-            "When empty, the system uses the LLM connector default model."
-        ),
-    )
-    llm_temperature: float = Field(
-        0.0,
-        ge=0.0,
-        le=1.0,
-        description="Sampling temperature for LLM classification (prefer 0 for stable routing).",
-    )
-
-
 class DeepSearchServiceConfig(AbstractConfig):
     """Application-layer builder that assembles DeepSearch components."""
 
@@ -528,7 +469,6 @@ class DeepSearchServiceConfig(AbstractConfig):
         default_factory=lambda: DeepSearchPlanCacheConfig(),
         description="Process-local cache knobs for initial think (plan template).",
     )
-    deterministic_routing: DeterministicRoutingConfig = Field(default_factory=DeterministicRoutingConfig)
     mcp_client: Optional[MCPClientConfig] = Field(
         default=None, description="Optional MCP client config used for remote tools."
     )
@@ -595,7 +535,6 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "name": "deepsearch-service",
                 "fingerprint": self._fingerprint(),
                 "artifact_dir": self.tool_manager.artifact_dir,
-                "deterministic_routing": self.deterministic_routing.model_dump(),
                 "tool_budget": self.tool_budget.model_dump(),
                 "artifacts": self.artifacts.model_dump(),
                 "adapter": adapter_meta_payload,

@@ -7,11 +7,11 @@ from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
 from config.core.deepsearch import runtime_cache_defaults
+from core.deepsearch.utils.ids import resolve_file_ref
 from core.deepsearch.utils.section_tree import (
     build_section_tree,
     fetch_section_nodes,
     fetch_section_tree_fingerprint,
-    normalize_file_id,
 )
 from framework.cache import TTLRUCache
 
@@ -46,7 +46,7 @@ class TocTreeTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "The file_id (UUID) to show the ToC for."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) or filename to show the ToC for."},
                 "max_depth": {
                     "type": "integer",
                     "minimum": 1,
@@ -89,7 +89,9 @@ class TocTreeTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
-        file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
+        file_id, file_id_raw = await resolve_file_ref(
+            extra, adapter=request.adapter, access_scope=request.access_scope,
+        )
         if not file_id:
             reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
             return ToolResult(

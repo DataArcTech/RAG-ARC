@@ -261,28 +261,12 @@ async def test_think_loop_honors_is_final_stop_signal_and_skips_tool_calls() -> 
 
 
 @pytest.mark.asyncio
-async def test_think_loop_final_signal_requires_read_pages_evidence() -> None:
+async def test_think_loop_stops_on_final_signal_without_gate() -> None:
+    """With gates removed, the loop stops immediately when model sets is_final=True,
+    even without read.pages evidence."""
     think_payloads = [
         {
-            "reasoning": "Stop now (but we have no page evidence yet).",
-            "tool_calls": [],
-            "plan": [],
-            "is_final": True,
-        },
-        {
-            "reasoning": "Need page evidence; will read pages.",
-            "tool_calls": [
-                {
-                    "tool_name": "read.pages",
-                    "tool_args": {"file_id": "f1", "page_start": 1, "page_end": 1},
-                    "rationale": "collect citeable evidence",
-                    "parallelizable": False,
-                }
-            ],
-            "plan": [],
-        },
-        {
-            "reasoning": "Now we can stop.",
+            "reasoning": "I have the answer already.",
             "tool_calls": [],
             "plan": [],
             "is_final": True,
@@ -307,7 +291,9 @@ async def test_think_loop_final_signal_requires_read_pages_evidence() -> None:
         metadata={"report_needed": True, "report_style": "deepsearch"},
     )
     result = await loop.run_think_loop("Q", graph_context=context)
-    assert any(ev.get("source") == "read.pages" for ev in result.get("evidences") or [])
+    # Loop should stop after one think invocation (no gate override).
+    tool_names = [name for name, _ in tool_manager.calls]
+    assert tool_names == ["think"]
 
 
 class _InflightToolManager(_StubToolManager):

@@ -1,3 +1,5 @@
+"""Tests that confirm gate removal: the loop respects model decisions without gate overrides."""
+
 import uuid
 
 import pytest
@@ -8,19 +10,19 @@ from core.graph_adapter.base import GraphAccessScope
 
 
 class _DummyAdapter:
-    async def prepare(self, question: str, *, access_scope: GraphAccessScope | None = None) -> None:  # pragma: no cover
+    async def prepare(self, question: str, *, access_scope: GraphAccessScope | None = None) -> None:
         return None
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope: GraphAccessScope | None = None, query_options=None):  # pragma: no cover
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope: GraphAccessScope | None = None, query_options=None):
         return {}
 
-    async def context_filter(self, data, *, filter_type: str = "semantic", access_scope: GraphAccessScope | None = None):  # pragma: no cover
+    async def context_filter(self, data, *, filter_type: str = "semantic", access_scope: GraphAccessScope | None = None):
         return data
 
-    async def summarize(self, channel: str, data, *, access_scope: GraphAccessScope | None = None) -> str:  # pragma: no cover
+    async def summarize(self, channel: str, data, *, access_scope: GraphAccessScope | None = None) -> str:
         return ""
 
-    async def chain_traverse(self, strategy, *, access_scope: GraphAccessScope | None = None):  # pragma: no cover
+    async def chain_traverse(self, strategy, *, access_scope: GraphAccessScope | None = None):
         return {}
 
     def metadata(self):
@@ -38,26 +40,6 @@ class _FakeToolInvoker:
             if not self._think_payloads:
                 raise AssertionError("think invoked more times than expected")
             return self._think_payloads.pop(0)
-        if tool_name == "code.python":
-            ev = EvidenceChunk(
-                kind="derived",
-                chunk_id=f"ev_compute_{uuid.uuid4().hex}",
-                source="code.python",
-                content="result=42",
-                score=None,
-                provenance={},
-            )
-            return ToolResultPayload(
-                tool_name="code.python",
-                namespace="test",
-                channel="graph",
-                profile="H",
-                determinism="deterministic",
-                summary="computed",
-                evidences=[ev],
-                diagnostics={},
-                think_notes=[],
-            )
         raise AssertionError(f"unexpected tool invocation: {tool_name}")
 
 
@@ -84,8 +66,8 @@ def _think_payload(*, tool_calls: list[dict], is_final: bool | None) -> ToolResu
 
 
 @pytest.mark.asyncio
-async def test_computable_gate_requires_code_python_before_stopping() -> None:
-    # Seed primary evidence so the existing evidence hard gate is satisfied.
+async def test_loop_stops_when_model_says_final() -> None:
+    """With gates removed, the loop should stop immediately when model sets is_final=true."""
     seed_evidences = [
         EvidenceChunk(
             kind="primary",
@@ -102,28 +84,13 @@ async def test_computable_gate_requires_code_python_before_stopping() -> None:
         metadata={
             "report_needed": True,
             "report_style": "deepsearch",
-            "query_spec": {"is_computable": True},
         },
         access_scope=GraphAccessScope(scope_id="test"),
     )
 
     tool_manager = _FakeToolInvoker(
         think_payloads=[
-            # Round 1: no tool calls → should be blocked by computable gate.
-            _think_payload(tool_calls=[], is_final=None),
-            # Round 2: propose code.python → produces compute evidence.
-            _think_payload(
-                tool_calls=[
-                    {
-                        "tool_name": "code.python",
-                        "tool_args": {"code": "result=42", "inputs": {}},
-                        "rationale": "compute",
-                        "parallelizable": False,
-                    }
-                ],
-                is_final=None,
-            ),
-            # Round 3: finalization allowed because compute evidence exists.
+            # Round 1: is_final=true with no tool calls → should stop immediately.
             _think_payload(tool_calls=[], is_final=True),
         ]
     )
@@ -153,36 +120,28 @@ async def test_computable_gate_requires_code_python_before_stopping() -> None:
     )
 
     out = await loop.run_think_loop("q", graph_context=context, seed_evidences=seed_evidences)
-    sources = [row.get("source") for row in (out.get("evidences") or []) if isinstance(row, dict)]
-    assert "code.python" in sources
-    assert tool_manager.invocations.count("think") == 3
-    assert tool_manager.invocations.count("code.python") == 1
+    # Loop should have invoked think exactly once and stopped.
+    assert tool_manager.invocations == ["think"]
 
 
 @pytest.mark.asyncio
-async def test_non_computable_question_can_stop_without_code_python() -> None:
-    seed_evidences = [
-        EvidenceChunk(
-            kind="primary",
-            chunk_id="ev_read_pages",
-            source="read.pages",
-            content="policy terms",
-            score=1.0,
-            provenance={"source_file_id": str(uuid.uuid4()), "page_start": 0, "page_end": 0},
-        )
-    ]
+async def test_loop_stops_when_no_tool_calls_proposed() -> None:
+    """With gates removed, the loop should stop when model proposes no tool calls."""
     context = GraphQueryContext(
         adapter_name="dummy",
         question="q",
         metadata={
             "report_needed": True,
             "report_style": "deepsearch",
-            "query_spec": {"is_computable": False},
         },
         access_scope=GraphAccessScope(scope_id="test"),
     )
 
-    tool_manager = _FakeToolInvoker(think_payloads=[_think_payload(tool_calls=[], is_final=None)])
+    tool_manager = _FakeToolInvoker(
+        think_payloads=[
+            _think_payload(tool_calls=[], is_final=None),
+        ]
+    )
     loop = GraphReasoningLoop(
         adapter=_DummyAdapter(),
         llm_connector=None,
@@ -208,8 +167,5 @@ async def test_non_computable_question_can_stop_without_code_python() -> None:
         tool_manager=tool_manager,
     )
 
-    out = await loop.run_think_loop("q", graph_context=context, seed_evidences=seed_evidences)
-    sources = [row.get("source") for row in (out.get("evidences") or []) if isinstance(row, dict)]
-    assert "code.python" not in sources
+    out = await loop.run_think_loop("q", graph_context=context, seed_evidences=[])
     assert tool_manager.invocations == ["think"]
-

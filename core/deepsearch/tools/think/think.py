@@ -8,9 +8,6 @@ from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
 from core.prompts.deepsearch import (
     THINK_TOOL_SYSTEM_PROMPT_EN,
-    THINK_TOOL_SYSTEM_PROMPT_FINAL_EN,
-    THINK_TOOL_SYSTEM_PROMPT_GATE_EN,
-    THINK_TOOL_SYSTEM_PROMPT_INITIAL_EN,
 )
 from core.deepsearch.utils.evidence_cards import evidence_cards
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
@@ -679,18 +676,6 @@ class ThinkTool(GraphTool):
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_default)
 
     @staticmethod
-    def _is_missing_primary_page_evidence(previous_tool_call_results: Any) -> bool:
-        if not isinstance(previous_tool_call_results, list):
-            return False
-        for row in previous_tool_call_results:
-            if not isinstance(row, dict):
-                continue
-            reason = str(row.get("failure_reason") or "").strip()
-            if reason == "missing_primary_page_evidence":
-                return True
-        return False
-
-    @staticmethod
     def _budget_phase(snapshot: Dict[str, Any]) -> str:
         try:
             max_calls_total = int(snapshot.get("max_calls_total") or 0)
@@ -767,16 +752,6 @@ class ThinkTool(GraphTool):
         extra: Dict[str, Any],
         previous_tool_call_results: Any,
     ) -> str:
-        if not bool(getattr(tool_defaults, "THINK_PROMPT_VARIANTS_ENABLED", True)):
-            return self.system_prompt
-
-        mode = str((extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
-        if mode == initial_mode.MODE:
-            return THINK_TOOL_SYSTEM_PROMPT_INITIAL_EN
-        if mode == final_mode.MODE:
-            return THINK_TOOL_SYSTEM_PROMPT_FINAL_EN
-        if self._is_missing_primary_page_evidence(previous_tool_call_results):
-            return THINK_TOOL_SYSTEM_PROMPT_GATE_EN
         return self.system_prompt
 
     @staticmethod

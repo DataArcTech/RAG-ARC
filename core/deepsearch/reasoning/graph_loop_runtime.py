@@ -36,7 +36,7 @@ class GraphLoopRuntimeMixin:
             return []
 
         raw: list[Any] = []
-        for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+        for key in ("file_ids", "file_id", "file", "source_file_ids", "source_file_id"):
             val = tool_args.get(key)
             if val is None:
                 continue

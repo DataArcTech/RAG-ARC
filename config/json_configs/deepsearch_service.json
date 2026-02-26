@@ -71,8 +71,8 @@
       "min_coverage": 0.75,
       "always_run": true,
       "enable_tool_calls": true,
-      "max_tool_calls": 4,
-      "tool_call_concurrency": 2,
+      "max_tool_calls": 6,
+      "tool_call_concurrency": 6,
       "tool_catalog_max_items": 12,
       "tool_catalog_allowlist": [
         "locate",
@@ -164,21 +164,6 @@
     "temperature": 0.0,
     "max_tokens": 800,
     "json_attempts": 2
-  },
-  "deterministic_routing": {
-    "enabled": true,
-    "classifier": "llm",
-    "fail_on_classifier_error": false,
-    "hard_gate_missing_deterministic_tools": false,
-    "llm_model_name": "${LOW_COST_MODEL}",
-    "llm_temperature": 0.0,
-    "computable_keywords": [],
-    "computable_operators": [],
-    "computable_policy": {
-      "min_strong_hits": 1,
-      "min_weak_hits": 1,
-      "require_weak_cue": true
-    }
   },
   "mcp_client": null,
   "llm": {

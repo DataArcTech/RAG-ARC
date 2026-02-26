@@ -20,14 +20,8 @@ from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.evidence_kinds import count_evidences_by_kind, is_primary_evidence
 from core.deepsearch.utils.evidence_cards import evidence_cards
 from config.core.deepsearch.reasoning_defaults import (
-    REPORT_HARD_GATE_MIN_COMPUTE_EVIDENCE,
-    REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE,
     THINK_RECENT_TOOL_RUNS_MAX,
     THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
-)
-from config.core.deepsearch.runtime_messages import (
-    MISSING_COMPUTE_EVIDENCE_GATE_MESSAGE,
-    MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
 )
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
@@ -283,47 +277,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 # but never allow stopping before collecting at least one read.pages evidence.
                 think_is_final = self._extract_is_final_from_think_notes(result.think_notes or [])
                 if think_is_final is True:
-                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_final_gate",
-                                "failure_reason": "missing_primary_page_evidence",
-                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Call read.pages at least once to obtain citeable page evidence.",
-                                    "Use locate to find the relevant file_id, then locate(file=X) for page-level results.",
-                                    "Read the suggested pages with read.pages before stopping.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Finalization requested but evidence gate unmet (missing read.pages). Continuing think loop.",
-                            meta={"stage": "final_gate", "round": round_idx},
-                        )
-                        continue
-                    # Computable gate: require code.python for computable questions.
-                    if self._should_require_compute(context) and not self._has_compute_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_compute_gate",
-                                "failure_reason": "missing_compute_evidence",
-                                "error": MISSING_COMPUTE_EVIDENCE_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Extract the required numerical values from read.pages evidence.",
-                                    "Write Python code to compute the answer (e.g., ROCE, EBITDA margin, ratio).",
-                                    "Call code.python with the code and inputs.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Computable gate: missing code.python evidence (continuing think loop).",
-                            meta={"stage": "compute_gate", "round": round_idx},
-                        )
-                        continue
                     await emit_trace(
                         "think",
                         "Think requested finalization (stopping reasoning loop and proceeding to report).",
@@ -346,49 +299,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 proposed = int(tool_call_summary.get("proposed") or 0)
                 previous_tool_call_results = list(tool_call_summary.get("results") or [])
                 if proposed <= 0:
-                    # Hard evidence gate (report-style DeepSearch): do not stop the loop until we have at least one
-                    # successful read.pages evidence. This keeps final reports grounded in full-page context.
-                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_evidence_gate",
-                                "failure_reason": "missing_primary_page_evidence",
-                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Call read.pages at least once to obtain citeable page evidence.",
-                                    "Use locate to find the relevant file_id, then locate(file=X) for page-level results.",
-                                    "Read the suggested pages with read.pages before stopping.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Evidence gate: missing read.pages (continuing think loop).",
-                            meta={"stage": "evidence_gate", "round": round_idx},
-                        )
-                        continue
-                    # Computable gate: require code.python for computable questions.
-                    if self._should_require_compute(context) and not self._has_compute_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_compute_gate",
-                                "failure_reason": "missing_compute_evidence",
-                                "error": MISSING_COMPUTE_EVIDENCE_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Extract the required numerical values from read.pages evidence.",
-                                    "Write Python code to compute the answer (e.g., ROCE, EBITDA margin, ratio).",
-                                    "Call code.python with the code and inputs.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Computable gate: missing code.python evidence (continuing think loop).",
-                            meta={"stage": "compute_gate", "round": round_idx},
-                        )
-                        continue
                     break
         finally:
             _RUN_EVIDENCES.reset(evidences_token)
@@ -431,58 +341,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 continue
             return bool(raw.get("is_final"))
         return None
-
-    @staticmethod
-    def _should_require_primary_page_evidence(context: GraphQueryContext) -> bool:
-        meta = context.metadata if isinstance(getattr(context, "metadata", None), dict) else {}
-        report_needed = meta.get("report_needed")
-        if report_needed is False:
-            return False
-        style = str(meta.get("report_style") or "").strip().lower()
-        if style not in {"deepsearch", "research"}:
-            return False
-        try:
-            return int(REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE) >= 1
-        except Exception:
-            return True
-
-    @staticmethod
-    def _has_primary_page_evidence(evidences: Sequence[EvidenceChunk]) -> bool:
-        for ev in evidences or []:
-            try:
-                if ev.source == "read.pages":
-                    return True
-            except Exception:
-                continue
-        return False
-
-    @staticmethod
-    def _should_require_compute(context: GraphQueryContext) -> bool:
-        """Return True when QuerySpec flags the question as computable."""
-
-        try:
-            if int(REPORT_HARD_GATE_MIN_COMPUTE_EVIDENCE) < 1:
-                return False
-        except Exception:
-            pass
-
-        meta = context.metadata if isinstance(getattr(context, "metadata", None), dict) else {}
-        query_spec = meta.get("query_spec")
-        if not isinstance(query_spec, dict):
-            return False
-        return bool(query_spec.get("is_computable"))
-
-    @staticmethod
-    def _has_compute_evidence(evidences: Sequence[EvidenceChunk]) -> bool:
-        """Return True when at least one code.python result exists in evidence bank."""
-
-        for ev in evidences or []:
-            try:
-                if ev.source == "code.python":
-                    return True
-            except Exception:
-                continue
-        return False
 
     def _build_think_config(self, config) -> Dict[str, Any]:
         think = None

@@ -90,7 +90,7 @@ class _StubGraphLoopWithWorkerError(_StubGraphLoop):
 
 
 class _StubReporter:
-    def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
+    async def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
         evidences = list(reasoning_trace.get("evidences", []))
         if external_evidence:
             evidences.extend(external_evidence)

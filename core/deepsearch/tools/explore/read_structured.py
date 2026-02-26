@@ -19,7 +19,7 @@ from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
-from core.deepsearch.utils.ids import normalize_uuid
+from core.deepsearch.utils.ids import normalize_uuid, resolve_file_ref
 from core.deepsearch.utils.node_types import normalize_node_type
 from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
@@ -313,23 +313,28 @@ class ReadPagesTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "The file_id (UUID) to read from."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) or filename to read from."},
                 "page_start": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Start page index, 0-based inclusive (e.g. 0 = first page). Required.",
+                    "description": "Start page index, 0-based inclusive (e.g. 0 = first page). page_start==page_end reads one page.",
                 },
                 "page_end": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "End page index, 0-based inclusive. Must be >= page_start. Required.",
+                    "description": "End page index, 0-based inclusive. Must be >= page_start. Omit to read a single page (=page_start).",
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Alternative: list of 0-based page indices. Converted to page_start=min, page_end=max. Use page_start/page_end for ranges.",
                 },
                 "goal": {
                     "type": "string",
                     "description": "Brief note on why these pages are being read (e.g. 'extract revenue table'). Stored in provenance.",
                 },
             },
-            required_extra_fields=("file_id", "page_start", "page_end"),
+            required_extra_fields=("file_id",),
         ),
         example_args={
             "question": "Read the warning page",
@@ -340,10 +345,24 @@ class ReadPagesTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
-        file_id_raw = str(extra.get("file_id") or "").strip()
-        file_id = normalize_uuid(file_id_raw)
+        file_id, file_id_raw = await resolve_file_ref(
+            extra, adapter=request.adapter, access_scope=request.access_scope,
+        )
         page_start = _coerce_int(extra.get("page_start"))
         page_end = _coerce_int(extra.get("page_end"))
+        # Safety net: accept "pages" list from LLM and convert to range.
+        if page_start is None and page_end is None:
+            pages = extra.get("pages")
+            if isinstance(pages, list) and pages:
+                int_pages = [v for v in (_coerce_int(p) for p in pages) if v is not None]
+                if int_pages:
+                    page_start = min(int_pages)
+                    page_end = max(int_pages)
+        # Single page shorthand: page_start without page_end (or vice versa).
+        if page_start is not None and page_end is None:
+            page_end = page_start
+        if page_end is not None and page_start is None:
+            page_start = page_end
         goal = str(extra.get("goal") or "").strip() or None
         if not file_id or page_start is None or page_end is None:
             reason = "missing_args"
