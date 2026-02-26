@@ -9,33 +9,28 @@ from encapsulation.data_model.deepsearch import GraphQueryContext
 from encapsulation.data_model.deepsearch import ThinkNote
 
 from application.rag_inference.deepsearch.runtime_cache import CachedInitialThink
+from config.benchmark_mode import benchmark_mode_enabled
+
+
+_DEFAULT_PLAN_ITEMS: List[Dict[str, Any]] = [
+    {"text": "Locate relevant file(s) for the question.", "checked": False},
+    {"text": "Locate pages containing the answer.", "checked": False},
+    {"text": "Read full pages as citeable evidence.", "checked": False},
+    {"text": "Submit final answer with citations.", "checked": False},
+]
 
 
 class DeepSearchServiceInitialThinkMixin:
     @staticmethod
-    def _normalize_question_kind(value: Any) -> str:
-        token = str(value or "").strip().lower() or "factual"
-        if token not in {"encyclopedia", "factual", "computable", "multi_hop"}:
-            return "factual"
-        return token
-
-    @staticmethod
     def _attach_initial_think_signals(
         reasoning_context: GraphQueryContext,
-        *,
-        is_computable: bool,
-        question_kind: str,
     ) -> None:
         if not isinstance(reasoning_context.metadata, dict):
             return
         initial_think = {
-            "is_computable": bool(is_computable),
-            "question_kind": str(question_kind),
             "page_indexing": {"tool_index_base": 0, "human_index_base": 1},
         }
         reasoning_context.metadata["initial_think"] = initial_think
-        reasoning_context.metadata["is_computable"] = bool(is_computable)
-        reasoning_context.metadata["question_kind"] = str(question_kind)
 
     def _resolve_llm_connector(self) -> Any | None:
         tool_manager = getattr(self, "tool_manager", None)
@@ -101,6 +96,62 @@ class DeepSearchServiceInitialThinkMixin:
         evidences = list(context_evidences or [])
 
         # ------------------------------------------------------------------
+        # Bench mode: skip query_spec entirely. Let the main LLM receive
+        # the question directly without pre-classification overhead.
+        # ------------------------------------------------------------------
+        if benchmark_mode_enabled():
+            plan_state = PlanState()
+            plan_state.update(list(_DEFAULT_PLAN_ITEMS))
+
+            if isinstance(reasoning_context.metadata, dict):
+                reasoning_context.metadata["report_style"] = "deepsearch"
+                reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
+                self._attach_initial_think_signals(reasoning_context)
+
+            raw: Dict[str, Any] = {
+                "reasoning": "Benchmark mode: skip query_spec pre-classification.",
+                "tool_calls": [],
+                "plan": list(plan_state.items),
+                "report_needed": True,
+                "report_style": "deepsearch",
+            }
+            note = ThinkNote(
+                plan_step_id="think_init",
+                reasoning=raw["reasoning"],
+                next_actions=["Execute locate for file routing."],
+                metadata={"raw": raw},
+            )
+            note_payloads = [note.model_dump(exclude_none=True)]
+
+            await emit_trace(
+                "write_outline",
+                plan_state.markdown,
+                meta={
+                    "stage": "think_init",
+                    "plan_step_id": "think_init",
+                    "plan_version": plan_state.version,
+                    "plan_items": list(plan_state.items),
+                    "bench_mode": True,
+                },
+            )
+            await emit_trace(
+                "think",
+                "Initial think checkpoint (bench_mode: query_spec skipped).",
+                meta={"stage": "think_init", "plan_step": "think_init", "bench_mode": True},
+            )
+
+            return {
+                "report_needed": True,
+                "report_style": "deepsearch",
+                "plan_state": plan_state,
+                "think_notes": note_payloads,
+                "think_notes_obj": [note],
+                "raw": raw,
+                "query_spec": None,
+                "cache": {"bench_mode": True},
+            }
+
+        # ------------------------------------------------------------------
         # Cache (conservative): only cache pure initial-think calls (no
         # injected evidences / plan steps).
         # ------------------------------------------------------------------
@@ -139,17 +190,11 @@ class DeepSearchServiceInitialThinkMixin:
                 report_style = str(hit.report_style or "").strip().lower()
                 if report_style not in {"deepsearch", "research"}:
                     report_style = "deepsearch"
-                is_computable = bool(getattr(hit, "is_computable", False))
-                question_kind = self._normalize_question_kind(getattr(hit, "question_kind", "factual"))
 
                 if isinstance(reasoning_context.metadata, dict):
                     reasoning_context.metadata["report_style"] = report_style
                     reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
-                    self._attach_initial_think_signals(
-                        reasoning_context,
-                        is_computable=is_computable,
-                        question_kind=question_kind,
-                    )
+                    self._attach_initial_think_signals(reasoning_context)
                     cached_query_spec = getattr(hit, "query_spec", None)
                     if isinstance(cached_query_spec, dict):
                         reasoning_context.metadata["query_spec"] = dict(cached_query_spec)
@@ -174,8 +219,6 @@ class DeepSearchServiceInitialThinkMixin:
                 return {
                     "report_needed": bool(hit.report_needed),
                     "report_style": report_style,
-                    "is_computable": is_computable,
-                    "question_kind": question_kind,
                     "plan_state": plan_state,
                     "think_notes": list(hit.think_notes_payloads),
                     "think_notes_obj": note_objs,
@@ -224,8 +267,6 @@ class DeepSearchServiceInitialThinkMixin:
             report_style = str(raw.get("report_style", "deepsearch") or "").strip().lower()
             if report_style not in {"deepsearch", "research"}:
                 report_style = "deepsearch"
-            is_computable = bool(raw.get("is_computable", False))
-            question_kind = self._normalize_question_kind(raw.get("question_kind", "factual"))
             plan_items_list = raw.get("plan") if isinstance(raw.get("plan"), list) else []
 
             plan_state = PlanState()
@@ -247,11 +288,7 @@ class DeepSearchServiceInitialThinkMixin:
             if isinstance(reasoning_context.metadata, dict):
                 reasoning_context.metadata["report_style"] = report_style
                 reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
-                self._attach_initial_think_signals(
-                    reasoning_context,
-                    is_computable=is_computable,
-                    question_kind=question_kind,
-                )
+                self._attach_initial_think_signals(reasoning_context)
                 if isinstance(fallback_query_spec, dict):
                     reasoning_context.metadata["query_spec"] = dict(fallback_query_spec)
 
@@ -269,8 +306,6 @@ class DeepSearchServiceInitialThinkMixin:
                         CachedInitialThink(
                             report_needed=report_needed,
                             report_style=report_style,
-                            is_computable=is_computable,
-                            question_kind=question_kind,
                             raw=dict(raw),
                             plan_items=list(plan_state.items),
                             think_notes_payloads=list(note_payloads),
@@ -283,8 +318,6 @@ class DeepSearchServiceInitialThinkMixin:
             return {
                 "report_needed": report_needed,
                 "report_style": report_style,
-                "is_computable": is_computable,
-                "question_kind": question_kind,
                 "plan_state": plan_state,
                 "think_notes": note_payloads,
                 "think_notes_obj": list(notes),
@@ -301,30 +334,15 @@ class DeepSearchServiceInitialThinkMixin:
             model_name=model_name,
         )
 
-        is_computable = bool(query_spec.get("is_computable"))
-        question_kind = self._normalize_question_kind(query_spec.get("question_kind"))
         report_needed = bool(query_spec.get("report_needed", True))
         report_style = query_spec.get("report_style", "deepsearch")
 
-        if question_kind == "encyclopedia" and not report_needed:
+        if not report_needed:
             plan_items_list = [
                 {"text": "Answer the general concept question directly.", "checked": False},
             ]
-        elif is_computable:
-            plan_items_list = [
-                {"text": "Locate relevant file(s) for the question.", "checked": False},
-                {"text": "Locate pages containing required numeric fields.", "checked": False},
-                {"text": "Read full pages as citeable evidence.", "checked": False},
-                {"text": "Compute the answer using code.python with extracted values.", "checked": False},
-                {"text": "Submit final answer with citations.", "checked": False},
-            ]
         else:
-            plan_items_list = [
-                {"text": "Locate relevant file(s) for the question.", "checked": False},
-                {"text": "Locate pages containing the answer.", "checked": False},
-                {"text": "Read full pages as citeable evidence.", "checked": False},
-                {"text": "Submit final answer with citations.", "checked": False},
-            ]
+            plan_items_list = list(_DEFAULT_PLAN_ITEMS)
 
         plan_state = PlanState()
         plan_state.update(plan_items_list)
@@ -332,11 +350,7 @@ class DeepSearchServiceInitialThinkMixin:
         if isinstance(reasoning_context.metadata, dict):
             reasoning_context.metadata["report_style"] = report_style
             reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
-            self._attach_initial_think_signals(
-                reasoning_context,
-                is_computable=is_computable,
-                question_kind=question_kind,
-            )
+            self._attach_initial_think_signals(reasoning_context)
             # Propagate query_spec to graph_context for downstream tools (locate)
             reasoning_context.metadata["query_spec"] = dict(query_spec)
 
@@ -346,8 +360,6 @@ class DeepSearchServiceInitialThinkMixin:
             "plan": list(plan_state.items),
             "report_needed": report_needed,
             "report_style": report_style,
-            "is_computable": is_computable,
-            "question_kind": question_kind,
             "query_spec": query_spec,
         }
 
@@ -372,8 +384,6 @@ class DeepSearchServiceInitialThinkMixin:
         await emit_trace(
             "think",
             f"Initial think checkpoint (query_spec mode).\n"
-            f"question_kind={question_kind}\n"
-            f"is_computable={is_computable}\n"
             f"bm25_terms={query_spec.get('bm25_terms', [])}\n"
             f"regex_patterns={query_spec.get('regex_patterns', [])}",
             meta={"stage": "think_init", "plan_step": "think_init", "query_spec": True},
@@ -388,8 +398,6 @@ class DeepSearchServiceInitialThinkMixin:
                     CachedInitialThink(
                         report_needed=report_needed,
                         report_style=report_style,
-                        is_computable=is_computable,
-                        question_kind=question_kind,
                         raw=dict(raw),
                         plan_items=list(plan_state.items),
                         think_notes_payloads=list(note_payloads),
@@ -402,87 +410,10 @@ class DeepSearchServiceInitialThinkMixin:
         return {
             "report_needed": report_needed,
             "report_style": report_style,
-            "is_computable": is_computable,
-            "question_kind": question_kind,
             "plan_state": plan_state,
             "think_notes": note_payloads,
             "think_notes_obj": [note],
             "raw": raw,
             "cache": {"hit": False, "query_spec": True} if cache is not None and cache_key is not None else {"query_spec": True},
             "query_spec": dict(query_spec),
-        }
-
-    async def _run_final_think(
-        self,
-        *,
-        question: str,
-        scope: GraphAccessScope,
-        reasoning_context: GraphQueryContext,
-        evidences: Sequence[Dict[str, Any]] | None,
-        coverage_metrics: Dict[str, Any] | None,
-        plan_items: Sequence[Dict[str, Any]] | None,
-        report_needed: bool | None = None,
-        final_answer_mode: str | None = None,
-    ) -> Dict[str, Any]:
-        tool_manager = getattr(self, "tool_manager", None)
-        if not tool_manager:
-            raise RuntimeError("DeepSearchService requires a tool_manager for final_think")
-
-        plan_state = PlanState()
-        plan_state.update(plan_items or [])
-        extra = {
-            "trigger": "final_think",
-            "current_plan": list(plan_state.items),
-            "think_mode": "final",
-        }
-        if report_needed is not None:
-            extra["report_needed"] = bool(report_needed)
-        if final_answer_mode:
-            extra["final_answer_mode"] = str(final_answer_mode)
-        payload = {
-            "question": question,
-            "plan_step": "think_final",
-            "context_evidences": list(evidences or []),
-            "adapter": getattr(getattr(self, "graph_loop", None), "adapter", None),
-            "access_scope": scope,
-            "extra": extra,
-            "graph_context": reasoning_context.model_dump(exclude_none=True),
-            "coverage_metrics": coverage_metrics or {},
-        }
-        timeout = self._resolve_tool_timeout_seconds()
-        invocation = tool_manager.invoke(self._think_tool_name(), payload=payload)
-        if timeout is not None and timeout > 0:
-            result = await asyncio.wait_for(invocation, timeout=timeout)
-        else:
-            result = await invocation
-
-        notes = getattr(result, "think_notes", None) or []
-        raw = None
-        for note in reversed(list(notes)):
-            raw = note.metadata.get("raw") if isinstance(note.metadata, dict) else None
-            if isinstance(raw, dict):
-                break
-        raw = raw if isinstance(raw, dict) else {}
-
-        if notes and update_plan_from_think_notes(plan_state, think_notes=notes):
-            await emit_trace(
-                "write_outline",
-                plan_state.markdown,
-                meta={
-                    "stage": "final_think",
-                    "plan_step_id": "think_final",
-                    "plan_version": plan_state.version,
-                    "plan_items": list(plan_state.items),
-                },
-            )
-
-        lines: List[str] = ["Final think checkpoint."]
-        for idx, note in enumerate(notes, start=1):
-            lines.append(f"note_{idx}. reasoning={note.reasoning}")
-        await emit_trace("think", "\n".join(lines), meta={"stage": "final_think", "plan_step": "think_final"})
-        note_payloads = [note.model_dump(exclude_none=True) for note in notes]
-        return {
-            "think_notes": note_payloads,
-            "plan_state": plan_state,
-            "raw": raw,
         }

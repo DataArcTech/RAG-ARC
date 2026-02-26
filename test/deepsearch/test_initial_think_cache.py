@@ -61,20 +61,17 @@ class _DummyService(DeepSearchServiceInitialThinkMixin):
 
 
 @pytest.mark.asyncio
-async def test_initial_think_cache_hits_for_same_question():
+async def test_initial_think_cache_hits_for_same_question(monkeypatch):
+    monkeypatch.setenv("bench_mode", "0")
     svc = _DummyService()
     scope = GraphAccessScope(scope_id="owner-1")
     ctx = GraphQueryContext(adapter_name="test", owner_id="owner-1", question="Q", seed_entities=[], metadata={}, access_scope=scope)
 
     dummy_query_spec = {
-        "question_kind": "factual",
-        "is_computable": False,
         "report_needed": True,
         "report_style": "deepsearch",
         "bm25_terms": ["term1"],
         "regex_patterns": [],
-        "hyde_query": "dummy passage",
-        "compute_spec": None,
         "bm25_terms_by_lang": {},
         "regex_patterns_by_lang": {},
         "reasoning": "dummy reasoning",
@@ -107,21 +104,17 @@ async def test_initial_think_cache_hits_for_same_question():
 
 
 @pytest.mark.asyncio
-async def test_initial_think_cache_normalization_strips_trailing_punctuation_only():
+async def test_initial_think_cache_normalization_strips_trailing_punctuation_only(monkeypatch):
+    monkeypatch.setenv("bench_mode", "0")
     svc = _DummyService()
     scope = GraphAccessScope(scope_id="owner-1")
     ctx = GraphQueryContext(adapter_name="test", owner_id="owner-1", question="Q", seed_entities=[], metadata={}, access_scope=scope)
 
-    # Trailing punctuation should be normalized away for cache keys.
     dummy_query_spec = {
-        "question_kind": "factual",
-        "is_computable": False,
         "report_needed": True,
         "report_style": "deepsearch",
         "bm25_terms": ["term1"],
         "regex_patterns": [],
-        "hyde_query": "dummy passage",
-        "compute_spec": None,
         "bm25_terms_by_lang": {},
         "regex_patterns_by_lang": {},
         "reasoning": "dummy reasoning",
@@ -172,3 +165,29 @@ async def test_initial_think_cache_normalization_strips_trailing_punctuation_onl
     assert out3["report_needed"] is True
     assert out4.get("cache", {}).get("hit") is not True
     assert mock_gen2.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bench_mode_skips_query_spec(monkeypatch):
+    """In bench_mode, _run_initial_think should skip query_spec and return defaults."""
+    monkeypatch.setenv("bench_mode", "1")
+    svc = _DummyService()
+    scope = GraphAccessScope(scope_id="owner-1")
+    ctx = GraphQueryContext(adapter_name="test", owner_id="owner-1", question="Q", seed_entities=[], metadata={}, access_scope=scope)
+
+    with patch(
+        "application.rag_inference.deepsearch.service_runtime.initial_think.generate_query_spec",
+        new_callable=AsyncMock,
+    ) as mock_gen:
+        out = await svc._run_initial_think(
+            question="What is X?",
+            scope=scope,
+            reasoning_context=ctx,
+        )
+
+    # query_spec should NOT have been called
+    mock_gen.assert_not_awaited()
+    assert out["report_needed"] is True
+    assert out["report_style"] == "deepsearch"
+    assert out.get("cache", {}).get("bench_mode") is True
+    assert out["query_spec"] is None

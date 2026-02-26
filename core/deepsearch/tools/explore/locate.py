@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from config.core.deepsearch import tool_defaults
 from core.deepsearch.utils.file_scope import FileScope
-from core.deepsearch.utils.ids import coerce_uuid_list
+from core.deepsearch.utils.ids import coerce_uuid_list, resolve_file_ref
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
@@ -136,8 +136,8 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         channel="graph",
         description=(
             "Search for relevant files or pages. "
-            "Without 'file': returns a ranked list of file_ids across the knowledge base (file-level routing). "
-            "With 'file': returns ranked pages within that single file (page-level routing). "
+            "Without file_id: returns a ranked list of files across the knowledge base (file-level routing). "
+            "With file_id: returns ranked pages within that single file (page-level routing). "
             "Results are navigation snippets only — NOT citeable evidence; always follow up with read.pages."
         ),
         speed="fast",
@@ -158,10 +158,10 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                         "When omitted, the main question is used as the search query."
                     ),
                 },
-                "file": {
+                "file_id": {
                     "type": "string",
                     "description": (
-                        "A file_id (UUID) to search within. When set, switches to page-level mode "
+                        "A file_id (UUID) or filename to search within. When set, switches to page-level mode "
                         "and returns ranked pages instead of files. "
                         "Omit this to search across all files."
                     ),
@@ -183,17 +183,12 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                         "Patterns are case-insensitive. Complements the semantic search channels."
                     ),
                 },
-                "owner_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Limit search to specific owner scopes. Defaults to the current user's scope.",
-                },
             }
         ),
         example_args={
             "question": "Which PDF mentions multi-currency switching?",
             "plan_step": "plan_01",
-            "extra": {"top_k": 5, "owner_ids": ["<me-owner-id>"]},
+            "extra": {"top_k": 5},
         },
     )
 
@@ -205,9 +200,6 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             raw = request.graph_context.metadata.get("query_spec")
             if isinstance(raw, dict):
                 query_spec = dict(raw)
-
-        hyde_query = str(query_spec.get("hyde_query") or "").strip()
-        dense_query = hyde_query if hyde_query else query
 
         raw_bm25_terms = query_spec.get("bm25_terms") or []
         if not isinstance(raw_bm25_terms, (list, tuple)):
@@ -235,7 +227,6 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         visibility = self._resolve_owner_visibility(request)
         diagnostics: Dict[str, Any] = {
             "query": query,
-            "dense_query": dense_query,
             "bm25_extra_terms": bm25_extra_terms,
             "regex_patterns": regex_patterns,
             "owner_visibility": visibility.as_dict(),
@@ -249,17 +240,19 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             )
 
         file_scope = None
-        file_arg = (request.extra or {}).get("file")
-        if file_arg:
-            file_ids_coerced, invalid = coerce_uuid_list([str(file_arg)])
-            if file_ids_coerced:
-                file_scope = FileScope(file_ids=frozenset(file_ids_coerced), filename_contains=(), source="locate_arg")
-            diagnostics["file_scope"] = {"file": str(file_arg), "valid": bool(file_ids_coerced), "invalid": invalid}
+        resolved_file_id, file_ref_raw = await resolve_file_ref(
+            request.extra or {}, adapter=request.adapter, access_scope=request.access_scope,
+        )
+        if resolved_file_id:
+            file_scope = FileScope(file_ids=frozenset([resolved_file_id]), filename_contains=(), source="locate_arg")
+            diagnostics["file_scope"] = {"file_id": resolved_file_id, "raw": file_ref_raw}
+        elif file_ref_raw:
+            diagnostics["file_scope"] = {"file_id": None, "raw": file_ref_raw, "reason": "unresolved"}
 
         # Page-level mode: when file= is specified, switch to page aggregation.
         if file_scope is not None:
             return await self._run_page_level(
-                request=request, query=query, dense_query=dense_query,
+                request=request, query=query,
                 bm25_extra_terms=bm25_extra_terms, regex_patterns=regex_patterns,
                 file_scope=file_scope, diagnostics=diagnostics,
             )
@@ -268,50 +261,17 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         top_k_chunks = int(tool_defaults.FILE_SEARCH_CHANNEL_TOP_K)
 
         async def _run_faiss_seeded() -> _ChannelResult:
-            """Run FAISS with original query + HyDE query in parallel, dedup by chunk_id."""
-            queries = [query]
-            if hyde_query and hyde_query != query:
-                queries.append(hyde_query)
-
-            async def _faiss_for(q: str) -> _ChannelResult:
-                extra = dict(request.extra or {})
-                extra["focus_query"] = q
-                req = ToolRunRequest(
-                    question=request.question, plan_step=request.plan_step,
-                    context_evidences=request.context_evidences,
-                    adapter=request.adapter, access_scope=request.access_scope,
-                    extra=extra, graph_context=request.graph_context,
-                    coverage_metrics=request.coverage_metrics,
-                )
-                return await self._run_faiss(request=req, query=q, top_k=top_k_chunks, file_scope=file_scope)
-
-            if len(queries) == 1:
-                return await _faiss_for(queries[0])
-
-            parts = await asyncio.gather(*[_faiss_for(q) for q in queries], return_exceptions=True)
-            best: Dict[str, Any] = {}
-            best_score: Dict[str, float] = {}
-            merged_diags: Dict[str, Any] = {"queries": queries, "parts": []}
-            summaries: List[str] = []
-            for q, part in zip(queries, parts):
-                if isinstance(part, Exception):
-                    merged_diags["parts"].append({"query": q, "error": str(part)})
-                    continue
-                summaries.append(part.summary)
-                merged_diags["parts"].append({"query": q, **(part.diagnostics or {})})
-                for ev in part.evidences or []:
-                    cid = str(getattr(ev, "chunk_id", "") or "").strip()
-                    if not cid:
-                        continue
-                    sc = float(getattr(ev, "score", 0) or 0)
-                    if cid not in best or sc > best_score.get(cid, 0):
-                        best[cid] = ev
-                        best_score[cid] = sc
-            return _ChannelResult(
-                channel="faiss", evidences=list(best.values()),
-                diagnostics=merged_diags,
-                summary=" ".join(s for s in summaries if s).strip() or "FAISS search completed.",
+            """Run FAISS for the query."""
+            extra = dict(request.extra or {})
+            extra["focus_query"] = query
+            req = ToolRunRequest(
+                question=request.question, plan_step=request.plan_step,
+                context_evidences=request.context_evidences,
+                adapter=request.adapter, access_scope=request.access_scope,
+                extra=extra, graph_context=request.graph_context,
+                coverage_metrics=request.coverage_metrics,
             )
+            return await self._run_faiss(request=req, query=query, top_k=top_k_chunks, file_scope=file_scope)
 
         async def _run_bm25_seeded() -> _ChannelResult:
             variants = [query] + [t for t in bm25_extra_terms if t != query]
@@ -544,7 +504,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                 summary=build_llm_envelope(
                     thinking="File routing via multi-channel chunk retrieval produced no usable file candidates.",
                     answer=[],
-                    extra={"reason": reason, "next_step": "Revise query terms or broaden owner_ids; then rerun locate."},
+                    extra={"reason": reason, "next_step": "Revise query terms; then rerun locate."},
                 ),
                 diagnostics={**diagnostics, "reason": reason},
             )
@@ -608,7 +568,6 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         *,
         request: ToolRunRequest,
         query: str,
-        dense_query: str,
         bm25_extra_terms: List[str],
         regex_patterns: List[str],
         file_scope: FileScope,
@@ -641,50 +600,17 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                 page_to_sections.setdefault(p, []).append(sec.title or sec.path)
 
         async def _run_faiss_seeded() -> _ChannelResult:
-            """Run FAISS with original query + HyDE query in parallel, dedup by chunk_id."""
-            queries = [query]
-            if dense_query and dense_query != query:
-                queries.append(dense_query)
-
-            async def _faiss_for(q: str) -> _ChannelResult:
-                extra = dict(request.extra or {})
-                extra["focus_query"] = q
-                req = ToolRunRequest(
-                    question=request.question, plan_step=request.plan_step,
-                    context_evidences=request.context_evidences,
-                    adapter=request.adapter, access_scope=request.access_scope,
-                    extra=extra, graph_context=request.graph_context,
-                    coverage_metrics=request.coverage_metrics,
-                )
-                return await self._run_faiss(request=req, query=q, top_k=top_k_chunks, file_scope=file_scope)
-
-            if len(queries) == 1:
-                return await _faiss_for(queries[0])
-
-            parts = await asyncio.gather(*[_faiss_for(q) for q in queries], return_exceptions=True)
-            best: Dict[str, Any] = {}
-            best_score: Dict[str, float] = {}
-            merged_diags: Dict[str, Any] = {"queries": queries, "parts": []}
-            summaries: List[str] = []
-            for q, part in zip(queries, parts):
-                if isinstance(part, Exception):
-                    merged_diags["parts"].append({"query": q, "error": str(part)})
-                    continue
-                summaries.append(part.summary)
-                merged_diags["parts"].append({"query": q, **(part.diagnostics or {})})
-                for ev in part.evidences or []:
-                    cid = str(getattr(ev, "chunk_id", "") or "").strip()
-                    if not cid:
-                        continue
-                    sc = float(getattr(ev, "score", 0) or 0)
-                    if cid not in best or sc > best_score.get(cid, 0):
-                        best[cid] = ev
-                        best_score[cid] = sc
-            return _ChannelResult(
-                channel="faiss", evidences=list(best.values()),
-                diagnostics=merged_diags,
-                summary=" ".join(s for s in summaries if s).strip() or "FAISS search completed.",
+            """Run FAISS for the query."""
+            extra = dict(request.extra or {})
+            extra["focus_query"] = query
+            req = ToolRunRequest(
+                question=request.question, plan_step=request.plan_step,
+                context_evidences=request.context_evidences,
+                adapter=request.adapter, access_scope=request.access_scope,
+                extra=extra, graph_context=request.graph_context,
+                coverage_metrics=request.coverage_metrics,
             )
+            return await self._run_faiss(request=req, query=query, top_k=top_k_chunks, file_scope=file_scope)
 
         async def _run_bm25_seeded() -> _ChannelResult:
             variants = [query] + [t for t in bm25_extra_terms if t != query]

@@ -1,8 +1,7 @@
 """QuerySpec: lightweight pre-agent query analysis for DeepSearch.
 
-Replaces the heavy initial think LLM call with a focused query classification
-and retrieval-seed generation step. Input is ONLY (question, target_langs).
-No adapter, no graph_context, no coverage_metrics.
+Classifies whether the question needs deep document search and extracts
+retrieval seed terms (BM25 + regex). Input is ONLY (question, target_langs).
 """
 
 import os
@@ -28,15 +27,8 @@ def _coerce_query_spec(raw: Dict[str, Any], *, question: str) -> Dict[str, Any]:
     """Coerce raw LLM output into a stable QuerySpec shape."""
     spec: Dict[str, Any] = {}
 
-    kind = str(raw.get("question_kind") or "").strip().lower()
-    if kind not in {"encyclopedia", "factual", "computable", "multi_hop"}:
-        kind = "factual"
-    spec["question_kind"] = kind
-
-    spec["is_computable"] = bool(raw.get("is_computable"))
-
     report_needed = raw.get("report_needed")
-    spec["report_needed"] = bool(report_needed) if report_needed is not None else (kind != "encyclopedia")
+    spec["report_needed"] = bool(report_needed) if report_needed is not None else True
 
     style = str(raw.get("report_style") or "").strip().lower()
     if style not in {"deepsearch", "research"}:
@@ -54,28 +46,6 @@ def _coerce_query_spec(raw: Dict[str, Any], *, question: str) -> Dict[str, Any]:
         spec["regex_patterns"] = [str(p).strip() for p in regex_raw if str(p).strip()][:5]
     else:
         spec["regex_patterns"] = []
-
-    spec["hyde_query"] = str(raw.get("hyde_query") or "").strip()
-
-    cs_raw = raw.get("compute_spec")
-    if isinstance(cs_raw, dict) and spec["is_computable"]:
-        fields_raw = cs_raw.get("required_fields")
-        fields: List[Dict[str, str]] = []
-        if isinstance(fields_raw, list):
-            for item in fields_raw:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
-                hint = str(item.get("hint") or "").strip()
-                if name:
-                    fields.append({"name": name, "hint": hint})
-        spec["compute_spec"] = {
-            "formula_hint": str(cs_raw.get("formula_hint") or "").strip(),
-            "required_fields": fields[:8],
-            "rounding": str(cs_raw.get("rounding") or "").strip() or None,
-        }
-    else:
-        spec["compute_spec"] = None
 
     by_lang = raw.get("bm25_terms_by_lang")
     if isinstance(by_lang, dict):

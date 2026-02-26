@@ -126,7 +126,6 @@ async def test_locate_uses_query_spec_regex(monkeypatch):
             "query_spec": {
                 "bm25_terms": ["EBITDA", "FY2023"],
                 "regex_patterns": ["EBITDA"],
-                "hyde_query": "The EBITDA for FY2023 was approximately...",
             }
         },
     )

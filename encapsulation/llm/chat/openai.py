@@ -52,12 +52,29 @@ class OpenAIChatLLM(ChatLLMBase):
             self.client = create_openai_sync_client(self.config)
             self.async_client = create_openai_async_client(self.config)
             self.tokenizer = None
+            # Build default extra_body for reasoning control.
+            reasoning_enabled = getattr(self.config, "reasoning_enabled", False)
+            self._default_extra_body: Dict[str, Any] = {
+                "reasoning": {"enabled": bool(reasoning_enabled)},
+            }
         elif self.loading_method == 'huggingface':
             # For HuggingFace transformers, we get (model, tokenizer) tuple
             self.client, self.tokenizer = create_transformers_client(self.config)
             self.async_client = None  # HuggingFace uses asyncio.to_thread wrapper
         else:
             raise ValueError(f"Unsupported loading method: {self.loading_method}")
+
+    def _apply_extra_body(self, kwargs: Dict[str, Any]) -> None:
+        """Merge default extra_body (reasoning control) into kwargs in-place."""
+        default = getattr(self, "_default_extra_body", None)
+        if not default:
+            return
+        eb = kwargs.get("extra_body")
+        if eb is None:
+            kwargs["extra_body"] = dict(default)
+        elif isinstance(eb, dict):
+            for k, v in default.items():
+                eb.setdefault(k, v)
 
     # ==================== CHAT IMPLEMENTATION ====================
 
@@ -195,6 +212,7 @@ class OpenAIChatLLM(ChatLLMBase):
             temperature = float(kwargs.pop("temperature", self.temperature))
             temperature = self._adjust_temperature_for_model(model, temperature)
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
+            self._apply_extra_body(kwargs)
             raw = self.client.with_raw_response.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -359,6 +377,7 @@ class OpenAIChatLLM(ChatLLMBase):
                 logger.warning("OpenAIChatLLM.stream_chat failed to log request details: %s", exc)
             
             try:
+                self._apply_extra_body(kwargs)
                 stream = self.client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -610,6 +629,7 @@ class OpenAIChatLLM(ChatLLMBase):
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
+            self._apply_extra_body(kwargs)
             raw = await self.async_client.with_raw_response.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -682,6 +702,7 @@ class OpenAIChatLLM(ChatLLMBase):
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
+            self._apply_extra_body(kwargs)
             stream = await self.async_client.chat.completions.create(
                 model=model,
                 messages=messages,
