@@ -674,8 +674,53 @@ class ThinkTool(GraphTool):
         def _default(value):
             return str(value)
 
-        # Stable, token-efficient JSON improves cache hit rates and reduces JSON-repair churn.
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_default)
+        # Key ordering optimised for automatic prefix caching.
+        # Prompt caches identical token prefixes from position 0.  By placing
+        # fields that are *stable across think rounds* at the beginning of the
+        # JSON, successive rounds share a longer cacheable prefix → lower cost
+        # (cache reads = 0.1× input price) and faster TTFT.
+        #
+        # Tier 1 – identical across all rounds within a single DeepSearch run:
+        #   question, available_tools, graph_context
+        # Tier 2 – mostly stable / small:
+        #   plan_step, tool_budget
+        # Tier 3 – changes each round but small:
+        #   budget_status, coverage_metrics, runtime
+        # Tier 4 – grows monotonically (large):
+        #   already_read_pages, current_plan, evidence_l0_digest,
+        #   context_evidences, context_evidences_total
+        # Tier 5 – completely new each round (must be last):
+        #   previous_tool_call_results, recent_tool_runs
+        _PREFERRED_ORDER = (
+            "question",
+            "available_tools",
+            "graph_context",
+            "plan_step",
+            "tool_budget",
+            "budget_status",
+            "coverage_metrics",
+            "runtime",
+            "already_read_pages",
+            "current_plan",
+            "evidence_l0_digest",
+            "context_evidences",
+            "context_evidences_total",
+            "previous_tool_call_results",
+            "recent_tool_runs",
+        )
+
+        if isinstance(payload, dict):
+            ordered: dict = {}
+            for key in _PREFERRED_ORDER:
+                if key in payload:
+                    ordered[key] = payload[key]
+            # Any remaining keys not in the preferred list, appended in sorted order.
+            for key in sorted(payload.keys()):
+                if key not in ordered:
+                    ordered[key] = payload[key]
+            payload = ordered
+
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_default)
 
     @staticmethod
     def _budget_phase(snapshot: Dict[str, Any]) -> str:
