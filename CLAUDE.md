@@ -255,6 +255,25 @@ RAG-ARC uses three parallel retrieval paths + optional section path with Recipro
 - BM25 multilingual variants: disabled (single query only)
 - Web search: disabled
 
+## Multi-Turn Conversation
+
+**Intent Routing** (semantic-router, TOML-driven):
+- 8 intents with 3 actions: `rag`, `web_only`, `no_retrieval`
+- Controlled by `RAG_INTENT_ROUTING_ENABLED` (default: false)
+- Embedding provider: `INTENT_EMBEDDING_PROVIDER` (default: `api`, reuses RAG embedding credentials; `local` uses Qwen model)
+- Follow-up intents (`FOLLOWUP_NO_RAG`, `FOLLOWUP_RAG_REQUIRED`, `ANSWER_DISSATISFIED`) gated by prior history existence
+- `ANSWER_DISSATISFIED` forces same-topic (no topic mutation)
+
+**Topic Stack** (Redis-backed, session-scoped):
+- Centroid-based topic clustering with incremental mean
+- Actions: `same_topic`, `topic_switch`, `return_to_topic`
+- History scoping: `topic_scoped` mode sends only topic-relevant turns to rewriter/LLM
+- Bridge context: on `topic_switch`, includes the last Q&A pair from the previous topic so the rewriter can disambiguate referential follow-ups (e.g., "那B的呢？")
+
+**Multi-Turn Query Rewrite**:
+- Topic-scoped history passed to rewriter for disambiguation
+- Rewriter injects anchors from history when the query is ambiguous (follow-ups that omit entity names)
+
 ## Document Processing Pipeline
 
 ### Stages

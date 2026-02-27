@@ -97,11 +97,12 @@ How secrets flow into configs:
 | `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | Default sleep (seconds) between 429 retries when Retry-After is not available. |
 | `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | Max sleep (seconds) between 429 retries (cap). |
 | `INTENT_ROUTER_CONFIG_PATH` | `config/core/intent_routing/intent_router.toml` | Path to the TOML config for semantic intent routing. |
-| `INTENT_EMBEDDING_API_KEY` | _(empty)_ | API key for intent embeddings when `intent_router.embedding.provider=openai_compat`. |
-| `INTENT_EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for intent embeddings (OpenAI-compatible) when `intent_router.embedding.provider=openai_compat`. |
-| `INTENT_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Intent embedding model name when using `openai_compat`. |
-| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Intent embedding model name when using `qwen_local` (SentenceTransformers). |
-| `INTENT_EMBEDDING_DEVICE` | `cpu` | Intent embedding device when using `qwen_local` (SentenceTransformers). |
+| `INTENT_EMBEDDING_PROVIDER` | `api` | Intent embedding provider. `api`: reuse RAG embedding credentials (`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_EMBEDDING_MODEL`). `local`: use local Qwen model (requires download). |
+| `INTENT_EMBEDDING_API_KEY` | _(empty; falls back to `EMBEDDING_API_KEY` → `OPENAI_API_KEY`)_ | API key for intent embeddings when provider=`api`. |
+| `INTENT_EMBEDDING_API_BASE_URL` | _(empty; falls back to `EMBEDDING_API_BASE_URL` → `OPENAI_BASE_URL`)_ | Base URL for intent embeddings when provider=`api`. |
+| `INTENT_OPENAI_EMBEDDING_MODEL` | _(falls back to `OPENAI_EMBEDDING_MODEL`)_ | Intent embedding model name when provider=`api`. |
+| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Intent embedding model name when provider=`local` (SentenceTransformers). |
+| `INTENT_EMBEDDING_DEVICE` | `cpu` | Intent embedding device when provider=`local` (SentenceTransformers). |
 | `INTENT_EMBEDDING_CACHE_FOLDER` | `./models/Qwen` | Optional cache folder for intent embedding weights (SentenceTransformers). |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
