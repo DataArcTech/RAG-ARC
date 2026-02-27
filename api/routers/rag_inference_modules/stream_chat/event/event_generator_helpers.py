@@ -25,7 +25,7 @@ async def process_deepsearch_events(
 ) -> AsyncGenerator[str, None]:
     """处理 DeepSearch 事件流。
     """
-    deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
+    deepsearch_result_container, trace_file_path_container, deepsearch_gen, _trace_call_index = await process_deepsearch(
         query,
         str(effective_owner),
         request_id,

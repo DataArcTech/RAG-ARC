@@ -73,7 +73,7 @@ async def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, cl
             return None
 
     class FakeRAG:
-        def stream_chat(self, _history_text, _owner_id, return_subgraph=False):  # noqa: ARG002
+        def stream_chat(self, query, owner_id, return_subgraph=False, **kwargs):  # noqa: ARG002
             def _gen():
                 yield "assistant ok"
 

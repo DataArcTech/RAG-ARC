@@ -110,7 +110,7 @@ async def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_know
             return
             yield
 
-        return [deepsearch_result], [None], _empty_gen()
+        return [deepsearch_result], [None], _empty_gen(), [0]
 
     # DeepSearch streaming uses the handler under stream_chat.deepsearch.
     monkeypatch.setattr(

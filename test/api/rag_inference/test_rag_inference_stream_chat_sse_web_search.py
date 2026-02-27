@@ -2,6 +2,7 @@ import os
 import sys
 import uuid
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -105,7 +106,8 @@ def _build_stub_rag():
     return rag
 
 
-def test_stream_chat_web_search_includes_chunks_and_progress():
+@patch("application.rag_inference.module.benchmark_mode_enabled", return_value=False)
+def test_stream_chat_web_search_includes_chunks_and_progress(_mock_bench):
     session_id = uuid.uuid4()
     user = SimpleNamespace(id=uuid.uuid4(), type=0)
     rag = _build_stub_rag()
