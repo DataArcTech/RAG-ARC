@@ -48,3 +48,16 @@ def test_think_prompt_has_unanswerable_fast_exit() -> None:
 def test_read_pages_soft_cap_default() -> None:
     from config.core.deepsearch import tool_defaults
     assert tool_defaults.READ_PAGES_SOFT_CAP_ADVISORY == 3
+
+
+def test_think_prompt_has_plan_guidance_section() -> None:
+    prompt = THINK_TOOL_SYSTEM_PROMPT_EN
+    assert "## Plan Guidance" in prompt
+    assert "current_plan" in prompt
+    assert "checked=true" in prompt
+    assert "NOT sequential gates" in prompt
+    # Plan Guidance should NOT duplicate code.python section content
+    plan_section_start = prompt.index("## Plan Guidance")
+    plan_section_end = prompt.index("##", plan_section_start + 1)
+    plan_section = prompt[plan_section_start:plan_section_end]
+    assert "code.python" not in plan_section

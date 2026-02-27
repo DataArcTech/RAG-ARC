@@ -159,8 +159,11 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             previous_tool_call_results = []
 
         max_rounds = max(1, int(self._think_config.get("max_rounds_per_checkpoint") or 1))
+        max_think_failures = max(1, int(self._think_config.get("max_think_failures") or max_rounds))
+        think_failure_count = 0
+        think_success_count = 0
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in range(1, max_rounds + max_think_failures + 1):
                 coverage_metrics = self._coverage_snapshot(
                     evidences=evidences,
                     completed_steps=len(reasoning_steps),
@@ -228,12 +231,14 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                         "Think tool failed (continuing loop).",
                         meta={"stage": "think_loop_error", "round": round_idx, "error": str(exc)},
                     )
-                    if round_idx < max_rounds:
+                    think_failure_count += 1
+                    if think_failure_count < max_think_failures:
                         continue
                     break
 
                 await self._extend_shared_evidences(result.evidences)
                 record.status = "done"
+                think_success_count += 1
                 record.output_summary = result.summary
                 record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
                 record.diagnostics.setdefault("reason", "think_loop")
@@ -299,6 +304,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 proposed = int(tool_call_summary.get("proposed") or 0)
                 previous_tool_call_results = list(tool_call_summary.get("results") or [])
                 if proposed <= 0:
+                    break
+                if think_success_count >= max_rounds:
                     break
         finally:
             _RUN_EVIDENCES.reset(evidences_token)

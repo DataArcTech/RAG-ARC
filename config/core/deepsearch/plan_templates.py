@@ -55,7 +55,7 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         "plan_items": [
             "Extract comparison targets: {targets}; axis: {axis}.",
             "Use locate to locate candidate files for each target; start with the single best file first unless the user explicitly asks cross-file comparison.",
-            "Use toc.tree / locate(file=X) to locate pages covering {axis} for each target, then read full pages via read.pages.",
+            "For EACH target: use toc.tree / locate(file=X) to find pages covering {axis}, then read 1-3 pages via read.pages.",
             "Synthesize a comparison table; cite only from read.pages/graph triples and call out any missing evidence explicitly.",
         ],
         "initial_tool_calls": [
@@ -82,8 +82,8 @@ PLAN_TEMPLATES: List[Dict[str, Any]] = [
         "plan_items": [
             "Restate the metric to locate: {metric}. Constraints/context: {context}.",
             "Route to the right file via locate; then use locate(file=X) to find the table/section most likely containing {metric}.",
-            "Read full pages with read.pages and expand to continuous adjacent pages until the whole table + footnotes are covered.",
-            "Extract the numeric values carefully; if ambiguous, quote the relevant rows/notes and explain the interpretation boundaries.",
+            "Read the top 1-3 pages from locate. If the metric is not stated directly, identify its component values (e.g. numerator and denominator).",
+            "Once you have the numbers, call code.python to compute the answer (do NOT mental-math). Then set is_final=true.",
         ],
         "initial_tool_calls": [
             {

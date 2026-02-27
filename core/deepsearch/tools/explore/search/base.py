@@ -123,6 +123,11 @@ class _SearchToolBase:
 
     def _resolve_query_variants(self, query: str, *, cache_scope: str | None = None) -> List[str]:
         try:
+            from config.benchmark_mode import benchmark_mode_enabled
+
+            if benchmark_mode_enabled():
+                return [str(query or "").strip()] if query else []
+
             from core.utils.query_variants import generate_query_variants
 
             variants = generate_query_variants(query, llm_connector=self.llm_connector, cache_scope=cache_scope)

@@ -52,3 +52,14 @@ async def test_select_plan_template_rejects_unknown_template_id() -> None:
     assert selection is not None
     assert selection.use_template is False
     assert selection.template_id is None
+
+
+def test_numeric_table_template_mentions_code_python() -> None:
+    templates = coerce_templates()
+    plan_items, _, _ = instantiate_template_plan(
+        templates=templates,
+        template_id="doc.numeric_table.v1",
+        question="What is the ROCE?",
+        slots={"metric": "ROCE", "context": "FY2023"},
+    )
+    assert any("code.python" in item["text"] for item in plan_items)

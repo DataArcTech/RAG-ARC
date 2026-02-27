@@ -4,12 +4,19 @@ from typing import Any, Dict, List, Sequence
 from core.deepsearch.query_spec import generate_query_spec
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.memory.plan_state import PlanState, update_plan_from_think_notes
+from core.deepsearch.planning.template_planner import (
+    coerce_templates,
+    instantiate_template_plan,
+    select_plan_template,
+    PlanTemplateSelection,
+)
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.deepsearch import GraphQueryContext
 from encapsulation.data_model.deepsearch import ThinkNote
 
 from application.rag_inference.deepsearch.runtime_cache import CachedInitialThink
 from config.benchmark_mode import benchmark_mode_enabled
+from config.core.deepsearch import plan_template_defaults
 
 
 _DEFAULT_PLAN_ITEMS: List[Dict[str, Any]] = [
@@ -96,12 +103,47 @@ class DeepSearchServiceInitialThinkMixin:
         evidences = list(context_evidences or [])
 
         # ------------------------------------------------------------------
-        # Bench mode: skip query_spec entirely. Let the main LLM receive
-        # the question directly without pre-classification overhead.
+        # Bench mode: skip query_spec but still run template planner for
+        # question-specific plan items. Only QuerySpec classification is
+        # skipped to avoid confounding algorithm comparisons.
         # ------------------------------------------------------------------
         if benchmark_mode_enabled():
+            # Run template selection if enabled (lightweight LLM call).
+            llm = self._resolve_llm_connector()
+            template_enabled = bool(getattr(plan_template_defaults, "DEFAULT_INITIAL_THINK_TEMPLATE_ENABLED", True))
+            initial_tool_calls: list[Dict[str, Any]] = []
+            template_sig: str | None = None
+            template_selection = None
+
+            if llm is not None and template_enabled:
+                model_name = self._resolve_query_spec_model()
+                try:
+                    template_selection = await select_plan_template(
+                        llm_connector=llm, question=question, model_name=model_name,
+                    )
+                except Exception:
+                    template_selection = None
+
+            if (
+                isinstance(template_selection, PlanTemplateSelection)
+                and template_selection.use_template
+                and template_selection.template_id
+            ):
+                try:
+                    templates = coerce_templates()
+                    plan_items_list, initial_tool_calls, template_sig = instantiate_template_plan(
+                        templates=templates,
+                        template_id=template_selection.template_id,
+                        question=question,
+                        slots=template_selection.slots,
+                    )
+                except Exception:
+                    plan_items_list = list(_DEFAULT_PLAN_ITEMS)
+            else:
+                plan_items_list = list(_DEFAULT_PLAN_ITEMS)
+
             plan_state = PlanState()
-            plan_state.update(list(_DEFAULT_PLAN_ITEMS))
+            plan_state.update(plan_items_list)
 
             if isinstance(reasoning_context.metadata, dict):
                 reasoning_context.metadata["report_style"] = "deepsearch"
@@ -109,8 +151,8 @@ class DeepSearchServiceInitialThinkMixin:
                 self._attach_initial_think_signals(reasoning_context)
 
             raw: Dict[str, Any] = {
-                "reasoning": "Benchmark mode: skip query_spec pre-classification.",
-                "tool_calls": [],
+                "reasoning": "Benchmark mode: query_spec skipped, template planner active.",
+                "tool_calls": initial_tool_calls,
                 "plan": list(plan_state.items),
                 "report_needed": True,
                 "report_style": "deepsearch",
@@ -132,12 +174,20 @@ class DeepSearchServiceInitialThinkMixin:
                     "plan_version": plan_state.version,
                     "plan_items": list(plan_state.items),
                     "bench_mode": True,
+                    "template_sig": template_sig,
+                    "template_id": template_selection.template_id if isinstance(template_selection, PlanTemplateSelection) else None,
                 },
             )
             await emit_trace(
                 "think",
-                "Initial think checkpoint (bench_mode: query_spec skipped).",
-                meta={"stage": "think_init", "plan_step": "think_init", "bench_mode": True},
+                "Initial think checkpoint (bench_mode: query_spec skipped, template planner active).",
+                meta={
+                    "stage": "think_init",
+                    "plan_step": "think_init",
+                    "bench_mode": True,
+                    "template_sig": template_sig,
+                    "template_id": template_selection.template_id if isinstance(template_selection, PlanTemplateSelection) else None,
+                },
             )
 
             return {
@@ -328,16 +378,51 @@ class DeepSearchServiceInitialThinkMixin:
 
         model_name = self._resolve_query_spec_model()
 
-        query_spec = await generate_query_spec(
+        # Run QuerySpec and template selection in parallel (zero extra latency).
+        template_enabled = bool(getattr(plan_template_defaults, "DEFAULT_INITIAL_THINK_TEMPLATE_ENABLED", True))
+        query_spec_coro = generate_query_spec(
             llm_connector=llm,
             question=question,
             model_name=model_name,
         )
+        if template_enabled:
+            template_coro = select_plan_template(
+                llm_connector=llm, question=question, model_name=model_name,
+            )
+            query_spec, template_selection = await asyncio.gather(
+                query_spec_coro, template_coro, return_exceptions=True,
+            )
+            # Graceful fallback if either fails
+            if isinstance(query_spec, BaseException):
+                query_spec = {"report_needed": True, "report_style": "deepsearch", "bm25_terms": [], "regex_patterns": [], "reasoning": "QuerySpec failed."}
+            if isinstance(template_selection, BaseException):
+                template_selection = None
+        else:
+            query_spec = await query_spec_coro
+            template_selection = None
 
         report_needed = bool(query_spec.get("report_needed", True))
         report_style = query_spec.get("report_style", "deepsearch")
 
-        if not report_needed:
+        # Derive plan items: template > default
+        initial_tool_calls: list[Dict[str, Any]] = []
+        template_sig: str | None = None
+        if (
+            isinstance(template_selection, PlanTemplateSelection)
+            and template_selection.use_template
+            and template_selection.template_id
+        ):
+            try:
+                templates = coerce_templates()
+                plan_items_list, initial_tool_calls, template_sig = instantiate_template_plan(
+                    templates=templates,
+                    template_id=template_selection.template_id,
+                    question=question,
+                    slots=template_selection.slots,
+                )
+            except Exception:
+                plan_items_list = list(_DEFAULT_PLAN_ITEMS)
+        elif not report_needed:
             plan_items_list = [
                 {"text": "Answer the general concept question directly.", "checked": False},
             ]
@@ -356,7 +441,7 @@ class DeepSearchServiceInitialThinkMixin:
 
         raw = {
             "reasoning": query_spec.get("reasoning", "QuerySpec generation."),
-            "tool_calls": [],
+            "tool_calls": initial_tool_calls,
             "plan": list(plan_state.items),
             "report_needed": report_needed,
             "report_style": report_style,
@@ -379,6 +464,8 @@ class DeepSearchServiceInitialThinkMixin:
                 "plan_version": plan_state.version,
                 "plan_items": list(plan_state.items),
                 "query_spec": True,
+                "template_sig": template_sig,
+                "template_id": template_selection.template_id if isinstance(template_selection, PlanTemplateSelection) else None,
             },
         )
         await emit_trace(
@@ -386,7 +473,13 @@ class DeepSearchServiceInitialThinkMixin:
             f"Initial think checkpoint (query_spec mode).\n"
             f"bm25_terms={query_spec.get('bm25_terms', [])}\n"
             f"regex_patterns={query_spec.get('regex_patterns', [])}",
-            meta={"stage": "think_init", "plan_step": "think_init", "query_spec": True},
+            meta={
+                "stage": "think_init",
+                "plan_step": "think_init",
+                "query_spec": True,
+                "template_sig": template_sig,
+                "template_id": template_selection.template_id if isinstance(template_selection, PlanTemplateSelection) else None,
+            },
         )
 
         note_payloads = [note.model_dump(exclude_none=True)]
