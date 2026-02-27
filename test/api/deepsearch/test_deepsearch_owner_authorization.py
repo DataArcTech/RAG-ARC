@@ -101,7 +101,10 @@ async def test_deepsearch_celery_endpoints_enforce_owner(monkeypatch):
     current = {"id": owner_id}
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=current["id"])
+    async def _stub_user():  # noqa: ANN001
+        return SimpleNamespace(id=current["id"])
+
+    app.dependency_overrides[get_current_user] = _stub_user
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

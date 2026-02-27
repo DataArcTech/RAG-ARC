@@ -63,7 +63,7 @@ async def test_run_scoped_tool_memoization_replays_across_checkpoints():
     memo = RunToolMemoizer(
         enabled=True,
         max_entries=16,
-        include_prefixes=("search.",),
+        include_prefixes=("locate",),
         exclude_prefixes=(),
     )
     memo_token = _RUN_TOOL_MEMO.set(memo)
@@ -74,7 +74,7 @@ async def test_run_scoped_tool_memoization_replays_across_checkpoints():
             metadata={
                 "raw": {
                     "tool_calls": [
-                        {"tool_name": "search.file", "tool_args": {"query": "abc", "top_k": 3}},
+                        {"tool_name": "locate", "tool_args": {"query": "abc", "top_k": 3}},
                     ]
                 }
             },
@@ -96,7 +96,7 @@ async def test_run_scoped_tool_memoization_replays_across_checkpoints():
             metadata={
                 "raw": {
                     "tool_calls": [
-                        {"tool_name": "search.file", "tool_args": {"query": "abc", "top_k": 3}},
+                        {"tool_name": "locate", "tool_args": {"query": "abc", "top_k": 3}},
                     ]
                 }
             },
@@ -125,4 +125,3 @@ async def test_run_scoped_tool_memoization_replays_across_checkpoints():
     finally:
         _RUN_TOOL_MEMO.reset(memo_token)
         _RUN_PLAN_STATE.reset(plan_token)
-

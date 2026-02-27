@@ -97,7 +97,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             return self._empty_payload(query)
 
         options = dict(query_options) if isinstance(query_options, Mapping) else {}
-        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token, options)
+        from core.utils.thread_pool import run_blocking
+
+        return await run_blocking(self._aquery_subgraph_sync, query, channel, scope_token, options)
 
     async def acypher(
         self,
@@ -129,7 +131,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             raise ValueError(f"HippoRAGGraphAdapter.acypher params must not include reserved keys: {overridden}")
         merged["global_owner"] = getattr(graph_store, "OWNER_GLOBAL_KEY", "__GLOBAL__")
         merged["owner_id"] = owner_key
-        return await asyncio.to_thread(graph_store._execute_query, str(cypher), merged)
+        from core.utils.thread_pool import run_blocking
+
+        return await run_blocking(graph_store._execute_query, str(cypher), merged)
 
     def cypher_capable(self) -> bool:
         graph_store = getattr(self.retriever, "graph_store", None)
@@ -788,7 +792,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if isinstance(subgraph_info, dict) and scope_token:
             subgraph_info.setdefault("owner_scope", scope_token)
         # Exporting the full subgraph (nodes/edges) can be expensive on Neo4j. Default to disabled unless explicitly
-        # requested by callers that need visualization/triple context (e.g. explore/graph.ops workflows).
+        # requested by callers that need visualization/triple context.
         export_subgraph = False
         if isinstance(query_options, Mapping) and "export_subgraph" in query_options:
             export_subgraph = bool(query_options.get("export_subgraph"))

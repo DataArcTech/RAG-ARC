@@ -203,18 +203,19 @@ The `Register` class automatically substitutes environment variables when loadin
 
 ## Multi-Path Retrieval System
 
-RAG-ARC uses three parallel retrieval paths with Reciprocal Rank Fusion (RRF):
+RAG-ARC uses three parallel retrieval paths + optional section path with Reciprocal Rank Fusion (RRF):
 
 1. **Dense Retrieval** (FAISS)
    - GPU-accelerated vector similarity search
    - Supports flat, IVF, and HNSW index types
    - Two-stage retrieval for HNSW (ANN prefetch + exact rescoring)
+   - HyDE dual-query: searches with both `[original_query, hyde_query]` for better recall
    - Owner-scoped isolation
 
 2. **Sparse Retrieval** (BM25 via Tantivy)
    - Full-text search with BM25 scoring
    - Owner-scoped isolation
-   - Supports query variants for mixed-language corpora
+   - Supports query variants for mixed-language corpora (disabled in bench mode)
 
 3. **Graph Retrieval** (Neo4j HippoRAG)
    - Subgraph PPR (Personalized PageRank on relevant subgraphs)
@@ -222,11 +223,56 @@ RAG-ARC uses three parallel retrieval paths with Reciprocal Rank Fusion (RRF):
    - Incremental updates without full reconstruction
    - Optional dense-seeded file prior to reduce cross-product drift
 
+4. **Section Retrieval** (PageIndex)
+   - Weight default 0.5 (less than dense/BM25)
+   - Uses PageIndex + rerank model to find section-relevant chunks
+
+**Score Aggregation**:
+- Within each retriever path, multi-variant results are aggregated: `sum(scores) / sqrt(n + 1)`
+- Across paths, RRF fusion combines results with configurable weights
+
 **Fusion Configuration**:
-- Weights controlled via `.env`: `RAG_RETRIEVAL_WEIGHT_DENSE`, `RAG_RETRIEVAL_WEIGHT_BM25`, `RAG_RETRIEVAL_WEIGHT_GRAPH`
+- Weights controlled via `.env`: `RAG_RETRIEVAL_WEIGHT_DENSE`, `RAG_RETRIEVAL_WEIGHT_BM25`, `RAG_RETRIEVAL_WEIGHT_GRAPH`, `RAG_RETRIEVAL_WEIGHT_SECTION`
 - Default: Graph retrieval disabled for normal RAG (weight=0.0) to reduce latency
 - Graph is still built and used by DeepSearch
 - Dynamic quota allocation via `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED`
+
+**HyDE (Hypothetical Document Embedding)**:
+- Controlled by `RAG_HYDE_ENABLED` (default: true)
+- Generated in parallel with query rewrite (adds ~0 extra latency)
+- Stays active even in bench mode
+- Only used for dense retrieval path
+
+**Reranker**:
+- Controlled by `RAG_RERANKER_TYPE`: `listwise` (default) uses DashScope qwen-rerank, `llm` uses the chat model for listwise reranking
+- Dynamic instruct: includes the user's question for context-aware reranking
+- When web search is active, instruct prioritizes web content
+
+**Bench Mode Behavior** (`bench_mode=1`):
+- Intent routing: disabled
+- Query rewrite: skipped (returns original query)
+- HyDE generation: enabled (still runs)
+- BM25 multilingual variants: disabled (single query only)
+- Web search: disabled
+
+## Multi-Turn Conversation
+
+**Intent Routing** (semantic-router, TOML-driven):
+- 8 intents with 3 actions: `rag`, `web_only`, `no_retrieval`
+- Controlled by `RAG_INTENT_ROUTING_ENABLED` (default: false)
+- Embedding provider: `INTENT_EMBEDDING_PROVIDER` (default: `api`, reuses RAG embedding credentials; `local` uses Qwen model)
+- Follow-up intents (`FOLLOWUP_NO_RAG`, `FOLLOWUP_RAG_REQUIRED`, `ANSWER_DISSATISFIED`) gated by prior history existence
+- `ANSWER_DISSATISFIED` forces same-topic (no topic mutation)
+
+**Topic Stack** (Redis-backed, session-scoped):
+- Centroid-based topic clustering with incremental mean
+- Actions: `same_topic`, `topic_switch`, `return_to_topic`
+- History scoping: `topic_scoped` mode sends only topic-relevant turns to rewriter/LLM
+- Bridge context: on `topic_switch`, includes the last Q&A pair from the previous topic so the rewriter can disambiguate referential follow-ups (e.g., "那B的呢？")
+
+**Multi-Turn Query Rewrite**:
+- Topic-scoped history passed to rewriter for disambiguation
+- Rewriter injects anchors from history when the query is ambiguous (follow-ups that omit entity names)
 
 ## Document Processing Pipeline
 
@@ -277,9 +323,9 @@ Based on HippoRAG2 with enhancements:
 
 DeepSearch uses PageIndex for efficient navigation of long documents:
 
-1. **Document-level routing**: `search.file` aggregates relevant files
-2. **Section-level routing**: `toc.tree` / `section.select` for ToC navigation
-3. **Page-level reading**: `read.pages` for full context
+1. **Document-level routing**: `locate` aggregates relevant files
+2. **Structure navigation**: `toc.tree` for headings + page ranges
+3. **Page-level reading**: `read.pages` for full context (citeable evidence)
 
 Controlled via `.env`:
 - `PAGEINDEX_ENABLED=true`
@@ -292,15 +338,15 @@ Controlled via `.env`:
 Graph-first reasoning system with think→explore→report loop:
 
 - **Think**: Plan exploration strategy
-- **Explore**: Execute tools (search, graph traversal, web search)
+- **Explore**: Execute tools (locate, graph traversal, web search)
 - **Report**: Synthesize findings
 
 **Tools**:
-- `search.file`: Document-level routing
-- `toc.tree` / `section.select`: Section navigation
-- `read.pages`: Full page reading
+- `locate`: File routing; with `file=<file_id>` it returns page-level candidates
+- `toc.tree`: Table-of-contents navigation
+- `read.pages`: Full page reading (primary citeable evidence)
 - `web.search`: Real-time web search (Tavily)
-- `code.python`: Deterministic math/finance verification
+- `code.python`: Deterministic math/finance verification (required when `query_spec.is_computable=true`)
 
 **Configuration**:
 - `config/json_configs/deepsearch_service.json`

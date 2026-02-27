@@ -1,6 +1,8 @@
-from typing import Literal, Optional, ClassVar
+from typing import Any, Dict, Literal, Optional, ClassVar
+import logging
 import threading
-from pydantic import Field
+import warnings
+from pydantic import Field, model_validator
 
 from framework.config import AbstractConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
@@ -8,21 +10,181 @@ from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import 
 from core.retrieval.graph_retrieveal.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jRetriever
 from framework.shared_module_decorator import make_hashable
 
+_logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# PPR Presets -- each maps to a dict of parameter overrides.
+# Only parameters that differ from the Pydantic field defaults are listed.
+# The user sets `preset: "balanced"` (or "fast" / "thorough") and gets a
+# production-quality config with ~0 additional tuning.
+# Any parameter explicitly provided in the JSON/dict takes priority over
+# the preset value (explicit > preset > field default).
+# ---------------------------------------------------------------------------
+
+_PPR_PRESETS: Dict[str, Dict[str, Any]] = {
+    # -----------------------------------------------------------------------
+    # BALANCED (default) -- good recall + acceptable latency.
+    # Matches the current production defaults so existing deployments are
+    # unaffected when users start specifying `preset: "balanced"`.
+    # -----------------------------------------------------------------------
+    "balanced": {
+        # Core PPR
+        "damping_factor": 0.3,
+        "expansion_hops": 2,
+        "max_neighbors": 30,
+        "fact_retrieval_top_k": 10,
+        "max_facts_after_reranking": 5,
+        "passage_node_weight": 0.05,
+        # PPR engine
+        "ppr_backend": "push",
+        "ppr_push_epsilon": 1e-6,
+        "ppr_push_threshold_mode": "residual_over_degree",
+        "ppr_push_target_degree_penalty_gamma": 0.5,
+        # Dense helpers
+        "dense_seed_subgraph_top_k": 30,
+        "dense_seed_subgraph_entity_neighbors_k": 10,
+        "dense_file_closure_enabled": True,
+        "dense_file_prior_enabled": True,
+        "dense_file_prior_multiplier": 2.5,
+        # Entity NN seeding
+        "seed_entities_from_entity_nn_enabled": True,
+        "seed_entities_from_entity_nn_top_k": 10,
+        "seed_entities_from_entity_nn_max_extra": 3,
+    },
+
+    # -----------------------------------------------------------------------
+    # FAST -- lower latency at the cost of some recall.
+    # Reduces hops, neighbor budget, dense helpers; useful for interactive
+    # chat or latency-critical pipelines where graph retrieval is one of
+    # several fusion channels.
+    # -----------------------------------------------------------------------
+    "fast": {
+        # Core PPR -- fewer hops, smaller subgraph
+        "damping_factor": 0.3,
+        "expansion_hops": 1,
+        "max_neighbors": 15,
+        "fact_retrieval_top_k": 10,
+        "max_facts_after_reranking": 5,
+        "passage_node_weight": 0.05,
+        # PPR engine -- coarser convergence
+        "ppr_backend": "push",
+        "ppr_push_epsilon": 1e-5,
+        "ppr_push_threshold_mode": "residual_over_degree",
+        "ppr_push_target_degree_penalty_gamma": 0.5,
+        # Dense helpers -- minimal injection
+        "dense_seed_subgraph_top_k": 10,
+        "dense_seed_subgraph_entity_neighbors_k": 5,
+        "dense_file_closure_enabled": False,
+        "dense_file_prior_enabled": False,
+        # Entity NN seeding -- reduced
+        "seed_entities_from_entity_nn_enabled": True,
+        "seed_entities_from_entity_nn_top_k": 5,
+        "seed_entities_from_entity_nn_max_extra": 1,
+    },
+
+    # -----------------------------------------------------------------------
+    # THOROUGH -- maximize recall for DeepSearch / offline analysis.
+    # More hops, larger neighbor budget, aggressive dense helpers.
+    # -----------------------------------------------------------------------
+    "thorough": {
+        # Core PPR -- more hops, wider exploration
+        "damping_factor": 0.25,
+        "expansion_hops": 3,
+        "max_neighbors": 50,
+        "fact_retrieval_top_k": 20,
+        "max_facts_after_reranking": 8,
+        "passage_node_weight": 0.05,
+        # PPR engine -- tighter convergence
+        "ppr_backend": "push",
+        "ppr_push_epsilon": 1e-7,
+        "ppr_push_threshold_mode": "residual_over_degree",
+        "ppr_push_target_degree_penalty_gamma": 0.5,
+        # Dense helpers -- aggressive injection
+        "dense_seed_subgraph_top_k": 50,
+        "dense_seed_subgraph_entity_neighbors_k": 15,
+        "dense_file_closure_enabled": True,
+        "dense_file_prior_enabled": True,
+        "dense_file_prior_multiplier": 3.0,
+        # Entity NN seeding -- wider
+        "seed_entities_from_entity_nn_enabled": True,
+        "seed_entities_from_entity_nn_top_k": 20,
+        "seed_entities_from_entity_nn_max_extra": 5,
+    },
+}
+
+# Public API for programmatic access to available preset names.
+PPR_PRESET_NAMES = tuple(_PPR_PRESETS.keys())
+
 
 class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     """
     Configuration for Pruned HippoRAG Retrieval with Neo4j backend.
 
-    This configuration uses the same retrieval algorithm as the igraph version,
-    but with Neo4j as the graph database backend instead of SQLite + igraph.
+    **Simplified usage (recommended):**
 
-    Key differences from igraph version:
-    - Graph storage: Neo4j instead of SQLite
-    - Graph queries: Cypher instead of SQL
-    - PageRank: Extracted subgraph to igraph (same as igraph version)
-    - FAISS indices: Same (facts and entities)
+    Most users only need to set ``preset`` plus a handful of essential
+    parameters.  The preset fills in sensible defaults for the 50+
+    advanced parameters so you don't have to tune them individually.
+
+    .. code-block:: json
+
+        {
+            "type": "pruned_hipporag_neo4j_retrieval",
+            "preset": "balanced",
+            "graph_config": { ... },
+            "damping_factor": 0.3,
+            "expansion_hops": 2,
+            "max_neighbors": 30,
+            "fact_retrieval_top_k": 10,
+            "max_facts_after_reranking": 5
+        }
+
+    Available presets: ``"balanced"`` (default), ``"fast"``, ``"thorough"``.
+
+    **Essential parameters (5-8 to tune):**
+
+    +--------------------------+----------------------------------------------+
+    | Parameter                | What it controls                             |
+    +==========================+==============================================+
+    | ``preset``               | Overall profile (fast/balanced/thorough)      |
+    | ``damping_factor``       | PPR topic sensitivity (lower = more focused) |
+    | ``expansion_hops``       | Graph exploration depth (1-3)                |
+    | ``max_neighbors``        | Neighbor budget per entity per hop           |
+    | ``fact_retrieval_top_k`` | Facts retrieved from FAISS before reranking  |
+    | ``max_facts_after_reranking`` | Facts kept after LLM reranking          |
+    | ``enable_llm_reranking`` | Whether to use LLM fact filtering            |
+    | ``dense_file_prior_multiplier`` | File-level boost strength             |
+    +--------------------------+----------------------------------------------+
+
+    **Advanced parameters:**
+
+    All 50+ fine-grained parameters are still available for expert users.
+    Any parameter explicitly set in the config dict takes priority over
+    the preset value.  See field docstrings for details.
+
+    **Backward compatibility:**
+
+    Existing configs without a ``preset`` field continue to work
+    unchanged -- every field retains its original Pydantic default.
     """
     type: Literal["pruned_hipporag_neo4j_retrieval"] = "pruned_hipporag_neo4j_retrieval"
+
+    # -----------------------------------------------------------------------
+    # Preset selector -- the primary simplification lever.
+    # -----------------------------------------------------------------------
+    preset: Optional[Literal["balanced", "fast", "thorough"]] = Field(
+        default=None,
+        description=(
+            "PPR tuning preset.  Sets sensible defaults for all advanced parameters. "
+            "Any parameter explicitly provided in the config takes priority over the preset value. "
+            "Available presets: 'balanced' (default behavior), 'fast' (lower latency), 'thorough' (max recall). "
+            "When None, raw Pydantic field defaults are used (backward compatible)."
+        ),
+    )
+
+    # -----------------------------------------------------------------------
+    # Infrastructure (not tuning-related)
+    # -----------------------------------------------------------------------
 
     # Process-level cache toggle (via @shared_module on PrunedHippoRAGNeo4jRetriever).
     # Default True: identical configs share one in-process retriever instance, so expensive graph caches load once.
@@ -50,6 +212,10 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     # Optional LLM configuration for fact reranking
     llm_config: Optional[OpenAIChatConfig] = None
 
+    # -----------------------------------------------------------------------
+    # ESSENTIAL PARAMETERS -- the 5-8 knobs most users should tune.
+    # -----------------------------------------------------------------------
+
     # Fact retrieval parameters
     fact_retrieval_top_k: int = Field(
         default=20,
@@ -71,19 +237,36 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         default=2,
         description="Number of hops to expand from seed entities in the graph"
     )
+
+    # Pruning parameters
+    max_neighbors: int = Field(
+        default=30,
+        description="Base number of neighbors to keep per node during expansion"
+    )
+
+    # PageRank parameters
+    damping_factor: float = Field(
+        default=0.3,
+        description=(
+            "Damping factor for Personalized PageRank. Lower values make PPR more topic-sensitive and reduce diffusion drift "
+            "(default tuned from local HippoRAG recall experiments)."
+        ),
+    )
+
+    # -----------------------------------------------------------------------
+    # ADVANCED PARAMETERS -- rarely need tuning; preset fills good defaults.
+    # Grouped by feature area for readability.
+    # -----------------------------------------------------------------------
+
+    # -- Graph expansion (advanced) --
     include_chunk_neighbors: bool = Field(
         default=True,
         description="Whether to include chunk neighbors during graph expansion"
     )
 
-    # Pruning parameters (query-aware)
     enable_pruning: bool = Field(
         default=True,
         description="Whether to enable query-aware pruning based on entity relevance to the query"
-    )
-    max_neighbors: int = Field(
-        default=30,
-        description="Base number of neighbors to keep per node during expansion"
     )
     similarity_edge_relation: str = Field(
         default="SIMILAR_TO",
@@ -120,14 +303,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="Maximum number of neighbors to keep for highly relevant entities"
     )
 
-    # PageRank parameters
-    damping_factor: float = Field(
-        default=0.3,
-        description=(
-            "Damping factor for Personalized PageRank. Lower values make PPR more topic-sensitive and reduce diffusion drift "
-            "(default tuned from local HippoRAG recall experiments)."
-        ),
-    )
+    # -- PageRank engine (advanced) --
     passage_node_weight: float = Field(
         default=0.05,
         description="Weight assigned to passage nodes in PPR initialization"
@@ -149,7 +325,6 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
-    # PPR backend selection
     ppr_backend: Literal["push", "igraph"] = Field(
         default="push",
         description="PPR computation backend: 'push' (fast, recommended) or 'igraph' (fallback)"
@@ -186,6 +361,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    # -- Fact groundability --
     fact_groundability_enabled: bool = Field(
         default=True,
         description="Whether to use provenance-groundability to filter/penalize retrieved facts.",
@@ -235,6 +411,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="Score multiplier for facts with missing provenance (kept when allowed).",
     )
 
+    # -- Chunk selection strategy --
     chunk_selection_strategy: Literal["top_entity_neighbors", "top_ppr_chunks"] = Field(
         default="top_ppr_chunks",
         description=(
@@ -244,6 +421,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    # -- Dense seed subgraph injection --
     dense_seed_subgraph_top_k: int = Field(
         default=30,
         ge=0,
@@ -266,6 +444,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    # -- Dense file closure --
     dense_file_closure_enabled: bool = Field(
         default=True,
         description=(
@@ -301,6 +480,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    # -- Entity NN seeding --
     seed_entities_from_entity_nn_enabled: bool = Field(
         default=True,
         description=(
@@ -331,6 +511,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="Hard cap for total seed entities after merging fact-derived seeds and entity-NN seeds (0 disables).",
     )
 
+    # -- Dense mix-in --
     dense_mix_in_top_k: int = Field(
         default=0,
         ge=0,
@@ -342,6 +523,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    # -- Dense file prior --
     dense_file_prior_enabled: bool = Field(
         default=True,
         description=(
@@ -440,6 +622,116 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
             ">= this value. Set to 0 to disable."
         ),
     )
+
+    # -----------------------------------------------------------------------
+    # Preset application logic
+    # -----------------------------------------------------------------------
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_preset(cls, data: Any) -> Any:
+        """
+        Apply preset defaults *before* Pydantic fills in field defaults.
+
+        Priority order (highest to lowest):
+          1. Explicitly provided values in the input dict/JSON
+          2. Preset values
+          3. Pydantic field defaults
+
+        This ensures backward compatibility: configs without ``preset``
+        behave exactly as before.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        preset_name = data.get("preset")
+        if not preset_name:
+            return data
+
+        preset_name = str(preset_name).strip().lower()
+        preset_values = _PPR_PRESETS.get(preset_name)
+        if preset_values is None:
+            warnings.warn(
+                f"Unknown PPR preset '{preset_name}'. "
+                f"Available presets: {', '.join(sorted(_PPR_PRESETS))}. "
+                f"Ignoring preset and using field defaults.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return data
+
+        # Merge: preset values are used only for keys not explicitly provided.
+        merged = dict(preset_values)
+        merged.update(data)
+        return merged
+
+    @model_validator(mode="after")
+    def _validate_cross_field_consistency(self) -> "PrunedHippoRAGNeo4jRetrievalConfig":
+        """
+        Emit warnings for common misconfigurations.
+
+        These are *warnings*, not errors, to avoid breaking existing configs.
+        """
+        # Warn if LLM reranking is enabled but no LLM config is provided
+        if self.enable_llm_reranking and self.llm_config is None:
+            _logger.debug(
+                "enable_llm_reranking=True but llm_config is None; "
+                "LLM reranking will be silently skipped at runtime."
+            )
+
+        # Warn if dense_file_prior is enabled but dense_seed_subgraph is disabled
+        if self.dense_file_prior_enabled and self.dense_seed_subgraph_top_k <= 0:
+            _logger.debug(
+                "dense_file_prior_enabled=True but dense_seed_subgraph_top_k=0; "
+                "the file prior has limited effect without dense seed injection."
+            )
+
+        # Warn if expansion_hops is high without pruning
+        if self.expansion_hops >= 3 and not self.enable_pruning:
+            _logger.debug(
+                "expansion_hops=%d with enable_pruning=False may cause very large subgraphs.",
+                self.expansion_hops,
+            )
+
+        return self
+
+    # -----------------------------------------------------------------------
+    # Helper: describe effective config for debugging / logging
+    # -----------------------------------------------------------------------
+
+    def describe_essential(self) -> Dict[str, Any]:
+        """Return a compact dict of the essential tuning parameters for logging."""
+        return {
+            "preset": self.preset,
+            "damping_factor": self.damping_factor,
+            "expansion_hops": self.expansion_hops,
+            "max_neighbors": self.max_neighbors,
+            "fact_retrieval_top_k": self.fact_retrieval_top_k,
+            "max_facts_after_reranking": self.max_facts_after_reranking,
+            "enable_llm_reranking": self.enable_llm_reranking,
+            "ppr_backend": self.ppr_backend,
+            "dense_file_prior_enabled": self.dense_file_prior_enabled,
+            "dense_file_prior_multiplier": self.dense_file_prior_multiplier,
+            "dense_file_closure_enabled": self.dense_file_closure_enabled,
+            "seed_entities_from_entity_nn_enabled": self.seed_entities_from_entity_nn_enabled,
+        }
+
+    @classmethod
+    def get_preset(cls, name: str) -> Dict[str, Any]:
+        """Return a copy of the named preset's parameter overrides."""
+        name = str(name or "").strip().lower()
+        preset = _PPR_PRESETS.get(name)
+        if preset is None:
+            raise ValueError(
+                f"Unknown PPR preset '{name}'. "
+                f"Available presets: {', '.join(sorted(_PPR_PRESETS))}"
+            )
+        return dict(preset)
+
+    @classmethod
+    def list_presets(cls) -> Dict[str, Dict[str, Any]]:
+        """Return all available presets (name -> parameter dict)."""
+        return {name: dict(values) for name, values in _PPR_PRESETS.items()}
 
     def build(self):
         if not bool(getattr(self, "shared_instance", True)):

@@ -1,18 +1,18 @@
-"""Search tool package: orchestrator and channel tools."""
-from .tool import SearchGlobalTool, SearchScopedTool
-from .faiss import SearchFaissTool, SearchGlobalFaissTool
-from .bm25 import SearchBM25Tool, SearchGlobalBM25Tool
-from .graph_chunk import SearchGraphChunkTool, SearchGlobalGraphTool
-from .file_search import FileSearchTool
+"""Search channel package."""
+from .faiss import _FaissChannel
+from .bm25 import _Bm25Channel
+from .graph_chunk import _GraphChunkChannel
+from .regex import _RegexChannel
+from .structure import _StructureChannel
+from .base import _SearchToolBase, _ChannelResult, _RetrieverBundle
 
 __all__ = [
-    "SearchScopedTool",
-    "SearchGlobalTool",
-    "SearchFaissTool",
-    "SearchGlobalFaissTool",
-    "SearchBM25Tool",
-    "SearchGlobalBM25Tool",
-    "SearchGraphChunkTool",
-    "SearchGlobalGraphTool",
-    "FileSearchTool",
+    "_FaissChannel",
+    "_Bm25Channel",
+    "_GraphChunkChannel",
+    "_RegexChannel",
+    "_StructureChannel",
+    "_SearchToolBase",
+    "_ChannelResult",
+    "_RetrieverBundle",
 ]

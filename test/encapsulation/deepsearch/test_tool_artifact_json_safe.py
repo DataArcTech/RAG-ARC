@@ -19,8 +19,8 @@ def test_tool_artifact_persist_handles_uuid(tmp_path: Path) -> None:
     manager = DeepSearchToolManager(tool_configs=tool_configs, telemetry_client=LoggingTelemetryClient())
 
     payload = ToolResultPayload(
-        tool_name="explore",
-        namespace="rag-arc.deepsearch.tools.explore",
+        tool_name="locate",
+        namespace="rag-arc.deepsearch.tools.locate",
         channel="graph",
         profile="X",
         determinism="hybrid",
@@ -37,10 +37,10 @@ def test_tool_artifact_persist_handles_uuid(tmp_path: Path) -> None:
         think_notes=[],
     )
 
-    artifact_path = manager._persist_artifact("explore", payload)
+    artifact_path = manager._persist_artifact("locate", payload)
     assert artifact_path
     loaded = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
-    assert loaded["tool_name"] == "explore"
+    assert loaded["tool_name"] == "locate"
     # UUIDs should be serialized to strings.
     assert isinstance(loaded["diagnostics"]["file_id"], str)
     assert isinstance(loaded["evidences"][0]["provenance"]["owner_id"], str)

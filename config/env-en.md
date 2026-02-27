@@ -97,11 +97,12 @@ How secrets flow into configs:
 | `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | Default sleep (seconds) between 429 retries when Retry-After is not available. |
 | `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | Max sleep (seconds) between 429 retries (cap). |
 | `INTENT_ROUTER_CONFIG_PATH` | `config/core/intent_routing/intent_router.toml` | Path to the TOML config for semantic intent routing. |
-| `INTENT_EMBEDDING_API_KEY` | _(empty)_ | API key for intent embeddings when `intent_router.embedding.provider=openai_compat`. |
-| `INTENT_EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for intent embeddings (OpenAI-compatible) when `intent_router.embedding.provider=openai_compat`. |
-| `INTENT_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Intent embedding model name when using `openai_compat`. |
-| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Intent embedding model name when using `qwen_local` (SentenceTransformers). |
-| `INTENT_EMBEDDING_DEVICE` | `cpu` | Intent embedding device when using `qwen_local` (SentenceTransformers). |
+| `INTENT_EMBEDDING_PROVIDER` | `api` | Intent embedding provider. `api`: reuse RAG embedding credentials (`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_EMBEDDING_MODEL`). `local`: use local Qwen model (requires download). |
+| `INTENT_EMBEDDING_API_KEY` | _(empty; falls back to `EMBEDDING_API_KEY` → `OPENAI_API_KEY`)_ | API key for intent embeddings when provider=`api`. |
+| `INTENT_EMBEDDING_API_BASE_URL` | _(empty; falls back to `EMBEDDING_API_BASE_URL` → `OPENAI_BASE_URL`)_ | Base URL for intent embeddings when provider=`api`. |
+| `INTENT_OPENAI_EMBEDDING_MODEL` | _(falls back to `OPENAI_EMBEDDING_MODEL`)_ | Intent embedding model name when provider=`api`. |
+| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Intent embedding model name when provider=`local` (SentenceTransformers). |
+| `INTENT_EMBEDDING_DEVICE` | `cpu` | Intent embedding device when provider=`local` (SentenceTransformers). |
 | `INTENT_EMBEDDING_CACHE_FOLDER` | `./models/Qwen` | Optional cache folder for intent embedding weights (SentenceTransformers). |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
@@ -123,6 +124,9 @@ How secrets flow into configs:
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
 | `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
+| `RERANK_API_KEY` | _(empty)_ | DashScope API key for API-based reranking (used by DeepSearch `locate` tool). |
+| `RERANK_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1` | Base URL for the DashScope-compatible rerank endpoint. |
+| `RERANK_MODEL_NAME` | `qwen3-rerank` | Model name for API reranking (e.g. `qwen3-rerank`). |
 | `OPENAI_API_KEY` | _(empty)_ | Shared fallback key (used when component-specific keys are empty). **Required** when any OpenAI-compatible module runs with its `*_API_KEY` unset. |
 | `OPENAI_BASE_URL` | _(empty)_ | Shared fallback base URL (used when component-specific base URLs are empty). **Required** when any OpenAI-compatible module runs with its `*_API_BASE_URL` unset. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
@@ -244,6 +248,9 @@ Notes:
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath RRF fusion weight for the BM25 retriever. Set to `0` to disable this retrieval path in normal RAG. |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath RRF fusion weight for the graph retriever. Set to `0` to disable graph retrieval in **normal RAG** (major latency savings); set to a positive value (e.g. `1.0`) to enable it. This does **not** disable graph indexing/ingestion; DeepSearch can still use graph signals in its own pipeline. |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | Enable LLM-driven per-query routing ratios that allocate MultiPath candidate quotas across retrievers (coverage floor). Falls back to static ratios when disabled. |
+| `RAG_RETRIEVAL_WEIGHT_SECTION` | `0.5` | RRF fusion weight for the section (PageIndex) retrieval path. Should be less than dense/BM25 weights. Set to `0` to disable. |
+| `RAG_HYDE_ENABLED` | `true` | Enable HyDE (Hypothetical Document Embedding) for dense retrieval. When enabled, the rewrite stage generates a hypothetical document passage in parallel with the standard query rewrite, and the dense retriever searches with both `[original_query, hyde_query]`. Stays active even in `bench_mode`. |
+| `RAG_RERANKER_TYPE` | `listwise` | Reranker backend: `listwise` uses DashScope qwen-rerank (cross-encoder API), `llm` uses the chat model for listwise reranking. |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | Feed only USER turns into the rewrite context (exclude assistant) to reduce assistant-poisoning effects. |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` |Order rewrite history context as most-recent-first (aligned with rewrite prompt wording). |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | Enable evidence consistency filtering: use rewrite-produced anchors to keep retrieval evidence within the same company/product file set (reduces cross-product mixing). |
@@ -359,8 +366,8 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
 | `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, payloads are stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). Applies to both task results and large progress/trace payloads. |
-| `MQ_RESULT_STORE` | `io` | External result store backend: `io` (IOManager-backed, Phase 1 LocalDB mapping) or `minio` (TODO). |
-| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | Virtual base directory (io://...) for external results when `MQ_RESULT_STORE=io`. |
+| `MQ_RESULT_STORE` | `io` | External result store backend: `io` (IOManager-backed, uses `io://...`) / `local` (local filesystem, no IOManager required) / `minio` (TODO). |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | Result directory. When `MQ_RESULT_STORE=io`, must be an `io://...` virtual dir. When `MQ_RESULT_STORE=local`, can be a local path (also accepts `io://...` and maps it to the LocalDB root for hermetic tests). |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
 | `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
 | `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
@@ -414,7 +421,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | Graph reasoning strategy label. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | Virtual directory (io://...) for DeepSearch artifacts (runs + tools), mapped to LocalDB under `IO_STORE_BASE_PATH`. |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch artifacts directory for runs + tools. Accepts `io://...` (mapped via IOManager to LocalDB/MinIO) or a local filesystem path (useful for tests/scripts). |
 | `DEEPSEARCH_LLM_DUMP_PATH` | _(empty)_ | Optional debug dump root. When set to an `io://...` virtual directory, DeepSearch writes one JSON object per LLM event via IOManager (request/response/error). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
@@ -481,8 +488,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/image parse mode: `native` (no OCR; PDF text extraction only), `dotsocr` (local OCR), `mineru` (remote MinerU service). |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Unified virtual base directory (io://...) for parser outputs (native/dots_ocr/vlm_ocr/mineru subfolders), persisted via IO backend (`localdb` or `minio`). |
-| `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory. |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | Parser output base directory for native/dots_ocr/vlm_ocr/mineru artifacts. Supports `io://...` (preferred) or a local filesystem path. |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory (supports `io://...` or a local filesystem path). |
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `MINERU_SERVER_URL` | _(empty)_ | Required when `PARSER_PARSE_MODE=mineru`: MinerU server base URL (e.g. `http://127.0.0.1:8899`). |
@@ -490,7 +497,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_REUSE_CACHE` | `1` | When re-indexing, reuse existing MinerU markdown artifacts under `PARSER_OUTPUT_DIR/mineru/<file_id>/` if present (skip remote MinerU call). |
 | `MINERU_SHARED_CACHE_ENABLED` | `1` | Enable global (cross-owner/tenant) MinerU parse cache reuse when file bytes are identical (sha256 match). |
-| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root. Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
+| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root (supports `io://...` or a local filesystem path). Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
 | `MINERU_SHARED_CACHE_MODE` | `symlink` | How to materialize shared cache into per-file output dirs: `symlink` (preferred) or `copy`. |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |

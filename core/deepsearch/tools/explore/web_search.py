@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
+from config.benchmark_mode import benchmark_mode_enabled
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_WEB_SNIPPET
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.web_search import TavilySearchClient, TavilySearchResult, aggregate_tavily_results
@@ -20,8 +21,9 @@ class WebSearchTool(GraphTool):
         name="web.search",
         channel="web",
         description=(
-            "Tavily-backed web search for realtime/current info only. "
-            "Use after graph-first tools when internal evidence is insufficient."
+            "Search the web for real-time or current information. "
+            "Use only when internal document evidence is insufficient or the question requires up-to-date data. "
+            "Returns web snippets with source URLs. May be disabled in benchmark mode."
         ),
         speed="medium",
         cost="medium",
@@ -32,31 +34,35 @@ class WebSearchTool(GraphTool):
         mcp_callable=False,
         input_schema=build_input_schema(
             extra_properties={
-                "query": {"type": "string", "description": "Search query (required)."},
-                "max_results": {"type": "integer", "minimum": 1, "description": "Override max results."},
+                "query": {"type": "string", "description": "The search query to send to the web search engine."},
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of search results to return. Defaults to 5.",
+                },
                 "search_depth": {
                     "type": "string",
                     "enum": ["basic", "advanced"],
-                    "description": "Tavily search depth.",
+                    "description": "Search depth. 'basic' is faster; 'advanced' returns more comprehensive results. Defaults to 'basic'.",
                 },
                 "aggregate_enabled": {
                     "type": "boolean",
-                    "description": "Enable source aggregation for Tavily results.",
+                    "description": "Group results by source to reduce redundancy. Defaults to false.",
                 },
                 "aggregate_group_by": {
                     "type": "string",
                     "enum": ["domain", "url", "provider"],
-                    "description": "Optional source aggregation grouping for Tavily results.",
+                    "description": "How to group results when aggregation is enabled. Defaults to 'domain'.",
                 },
                 "aggregate_max_groups": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional max source groups kept after aggregation.",
+                    "description": "Maximum number of source groups to keep. Defaults to 5.",
                 },
                 "aggregate_max_results_per_group": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional max results retained per source group after aggregation.",
+                    "description": "Maximum results per source group. Defaults to 3.",
                 },
             },
             required_extra_fields=("query",),
@@ -111,6 +117,11 @@ class WebSearchTool(GraphTool):
         )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
+        if benchmark_mode_enabled():
+            return ToolResult(
+                summary="web.search disabled: benchmark/experiment mode enabled (bench_mode=1).",
+                diagnostics={"reason": "disabled_by_benchmark_mode", "bench_mode": True},
+            )
         extra = request.extra or {}
         query = str(extra.get("query") or "").strip()
         if not query:
@@ -234,4 +245,3 @@ class WebSearchTool(GraphTool):
             if token in {"0", "false", "no", "n", "off"}:
                 return False
         return bool(raw)
-

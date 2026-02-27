@@ -1,7 +1,8 @@
+import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from config import pageindex as pageindex_cfg
 from core.file_management.pageindex.types import HeadingSignal, SectionNode
@@ -15,6 +16,7 @@ from core.file_management.pageindex.utils import (
     read_json,
     resolve_content_list_path,
 )
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -120,48 +122,33 @@ def _resolve_level(
     )
 
 
-def _apply_level_conflicts(
+def _normalize_levels(
     signals: List[HeadingSignal],
-    *,
-    conflict_ratio: float,
-    force_flat_if_uniform: bool,
 ) -> tuple[List[HeadingSignal], float, bool]:
+    """Min-level normalization: offset so min heading becomes L1."""
     if not signals:
         return signals, 0.0, False
-    conflict_count = 0
-    for signal in signals:
-        candidates = {
-            level
-            for level in (
-                signal.numbering_level,
-                signal.text_level,
-                signal.markdown_level,
-            )
-            if isinstance(level, int) and level > 0
-        }
-        if len(candidates) > 1:
-            conflict_count += 1
+    # Conflict ratio — diagnostic only, never flattens
+    conflict_count = sum(
+        1 for s in signals
+        if len({l for l in (s.numbering_level, s.text_level, s.markdown_level)
+                if isinstance(l, int) and l > 0}) > 1
+    )
     ratio = conflict_count / max(len(signals), 1)
-    uniform_flattened = False
-    if ratio >= conflict_ratio:
-        for signal in signals:
-            signal.resolved_level = 1
-            signal.level_source = "conflict_flatten"
-        return signals, ratio, True
-
-    levels = {signal.resolved_level for signal in signals}
-    if force_flat_if_uniform and len(levels) == 1 and 1 not in levels:
-        for signal in signals:
-            signal.resolved_level = 1
-            signal.level_source = "uniform_flatten"
-        uniform_flattened = True
-    return signals, ratio, uniform_flattened
+    # Min-level normalization
+    min_level = min(s.resolved_level for s in signals)
+    offset = min_level - 1
+    if offset > 0:
+        for s in signals:
+            s.resolved_level = s.resolved_level - offset
+    return signals, ratio, False
 
 
 def _assign_page_ranges(
     signals: List[HeadingSignal],
     *,
     max_page_idx: Optional[int],
+    max_span: int,
 ) -> Dict[int, tuple[Optional[int], Optional[int]]]:
     if not signals:
         return {}
@@ -181,6 +168,9 @@ def _assign_page_ranges(
                 end = max_page_idx
             else:
                 end = start
+            # Clamp to max_span
+            if end - start > max_span:
+                end = start + max_span
         ranges[idx] = (start, end)
     return ranges
 
@@ -192,23 +182,90 @@ def build_section_tree(
     filename: Optional[str],
     md_path: Optional[str],
     output_dir: Optional[str],
+    io_manager: Any = None,
 ) -> SectionTreeBuildResult:
     headings = iter_markdown_headings(markdown)
     content_list: List[dict] = []
     content_index: Dict[str, List[dict]] = {}
     page_texts: Dict[int, str] = {}
     max_page_idx = None
-    content_path = resolve_content_list_path(md_path, output_dir)
-    if content_path:
+
+    def _load_content_list_from_io(io_dir: str, *, expected_basename: Optional[str]) -> List[dict]:
+        """Load MinerU `*_content_list*.json` from an io:// directory using IOManager.
+
+        NOTE: Do not resolve io:// to a local filesystem path here. The IOManager abstraction
+        owns backend mapping (LocalDB now, MinIO later).
+        """
+
+        if io_manager is None:
+            return []
         try:
-            loaded = read_json(content_path)
-            if isinstance(loaded, list):
-                content_list = loaded
-                content_index = build_content_list_index(content_list)
-                page_texts = build_page_text_index(content_list)
-                max_page_idx = max_page_index(content_list)
+            keys = io_manager.list_keys_path(io_dir)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to read MinerU content_list %s: %s", content_path, exc)
+            logger.warning("Failed to list io:// keys under %s: %s", io_dir, exc)
+            return []
+
+        def _basename(ref: str) -> str:
+            token = str(ref or "").strip()
+            return token.rsplit("/", 1)[-1] if "/" in token else token
+
+        expected = (expected_basename or "").strip()
+        expected_hit = None
+        matches: List[str] = []
+        for ref in keys:
+            base = _basename(ref)
+            if expected and base == expected:
+                expected_hit = str(ref)
+                break
+            if base.endswith(".json") and "_content_list" in base:
+                matches.append(str(ref))
+
+        candidate = expected_hit or (sorted(matches)[0] if matches else None)
+        if not candidate:
+            return []
+        try:
+            raw = io_manager.get_text_path(candidate)
+            if raw is None:
+                return []
+            loaded = json.loads(raw)
+            return loaded if isinstance(loaded, list) else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read MinerU content_list %s: %s", candidate, exc)
+            return []
+
+    # MinerU outputs are persisted under io://..., so PageIndex must be able to load content_list
+    # via IOManager (LocalDB/MinIO). For local filesystem paths we keep the glob-based behavior.
+    md_path_token = str(md_path or "").strip()
+    output_dir_token = str(output_dir or "").strip()
+    expected_content_list_basename = None
+    if md_path_token:
+        md_base = md_path_token.rsplit("/", 1)[-1]
+        if md_base.endswith(".md"):
+            expected_content_list_basename = md_base[:-3] + "_content_list.json"
+
+    loaded_list: List[dict] = []
+    if output_dir_token and is_io_path(output_dir_token):
+        loaded_list = _load_content_list_from_io(output_dir_token, expected_basename=expected_content_list_basename)
+    elif md_path_token and is_io_path(md_path_token):
+        parent_key = "/".join(io_key(md_path_token).split("/")[:-1])
+        if parent_key:
+            loaded_list = _load_content_list_from_io(f"{IO_PATH_PREFIX}{parent_key}", expected_basename=expected_content_list_basename)
+
+    if not loaded_list:
+        content_path = resolve_content_list_path(md_path, output_dir)
+        if content_path:
+            try:
+                loaded = read_json(content_path)
+                if isinstance(loaded, list):
+                    loaded_list = loaded
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read MinerU content_list %s: %s", content_path, exc)
+
+    if loaded_list:
+        content_list = loaded_list
+        content_index = build_content_list_index(content_list)
+        page_texts = build_page_text_index(content_list)
+        max_page_idx = max_page_index(content_list)
 
     signals: List[HeadingSignal] = []
     max_level = pageindex_cfg.section_level_max()
@@ -222,11 +279,7 @@ def build_section_tree(
         )
         signals.append(signal)
 
-    signals, conflict_ratio, uniform_flattened = _apply_level_conflicts(
-        signals,
-        conflict_ratio=pageindex_cfg.section_level_conflict_ratio(),
-        force_flat_if_uniform=pageindex_cfg.section_level_force_flat_if_uniform(),
-    )
+    signals, conflict_ratio, uniform_flattened = _normalize_levels(signals)
 
     nodes: List[SectionNode] = []
     offsets: List[int] = []
@@ -260,12 +313,39 @@ def build_section_tree(
             uniform_level_flattened=uniform_flattened,
         )
 
-    ranges = _assign_page_ranges(signals, max_page_idx=max_page_idx)
+    max_span = pageindex_cfg.max_page_num_each_node()
+    ranges = _assign_page_ranges(signals, max_page_idx=max_page_idx, max_span=max_span)
 
     stack: List[SectionNode] = []
     section_counter = 0
     path_delimiter = pageindex_cfg.section_path_delimiter()
+
+    # Front-matter node: content before first heading
+    if signals[0].char_start > 0:
+        section_counter += 1
+        first_page = ranges.get(0, (None, None))[0]
+        fm_end = max(first_page - 1, 0) if isinstance(first_page, int) else None
+        fm_node = SectionNode(
+            section_id=f"{file_id}:sec:{section_counter}",
+            file_id=file_id,
+            title="Front Matter",
+            path="Front Matter",
+            level=1,
+            parent_id=None,
+            page_start=0 if max_page_idx is not None else None,
+            page_end=fm_end,
+            heading_start=0,
+            heading_end=signals[0].char_start,
+            level_source="front_matter",
+        )
+        nodes.append(fm_node)
+        offsets.append(0)
+        ids.append(fm_node.section_id)
+
     for idx, signal in enumerate(signals):
+        # Level-jump capping: prevent jumps > 1 level deeper than parent
+        if stack and signal.resolved_level > stack[-1].level + 1:
+            signal.resolved_level = stack[-1].level + 1
         while stack and signal.resolved_level <= stack[-1].level:
             stack.pop()
         parent = stack[-1] if stack else None
@@ -297,14 +377,16 @@ def build_section_tree(
         end = node.page_end
         for child_id in node.children:
             child = node_map[child_id]
-            child_range = _inherit_range(child, node_map)
-            child_start, child_end = child_range
+            child_start, child_end = _inherit_range(child, node_map)
             if child_start is not None:
                 if start is None or child_start < start:
                     start = child_start
             if child_end is not None:
                 if end is None or child_end > end:
                     end = child_end
+        # Clamp parent span
+        if start is not None and end is not None and end - start > max_span:
+            end = start + max_span
         node.page_start = start
         node.page_end = end
         return start, end

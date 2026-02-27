@@ -47,12 +47,12 @@ def test_save_and_load_trace():
             TraceEvent(
                 tag="tool_call",
                 content="调用图谱查询工具",
-                meta={"tool_name": "explore", "plan_step": "plan_01"}
+                meta={"tool_name": "locate", "plan_step": "plan_01"}
             ),
             TraceEvent(
                 tag="tool_response",
                 content="查询完成，获取到 5 条证据",
-                meta={"tool_name": "explore", "ok": True, "evidence_count": 5}
+                meta={"tool_name": "locate", "ok": True, "evidence_count": 5}
             ),
         ]
         

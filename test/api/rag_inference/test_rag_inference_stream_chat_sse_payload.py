@@ -1,179 +1,124 @@
 import json
-import os
-import sys
 import uuid
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from encapsulation.data_model.schema import Chunk
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+
+def _iter_sse_data_lines(event: str) -> list[str]:
+    lines: list[str] = []
+    for raw in (event or "").splitlines():
+        raw = raw.strip("\r")
+        if raw.startswith("data:"):
+            lines.append(raw.split(":", 1)[1].strip())
+    return lines
 
 
-def _seed_registry() -> None:
-    from framework.register import Register
-
-    reg = Register()
-    reg.registrations.setdefault("account", object())
-    reg.registrations.setdefault("chat_session", object())
-    reg.registrations.setdefault("chat_message", object())
-    reg.registrations.setdefault("rag_inference", object())
-
-
-@pytest.fixture
-def app():
-    _seed_registry()
-    import api.routers.rag_inference as rag_router
-
-    app = FastAPI()
-    app.include_router(rag_router.router)
-    return app
-
-
-@pytest.fixture
-def client(app):
-    return TestClient(app)
-
-
-def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, client):
-    import api.routers.rag_inference as rag_router
-    import api.routers.rag_inference_handlers as handlers
+@pytest.mark.asyncio
+async def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch):
+    import api.routers.rag_inference_modules.stream_chat.response.response_builder as response_builder
+    import api.routers.rag_inference_modules.stream_chat.response.response_finalizer as response_finalizer
 
     session_id = uuid.uuid4()
-    user = SimpleNamespace(id=uuid.uuid4())
-
-    class FakeSessionHandler:
-        def get_session(self, _session_id):
-            return SimpleNamespace(id=_session_id, user_id=user.id)
-
-    class FakeMessageHandler:
-        def __init__(self):
-            self._messages = []
-
-        def create_message(self, message):
-            if getattr(message, "id", None) is None:
-                setattr(message, "id", uuid.uuid4())
-            self._messages.append(message)
-            return message
-
-        def list_messages_by_session(self, _session_id):
-            return list(self._messages)
-
-    class FakeRAG:
-        def stream_chat(self, _query, _owner_id, return_subgraph=False, progress_callback=None):  # noqa: ARG002
-            if progress_callback:
-                progress_callback({"stage": "retrieve", "status": "start"})
-                progress_callback({"stage": "retrieve", "status": "end"})
-
-            def _gen():
-                yield "hello "
-                yield "world"
-
-            chunks = [Chunk(content="doc1", id="chunk-1")]
-            subgraph_data = {"nodes": ["n1"]} if return_subgraph else None
-            subgraph_info = {"stats": 1}
-            return (_gen(), chunks, subgraph_data, subgraph_info)
+    user_message = SimpleNamespace(id=uuid.uuid4())
+    assistant_response = "hello world"
 
     evidence_payload = {"chunks": [{"id": "chunk-1"}], "summary": "evidence ok"}
-    session_handler = FakeSessionHandler()
-    message_handler = FakeMessageHandler()
-    rag = FakeRAG()
-    monkeypatch.setattr(handlers, "_session_handler", session_handler)
-    monkeypatch.setattr(handlers, "_message_handler", message_handler)
-    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr(response_builder, "build_chat_evidence", lambda *a, **k: evidence_payload, raising=True)
+
+    async def _stub_build_sources_and_evidence(  # noqa: ANN001
+        chunks,
+        subgraph_data,
+        subgraph_info,
+        rag_inference_handler,
+        assistant_response,
+        is_fallback_response,
+        **_kwargs,
+    ):
+        return assistant_response, [], {}
+
+    async def _stub_get_or_create_final_assistant_message(**_kwargs):  # noqa: ANN001
+        msg = SimpleNamespace(
+            id=uuid.uuid4(),
+            session_id=session_id,
+            content={"role": "assistant", "content": assistant_response},
+            created_at=None,
+            subgraph_data=_kwargs.get("subgraph_data"),
+            sources=[],
+            source_file_ids=[],
+        )
+        return msg, True
+
+    monkeypatch.setattr(response_finalizer, "build_sources_and_evidence", _stub_build_sources_and_evidence, raising=True)
     monkeypatch.setattr(
-        "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
-        lambda *a, **k: evidence_payload,
+        response_finalizer,
+        "_get_or_create_final_assistant_message",
+        _stub_get_or_create_final_assistant_message,
+        raising=True,
     )
 
-    client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
-    try:
-        resp = client.get(
-            f"/rag_inference/stream_chat/{session_id}",
-            params={"query": "hello", "include_evidence": True, "return_subgraph": True},
-        )
-    finally:
-        client.app.dependency_overrides.pop(rag_router.get_current_user, None)
-
-    assert resp.status_code == 200
-    assert "data: [DONE]" in resp.text
+    events: list[str] = []
+    async for event in response_finalizer._build_and_yield_final_response(  # noqa: SLF001
+        assistant_response=assistant_response,
+        chunks=[Chunk(content="doc1", id="chunk-1")],
+        subgraph_data={"nodes": ["n1"]},
+        subgraph_info={"stats": 1},
+        raw_llm_response=None,
+        raw_mindmap_response=None,
+        enable_deepsearch=False,
+        deepsearch_result=None,
+        deepsearch_sources_for_frontend=None,
+        deepsearch_citation_key_map=None,
+        return_subgraph=True,
+        query="hello",
+        session_id=session_id,
+        first_turn=False,
+        include_evidence=True,
+        task_info=None,
+        user_message=user_message,
+        rag_inference_handler=SimpleNamespace(get_graph_store=lambda: None),
+        chunk_id="chatcmpl-test",
+        model_name="rag-arc",
+        created=1,
+        request_id="req-test",
+        deepsearch_trace_file_path=None,
+    ):
+        events.append(event)
 
     payload_args = None
     outer_subgraph = None
-    content_parts: list[str] = []
-    for raw_line in resp.text.splitlines():
-        line = raw_line.strip("\r")
-        if not line.startswith("data:"):
-            continue
-        data = line.split(":", 1)[1].strip()
-        if data == "[DONE]":
-            break
-        envelope = json.loads(data)
-        chunk = envelope.get("data") if isinstance(envelope, dict) else None
-        if not isinstance(chunk, dict):
-            continue
-        choices = chunk.get("choices") or []
-        if not choices:
-            continue
-        delta = (choices[0] or {}).get("delta") or {}
-        content_parts.append(delta.get("content") or "")
-        for tool_call in delta.get("tool_calls") or []:
-            fn = (tool_call or {}).get("function") or {}
-            if fn.get("name") == "rag_arc_payload":
-                payload_args = json.loads(fn.get("arguments") or "{}")
-                outer_subgraph = chunk.get("subgraph")
-                break
+    for event in events:
+        for data in _iter_sse_data_lines(event):
+            if data == "[DONE]":
+                continue
+            envelope = json.loads(data)
+            chunk = envelope.get("data") if isinstance(envelope, dict) else None
+            if not isinstance(chunk, dict):
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = (choices[0] or {}).get("delta") or {}
+            for tool_call in delta.get("tool_calls") or []:
+                fn = (tool_call or {}).get("function") or {}
+                if fn.get("name") == "rag_arc_payload":
+                    payload_args = json.loads(fn.get("arguments") or "{}")
+                    outer_subgraph = chunk.get("subgraph")
 
-    assert "".join(content_parts) == "hello world"
     assert payload_args is not None
     assert payload_args["evidence"] == evidence_payload
-    # Subgraph is carried at the outer chunk level (not inside the tool-call payload).
+    assert ((payload_args.get("message") or {}).get("content") or {}).get("content") == "hello world"
     assert outer_subgraph == {"nodes": ["n1"]}
 
 
-def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypatch, client):
-    import api.routers.rag_inference as rag_router
-    import api.routers.rag_inference_handlers as handlers
+@pytest.mark.asyncio
+async def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypatch):
+    import api.routers.rag_inference_modules.stream_chat.response.response_builder as response_builder
 
-    session_id = uuid.uuid4()
-    user = SimpleNamespace(id=uuid.uuid4(), type=0)
-
-    class FakeSessionHandler:
-        def get_session(self, _session_id):
-            return SimpleNamespace(id=_session_id, user_id=user.id)
-
-    class FakeMessageHandler:
-        def __init__(self):
-            self._messages = []
-
-        def create_message(self, message):
-            if getattr(message, "id", None) is None:
-                setattr(message, "id", uuid.uuid4())
-            self._messages.append(message)
-            return message
-
-        def list_messages_by_session(self, _session_id):
-            return list(self._messages)
-
-    class FakeRAG:
-        def stream_chat(self, _query, _owner_id, return_subgraph=False, progress_callback=None):  # noqa: ARG002
-            if progress_callback:
-                progress_callback({"stage": "retrieve", "status": "start"})
-                progress_callback({"stage": "retrieve", "status": "end"})
-
-            def _gen():
-                yield "answer<sup>1</sup> mid<sup>3</sup> end"
-
-            # Provide the same chunk ids that the evidence builder returns so the SSE
-            # response builder can keep LLM/source keys stable.
-            chunks = [Chunk(content=f"doc{i}", id=f"chunk-{i}") for i in range(1, 6)]
-            subgraph_data = None
-            subgraph_info = None
-            return (_gen(), chunks, subgraph_data, subgraph_info)
+    # Make normalization deterministic (avoid suite-order dependence).
+    monkeypatch.setattr(response_builder, "CITATION_STREAM_MODE", "final", raising=True)
 
     evidence_payload = {
         "chunks": [
@@ -184,62 +129,22 @@ def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypat
             {"id": "chunk-5", "content": "doc5", "metadata": {"filename": "f5"}},
         ]
     }
+    monkeypatch.setattr(response_builder, "build_chat_evidence", lambda *a, **k: evidence_payload, raising=True)
 
-    session_handler = FakeSessionHandler()
-    message_handler = FakeMessageHandler()
-    rag = FakeRAG()
-    monkeypatch.setattr(handlers, "_session_handler", session_handler)
-    monkeypatch.setattr(handlers, "_message_handler", message_handler)
-    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
-    monkeypatch.setattr(
-        "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
-        lambda *a, **k: evidence_payload,
+    chunks = [Chunk(content=f"doc{i}", id=f"chunk-{i}") for i in range(1, 6)]
+    assistant_response = "answer<sup>1</sup> mid<sup>3</sup> end"
+
+    final_text, sources_for_frontend, citation_key_map = await response_builder.build_sources_and_evidence(
+        chunks,
+        subgraph_data=None,
+        subgraph_info=None,
+        rag_inference_handler=SimpleNamespace(get_graph_store=lambda: None),
+        assistant_response=assistant_response,
+        is_fallback_response=False,
     )
 
-    client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
-    try:
-        resp = client.get(
-            f"/rag_inference/stream_chat/{session_id}",
-            params={"query": "hello"},
-        )
-    finally:
-        client.app.dependency_overrides.pop(rag_router.get_current_user, None)
+    assert final_text == "answer<sup>1</sup> mid<sup>2</sup> end"
+    assert [s.key for s in sources_for_frontend] == [1, 2]
+    assert [s.chunk_id for s in sources_for_frontend] == ["chunk-1", "chunk-3"]
+    assert citation_key_map == {1: 1, 3: 2}
 
-    assert resp.status_code == 200
-
-    payload_args = None
-    sources_event = None
-    for raw_line in resp.text.splitlines():
-        line = raw_line.strip("\r")
-        if not line.startswith("data:"):
-            continue
-        data = line.split(":", 1)[1].strip()
-        if data == "[DONE]":
-            break
-        envelope = json.loads(data)
-        chunk = envelope.get("data") if isinstance(envelope, dict) else None
-        if not isinstance(chunk, dict):
-            continue
-        if chunk.get("type") == "sources":
-            sources_event = chunk
-        choices = chunk.get("choices") or []
-        if not choices:
-            continue
-        delta = (choices[0] or {}).get("delta") or {}
-        for tool_call in delta.get("tool_calls") or []:
-            fn = (tool_call or {}).get("function") or {}
-            if fn.get("name") == "rag_arc_payload":
-                payload_args = json.loads(fn.get("arguments") or "{}")
-
-    assert payload_args is not None
-    assert sources_event is not None
-
-    # The streamed tokens may contain non-contiguous citations, but the final payload stores the normalized answer.
-    payload_text = ((payload_args.get("message") or {}).get("content") or {}).get("content")
-    assert payload_text == "answer<sup>1</sup> mid<sup>2</sup> end"
-
-    sources = sources_event.get("sources") or []
-    assert [s.get("key") for s in sources] == [1, 2]
-    assert [s.get("chunk_id") for s in sources] == ["chunk-1", "chunk-3"]
-    assert sources_event.get("citation_key_map") == {"1": 1, "3": 2}

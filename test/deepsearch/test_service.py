@@ -11,7 +11,7 @@ from encapsulation.data_model.deepsearch import GraphQueryContext, ThinkNote, To
 def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa: ANN001
     base = {
         "fingerprint": fingerprint,
-        "artifact_dir": str(tmp_path / "artifacts"),
+        "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}/service",
         "experiment_output_dir": None,
         "coverage_expected_min_chunks": 1,
         "think_tool": "think",
@@ -90,7 +90,7 @@ class _StubGraphLoopWithWorkerError(_StubGraphLoop):
 
 
 class _StubReporter:
-    def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
+    async def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
         evidences = list(reasoning_trace.get("evidences", []))
         if external_evidence:
             evidences.extend(external_evidence)
@@ -161,14 +161,22 @@ async def test_service_persists_experiment_snapshot(tmp_path):
         graph_loop=graph_loop,
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
-        config=_default_service_config(tmp_path=tmp_path, fingerprint="experiment-test", experiment_output_dir=str(tmp_path)),
+        config=_default_service_config(
+            tmp_path=tmp_path,
+            fingerprint="experiment-test",
+            experiment_output_dir=f"io://deepsearch_experiments/{tmp_path.name}",
+        ),
     )
 
     await service.run("Run experiment", owner_id="tenant-321")
 
-    files = list(tmp_path.glob("*.json"))
-    assert files, "Experiment snapshot should be persisted"
-    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    from app_registration import registrator
+
+    io_manager = registrator.get_object("io_manager")
+    keys = io_manager.list_keys(namespace="deepsearch_experiments", prefix=tmp_path.name)
+    assert keys, "Experiment snapshot should be persisted"
+    payload = io_manager.get_json(keys[0])
+    assert isinstance(payload, dict)
     assert payload["question"] == "Run experiment"
     assert payload.get("plan_id") is None
 

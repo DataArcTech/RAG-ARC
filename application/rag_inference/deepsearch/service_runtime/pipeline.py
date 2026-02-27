@@ -28,13 +28,18 @@ class DeepSearchServicePipelineMixin:
             plan_items=plan_items,
         )
 
-    def _report_stage(
+    async def _report_stage(
         self,
         *,
         reasoning_trace: Dict[str, Any],
-        external_logs: Optional[Sequence[Dict[str, Any]]],
+        report_evidences: Sequence[Dict[str, Any]] | None = None,
+        external_logs: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         reporter = getattr(self, "reporter", None)
         if reporter is None:
             raise RuntimeError("reporter is not configured")
-        return reporter.compose(reasoning_trace, external_logs)
+        trace = reasoning_trace
+        if report_evidences is not None:
+            trace = dict(reasoning_trace)
+            trace["evidences"] = list(report_evidences)
+        return await reporter.compose(trace, external_logs)

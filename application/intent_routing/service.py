@@ -52,6 +52,35 @@ def _extract_last_user_messages(messages: list[tuple[str, str]], *, max_n: int, 
     return users[-max_n:]
 
 
+def _extract_last_qa_pair(messages: list[tuple[str, str]], *, exclude_text: str | None) -> str:
+    """Return the last user+assistant exchange as bridge context for topic switches.
+
+    When the user switches topics, the new topic's scoped history is empty.
+    Including the last Q&A pair from the previous topic helps the rewriter
+    disambiguate referential queries (e.g., "那B的呢？" after discussing A's features).
+    """
+    # Walk backward to find the last user message (excluding current query).
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        role, content = messages[i]
+        if role == "user" and content:
+            if exclude_text and content.strip() == str(exclude_text).strip():
+                continue
+            last_user_idx = i
+            break
+    if last_user_idx < 0:
+        return ""
+    # Collect the user message and any assistant response that follows.
+    lines: list[str] = [f"user: {messages[last_user_idx][1]}"]
+    for j in range(last_user_idx + 1, len(messages)):
+        role, content = messages[j]
+        if role == "user":
+            break
+        if role == "assistant" and content:
+            lines.append(f"assistant: {content}")
+    return "\n".join(lines)
+
+
 def _has_prior_user_history(messages: list[tuple[str, str]], *, current_user_text: str | None) -> bool:
     """True if there exists a user message before the current one.
 
@@ -328,7 +357,13 @@ class IntentRoutingService:
                     target_topic_id=topic_sel.topic_id,
                 )
                 if not scoped_history.strip():
-                    scoped_history = history_text or ""
+                    if topic_sel.action == "topic_switch":
+                        # Bridge context: include the last Q&A pair from the previous topic
+                        # so the rewriter can disambiguate referential queries (e.g., "那B的呢？").
+                        bridge = _extract_last_qa_pair(parsed, exclude_text=user_query)
+                        scoped_history = bridge if bridge else (history_text or "")
+                    else:
+                        scoped_history = history_text or ""
         # If WEB_ONLY is chosen but the caller did not enable web, treat as normal RAG (per decision).
         final_action = decision.action
         if final_action == "web_only" and not enable_web_search:

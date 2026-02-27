@@ -7,11 +7,11 @@ from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
 from config.core.deepsearch import runtime_cache_defaults
+from core.deepsearch.utils.ids import resolve_file_ref
 from core.deepsearch.utils.section_tree import (
     build_section_tree,
     fetch_section_nodes,
     fetch_section_tree_fingerprint,
-    normalize_file_id,
 )
 from framework.cache import TTLRUCache
 
@@ -32,7 +32,11 @@ class TocTreeTool(GraphTool):
     descriptor = ToolDescriptor(
         name="toc.tree",
         channel="graph",
-        description="List a file's section tree (ToC) reconstructed from PageIndex-enriched chunk metadata.",
+        description=(
+            "Show the Table of Contents (section hierarchy) of a file. "
+            "Returns an indented tree of section headings with page ranges. "
+            "Use this to understand document structure before drilling into specific pages."
+        ),
         speed="fast",
         cost="low",
         strategy_tags=("toc", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
@@ -42,9 +46,17 @@ class TocTreeTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
-                "file_id": {"type": "string", "description": "Target file_id (required)."},
-                "max_depth": {"type": "integer", "minimum": 1, "description": "Max ToC depth to print."},
-                "max_nodes": {"type": "integer", "minimum": 1, "description": "Max nodes to print before truncating."},
+                "file_id": {"type": "string", "description": "The file_id (UUID) or filename to show the ToC for."},
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum heading depth to display (e.g. 2 shows only L1 and L2 sections). Defaults to all levels.",
+                },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of sections to display before truncating. Defaults to 200.",
+                },
             },
             required_extra_fields=("file_id",),
         ),
@@ -77,11 +89,13 @@ class TocTreeTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
-        file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
+        file_id, file_id_raw = await resolve_file_ref(
+            extra, adapter=request.adapter, access_scope=request.access_scope,
+        )
         if not file_id:
             reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
             return ToolResult(
-                summary="toc.tree skipped: invalid/missing file_id (expected UUID; use search.file to obtain file_id).",
+                summary="toc.tree skipped: invalid/missing file_id (expected UUID; use locate to obtain file_id).",
                 diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
             )
 

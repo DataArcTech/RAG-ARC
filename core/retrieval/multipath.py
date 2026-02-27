@@ -1,7 +1,9 @@
 import logging
+import math
 import re
 import copy
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, List, TYPE_CHECKING
 
 from core.retrieval.base import BaseRetriever
@@ -56,9 +58,17 @@ class MultiPathRetriever(BaseRetriever):
             self.config.fusion_instance = RRFusion(k=self.config.rrf_k, weights=self.config.weights)
 
     def _get_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
-        """Search relevant chunks and fuse results"""
+        """Search relevant chunks and fuse results.
+
+        Optimizations vs. the original serial loop:
+        1. Retrievers run **in parallel** via ThreadPoolExecutor.
+        2. Dense retrievers skip query variants (embedding model is multilingual).
+        3. Per-variant scores are aggregated as ``sum(score) / sqrt(n + 1)``
+           instead of keeping only the best rank.
+        """
         k = kwargs.get('k', self.config.search_kwargs.get('k', 5))
         bm25_query = str(kwargs.get("bm25_query") or "").strip() or None
+        hyde_query = str(kwargs.get("hyde_query") or "").strip() or None
 
         if k <= 0:
             raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
@@ -67,27 +77,28 @@ class MultiPathRetriever(BaseRetriever):
             return []
 
         # Optional query variants (e.g. Hans<->Hant) to improve recall on mixed-script corpora.
+        # Disabled in bench mode to avoid confounding algorithm comparisons.
         def _variants(text: str) -> list[str]:
             try:
+                from config.benchmark_mode import benchmark_mode_enabled
+                if benchmark_mode_enabled():
+                    return [text]
                 from core.utils.query_variants import generate_query_variants
 
                 return generate_query_variants(text)
             except Exception:
                 return [text]
 
-        all_results = []
+        all_results: list[list[Chunk]] = []
         subgraph_info = None  # Store subgraph info from graph retriever
         routing_ratios = kwargs.get("retrieval_ratios")
         ratio_by_key: dict[str, float] = {}
 
-        # Determine per-retriever quotas (coverage floor) based on routing ratios.
-        # - If routing_ratios is absent, fall back to the configured fusion weights.
-        # - If a retriever is effectively disabled (weight<=0), it contributes 0 quota and is not invoked.
+        # ── Quota allocation (unchanged) ──────────────────────────────────
         try:
             from core.utils.quota import allocate_quotas
 
             weights = list(self.config.weights) if self.config.weights else [1.0] * len(self.config.retrievers)
-            # Ensure length matches retrievers.
             if len(weights) < len(self.config.retrievers):
                 weights = weights + [1.0] * (len(self.config.retrievers) - len(weights))
 
@@ -133,6 +144,7 @@ class MultiPathRetriever(BaseRetriever):
         except Exception:  # noqa: BLE001
             quotas_by_idx = [0 for _ in (self.config.retrievers or [])]
 
+        # ── Helpers ───────────────────────────────────────────────────────
         def _coerce_file_id(meta: Any) -> str | None:
             if not isinstance(meta, dict):
                 return None
@@ -168,97 +180,165 @@ class MultiPathRetriever(BaseRetriever):
                 dist,
             )
 
-        for idx, retriever in enumerate(self.config.built_retrievers or []):
-            try:
-                # Routing ratios can explicitly disable a backend by setting its ratio to 0.
-                # This is LLM-driven (from rewrite_query_with_routing), not hardcoded.
-                if isinstance(routing_ratios, dict):
-                    try:
-                        cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
-                    except Exception:  # noqa: BLE001
-                        cfg_t = ""
-                    disabled = False
-                    if cfg_t == "dense" and float(ratio_by_key.get("dense", 1.0)) <= 0:
-                        disabled = True
-                    elif cfg_t == "tantivy_bm25" and float(ratio_by_key.get("bm25", 1.0)) <= 0:
-                        disabled = True
-                    elif cfg_t in {"pruned_hipporag_neo4j_retrieval", "pruned_hipporag_retrieval"} and float(ratio_by_key.get("graph", 1.0)) <= 0:
-                        disabled = True
-                    if disabled:
-                        all_results.append([])
-                        continue
+        def _chunk_key(chunk: Chunk) -> str:
+            cid = str(getattr(chunk, "id", "") or "").strip()
+            if cid:
+                return f"id:{cid}"
+            meta = getattr(chunk, "metadata", None) or {}
+            fid = _coerce_file_id(meta)
+            if fid:
+                return f"file:{fid}:{hash(getattr(chunk, 'content', '') or '')}"
+            return f"content:{hash(getattr(chunk, 'content', '') or '')}"
 
-                # Allow disabling a retriever via weight=0 (skip invocation entirely).
-                if self.config.weights is not None and idx < len(self.config.weights):
-                    try:
-                        if float(self.config.weights[idx]) <= 0:
-                            all_results.append([])
-                            continue
-                    except Exception:  # noqa: BLE001
-                        pass
-                # Union results across variants per retriever.
-                #
-                # Important: keep the *best* (lowest) rank of each chunk across variants.
-                # A naive append-based union would unfairly demote chunks that are only retrieved
-                # by a later variant query (e.g. Simplified/Traditional), which then breaks RRF.
+        # ── Determine which retrievers to run ─────────────────────────────
+        def _should_skip(idx: int) -> bool:
+            """Return True if retriever at *idx* should be skipped entirely."""
+            if isinstance(routing_ratios, dict):
+                try:
+                    cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
+                except Exception:  # noqa: BLE001
+                    cfg_t = ""
+                if cfg_t == "dense" and float(ratio_by_key.get("dense", 1.0)) <= 0:
+                    return True
+                if cfg_t == "tantivy_bm25" and float(ratio_by_key.get("bm25", 1.0)) <= 0:
+                    return True
+                if cfg_t in {"pruned_hipporag_neo4j_retrieval", "pruned_hipporag_retrieval"} and float(ratio_by_key.get("graph", 1.0)) <= 0:
+                    return True
+            if self.config.weights is not None and idx < len(self.config.weights):
+                try:
+                    if float(self.config.weights[idx]) <= 0:
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+            return False
 
-                def _chunk_key(chunk: Chunk) -> str:
-                    cid = str(getattr(chunk, "id", "") or "").strip()
-                    if cid:
-                        return f"id:{cid}"
+        # ── Worker function for a single retriever ────────────────────────
+        def _run_retriever(idx: int, retriever: Any) -> tuple[int, list[Chunk], Any]:
+            """Run one retriever; returns (idx, chunks, subgraph_info_or_None).
+
+            Score aggregation: when a chunk appears in N variant results, its
+            final score = sum(scores) / sqrt(N + 1).  This rewards multi-variant
+            hits while dampening score inflation.
+            """
+            cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
+            per_query = bm25_query if (cfg_t == "tantivy_bm25" and bm25_query) else query
+
+            # Dense retriever: embedding model is multilingual — skip variants.
+            # When HyDE is available, search with both [query, hyde_query] for better recall.
+            if cfg_t == "dense":
+                query_list = [per_query]
+                if hyde_query:
+                    query_list.append(hyde_query)
+            else:
+                query_list = _variants(per_query)
+
+            # Collect all (key → list[(score, seq, chunk)]) across variants.
+            hits_by_key: dict[str, list[tuple[float, int, Chunk]]] = defaultdict(list)
+            seq = 0
+            for qv in query_list:
+                qv_chunks = retriever.invoke(qv, **kwargs) or []
+                for rank, chunk in enumerate(qv_chunks, 1):
+                    seq += 1
+                    key = _chunk_key(chunk)
                     meta = getattr(chunk, "metadata", None) or {}
-                    fid = _coerce_file_id(meta)
-                    if fid:
-                        return f"file:{fid}:{hash(getattr(chunk, 'content', '') or '')}"
-                    return f"content:{hash(getattr(chunk, 'content', '') or '')}"
+                    raw_score = float(meta.get("score", 0.0) if meta else 0.0)
+                    # Use inverse-rank as score fallback when raw_score is 0.
+                    score = raw_score if raw_score > 0 else 1.0 / rank
+                    hits_by_key[key].append((score, seq, chunk))
 
-                best_by_key: dict[str, tuple[int, int, Chunk]] = {}
-                seq = 0
-                cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
-                per_query = bm25_query if (cfg_t == "tantivy_bm25" and bm25_query) else query
-                for qv in _variants(per_query):
-                    qv_chunks = retriever.invoke(qv, **kwargs) or []
-                    for rank, chunk in enumerate(qv_chunks, 1):
-                        seq += 1
-                        key = _chunk_key(chunk)
-                        prev = best_by_key.get(key)
-                        if prev is None or int(rank) < int(prev[0]):
-                            # (best_rank, first_seen_seq, chunk)
-                            best_by_key[key] = (int(rank), int(prev[1] if prev else seq), chunk)
+            # Aggregate: sum(score) / sqrt(n + 1)
+            aggregated: list[tuple[float, int, Chunk]] = []
+            for key, hits in hits_by_key.items():
+                total_score = sum(s for s, _, _ in hits)
+                n = len(hits)
+                agg_score = total_score / math.sqrt(n + 1)
+                # Keep the first-seen chunk object; update its score.
+                first_seq = min(sq for _, sq, _ in hits)
+                best_chunk = min(hits, key=lambda h: h[1])[2]  # earliest seq
+                aggregated.append((agg_score, first_seq, best_chunk))
 
-                chunks = [t[2] for t in sorted(best_by_key.values(), key=lambda x: (x[0], x[1]))]
+            # Sort: highest aggregated score first, break ties by first_seen.
+            aggregated.sort(key=lambda x: (-x[0], x[1]))
+            chunks = []
+            for agg_score, _, chunk in aggregated:
+                if chunk.metadata is None:
+                    chunk.metadata = {}
+                chunk.metadata["score"] = agg_score
+                chunks.append(chunk)
 
-                # Stash per-retriever top quota for later quota-guaranteed candidate assembly.
-                # We do not trim `chunks` here because fusion still needs the full ranked list.
-                if chunks:
-                    q = 0
-                    if idx < len(quotas_by_idx):
-                        q = int(quotas_by_idx[idx] or 0)
-                    if q > 0:
-                        for ch in chunks[: min(q, len(chunks))]:
-                            meta = getattr(ch, "metadata", None) or {}
-                            meta.setdefault("_multipath_quota_source", str(getattr(self.config.retrievers[idx], "type", "") or type(retriever).__name__))
-                            ch.metadata = meta
+            # Stash quota metadata.
+            if chunks:
+                q = 0
+                if idx < len(quotas_by_idx):
+                    q = int(quotas_by_idx[idx] or 0)
+                if q > 0:
+                    for ch in chunks[: min(q, len(chunks))]:
+                        meta = getattr(ch, "metadata", None) or {}
+                        meta.setdefault("_multipath_quota_source", str(getattr(self.config.retrievers[idx], "type", "") or type(retriever).__name__))
+                        ch.metadata = meta
 
-                # Check if this is a graph retriever with subgraph info
-                if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:
-                    if '_subgraph_info' in chunks[0].metadata:
-                        subgraph_info = chunks[0].metadata.pop('_subgraph_info')
-                        logger.info(f"Captured subgraph info from {type(retriever).__name__}")
+            # Extract subgraph info if present.
+            sub_info = None
+            if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:
+                if '_subgraph_info' in chunks[0].metadata:
+                    sub_info = chunks[0].metadata.pop('_subgraph_info')
 
-                # Ensure each chunk has a score
-                for chunk in chunks:
-                    if chunk.metadata is None:
-                        chunk.metadata = {}
-                    if 'score' not in chunk.metadata:
-                        chunk.metadata['score'] = 1.0
-                all_results.append(chunks)
-                _log_dist("retriever", type(retriever).__name__, chunks)
-                logger.debug(f"Retriever {type(retriever).__name__} returned {len(chunks)} results")
+            # Ensure each chunk has a score.
+            for chunk in chunks:
+                if chunk.metadata is None:
+                    chunk.metadata = {}
+                if 'score' not in chunk.metadata:
+                    chunk.metadata['score'] = 1.0
+
+            _log_dist("retriever", type(retriever).__name__, chunks)
+            logger.debug("Retriever %s returned %d results", type(retriever).__name__, len(chunks))
+            return idx, chunks, sub_info
+
+        # ── Dispatch retrievers in parallel ───────────────────────────────
+        # Pre-allocate result slots so index alignment is maintained.
+        all_results = [None] * len(self.config.built_retrievers or [])
+        active_tasks: list[tuple[int, Any]] = []
+
+        for idx, retriever in enumerate(self.config.built_retrievers or []):
+            if _should_skip(idx):
+                all_results[idx] = []
+            else:
+                active_tasks.append((idx, retriever))
+
+        if len(active_tasks) == 0:
+            return []
+
+        if len(active_tasks) == 1:
+            # Single retriever — no thread overhead.
+            idx, retriever = active_tasks[0]
+            try:
+                r_idx, r_chunks, r_sub = _run_retriever(idx, retriever)
+                all_results[r_idx] = r_chunks
+                if r_sub:
+                    subgraph_info = r_sub
             except Exception as e:
                 logger.error("Retriever %s failed: %s", type(retriever).__name__, e)
-                logger.debug("Retriever %s traceback", type(retriever).__name__, exc_info=True)
-                all_results.append([])
+                all_results[idx] = []
+        else:
+            # Multiple retrievers — run in parallel.
+            with ThreadPoolExecutor(max_workers=len(active_tasks)) as executor:
+                future_map = {
+                    executor.submit(_run_retriever, idx, retriever): idx
+                    for idx, retriever in active_tasks
+                }
+                for future in as_completed(future_map):
+                    orig_idx = future_map[future]
+                    try:
+                        r_idx, r_chunks, r_sub = future.result()
+                        all_results[r_idx] = r_chunks
+                        if r_sub:
+                            subgraph_info = r_sub
+                    except Exception as e:
+                        logger.error("Retriever %d failed: %s", orig_idx, e)
+                        all_results[orig_idx] = []
+
+        # Replace any remaining None slots.
+        all_results = [r if r is not None else [] for r in all_results]
 
         if not all_results or all(len(results) == 0 for results in all_results):
             return []
@@ -587,6 +667,27 @@ class MultiPathRetriever(BaseRetriever):
     def retrievers(self):
         """Expose built retrievers for external access"""
         return self.config.built_retrievers or []
+
+    def fuse_with_extra_paths(
+        self,
+        base_results: list[list[Chunk]],
+        extra_results: list[list[Chunk]],
+        extra_weights: list[float],
+        k: int,
+    ) -> list[Chunk]:
+        """Fuse base retriever results with additional paths (e.g. section retrieval).
+
+        This creates a temporary RRFusion that includes the extra paths with their
+        own weights, then fuses all paths together.
+        """
+        from core.utils.fusion import RRFusion
+
+        base_weights = list(self.config.weights) if self.config.weights else [1.0] * len(base_results)
+        all_weights = base_weights + extra_weights
+        all_paths = list(base_results) + list(extra_results)
+
+        fusion = RRFusion(k=self.config.rrf_k, weights=all_weights)
+        return fusion.fuse(all_paths, k)
 
     def get_multipath_info(self) -> dict:
         retrievers = self.config.built_retrievers or []

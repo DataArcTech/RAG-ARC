@@ -35,6 +35,7 @@ from config import pageindex as pageindex_cfg
 from core.retrieval.pageindex_retriever import PageIndexRetriever
 from application.intent_routing import IntentRoutingService
 from config.rag_intent_routing import rag_intent_routing_enabled
+from config.benchmark_mode import benchmark_mode_enabled
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -97,13 +98,30 @@ class RAGInference(AbstractModule):
         logger.info("Building reranker...")
         self.reranker = self.config.reranker_config.build()
         logger.info("Reranker built successfully")
-        
+
         logger.info("Building llm...")
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
+
+        # Env override: RAG_RERANKER_TYPE controls which reranker backend is used.
+        # 'listwise' (default) → keep JSON-configured reranker (DashScope qwen-rerank)
+        # 'llm'                → swap to listwise LLM reranker using the chat model
+        try:
+            from config.rag_reranker import rag_reranker_type
+            rtype = rag_reranker_type()
+            if rtype == "llm" and hasattr(self.reranker, "rerank_llm"):
+                from config.encapsulation.llm.rerank.listwise import ListwiseRerankConfig
+                listwise_cfg = ListwiseRerankConfig(chat_llm_config=self.config.llm_config)
+                self.reranker.rerank_llm = listwise_cfg.build()
+                logger.info("Reranker overridden → Listwise LLM (chat model: %s)", self.config.llm_config.model_name)
+            else:
+                logger.info("Reranker type: %s (using JSON config default)", rtype)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reranker env override failed (using default): %s", exc)
         self._knowledge_module: Optional["Knowledge"] = None
         self._tavily_client: TavilySearchClient | None = None
         self.pageindex_retriever: PageIndexRetriever | None = None
+        self._section_reranker = None
         if pageindex_cfg.pageindex_enabled():
             try:
                 self.pageindex_retriever = PageIndexRetriever()
@@ -111,6 +129,17 @@ class RAGInference(AbstractModule):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("PageIndex retriever init failed: %s", exc)
                 self.pageindex_retriever = None
+            # Build a lightweight rerank client for section matching.
+            try:
+                import os
+                _rerank_key = os.getenv("RERANK_API_KEY", "")
+                if _rerank_key:
+                    from config.encapsulation.llm.rerank.dashscope import DashScopeRerankConfig
+                    self._section_reranker = DashScopeRerankConfig().build()
+                    logger.info("Section reranker initialized (DashScope)")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Section reranker init failed: %s", exc)
+                self._section_reranker = None
         try:
             web_cfg = getattr(self.config, "web_search", None)
             if web_cfg is not None and bool(getattr(web_cfg, "enabled", False)):
@@ -572,7 +601,7 @@ class RAGInference(AbstractModule):
         # Some tests construct RAGInference via object.__new__ (skipping __init__),
         # so guard against missing attributes.
         intent_router = getattr(self, "_intent_routing", None)
-        if disable_intent_routing:
+        if disable_intent_routing or benchmark_mode_enabled():
             intent_debug = _debug_section("intent_routing")
             if intent_debug is not None:
                 intent_debug.update(
@@ -659,6 +688,7 @@ class RAGInference(AbstractModule):
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
         bm25_query: str | None = None
+        hyde_query: str | None = None
         # Legacy fields kept for backward compatibility with message building, now unused.
         rewrite_intent: str | None = None
         rewrite_anchors: list[str] = []
@@ -680,7 +710,8 @@ class RAGInference(AbstractModule):
             rewritten_query = str(query or "").strip()
             retrieval_ratios = None
             bm25_query = None
-        elif rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
+            hyde_query = None
+        elif hasattr(self.query_rewriter, "rewrite_query_with_routing"):
             try:
                 fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
                 sig = inspect.signature(fn)
@@ -690,16 +721,29 @@ class RAGInference(AbstractModule):
                     call_kwargs.pop("history_text", None)
                 if not accepts_var_kw and "debug_info" not in sig.parameters:
                     call_kwargs.pop("debug_info", None)
-                rewritten_query, retrieval_ratios, bm25_query = fn(query, **call_kwargs)  # type: ignore[misc]
+                result = fn(query, **call_kwargs)
+                # Support both 3-tuple (legacy) and 4-tuple (with hyde_query) returns.
+                if isinstance(result, tuple) and len(result) >= 4:
+                    rewritten_query, retrieval_ratios, bm25_query, hyde_query = result[:4]
+                elif isinstance(result, tuple) and len(result) == 3:
+                    rewritten_query, retrieval_ratios, bm25_query = result
+                    hyde_query = None
+                else:
+                    rewritten_query = str(result)
+                    retrieval_ratios = None
+                    bm25_query = None
+                    hyde_query = None
             except Exception as exc:  # noqa: BLE001
                 logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
                 rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
                 retrieval_ratios = None
                 bm25_query = None
+                hyde_query = None
         else:
             rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
             retrieval_ratios = None
             bm25_query = None
+            hyde_query = None
         self._emit_progress(
             progress_callback,
             {
@@ -712,6 +756,7 @@ class RAGInference(AbstractModule):
                 **({"reason": rewrite_reason} if rewrite_reason else {}),
                 **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
                 **({"bm25_query": bm25_query} if bm25_query else {}),
+                **({"hyde_query": hyde_query[:200]} if hyde_query else {}),
             },
         )
         if rewrite_debug is not None:
@@ -719,6 +764,7 @@ class RAGInference(AbstractModule):
             rewrite_debug.setdefault("rewritten_query", rewritten_query)
             rewrite_debug.setdefault("retrieval_ratios", retrieval_ratios)
             rewrite_debug.setdefault("bm25_query", bm25_query)
+            rewrite_debug.setdefault("hyde_query", hyde_query)
             rewrite_debug.setdefault("routing_intent", routing_intent)
             rewrite_debug.setdefault("routing_action", routing_action)
             rewrite_debug.setdefault("skip_retrieval", bool(skip_retrieval))
@@ -786,6 +832,9 @@ class RAGInference(AbstractModule):
 
         web_cfg = getattr(self.config, "web_search")
         web_enabled = bool(getattr(web_cfg, "enabled"))
+        # Bench mode: force-disable web search to avoid confounding experiments.
+        if benchmark_mode_enabled():
+            enable_web_search = False
         # Debug logging for web search conditions
         if enable_web_search:
             logger.info(f"Web search check: enable_web_search={enable_web_search}, web_enabled={web_enabled}, "
@@ -862,45 +911,145 @@ class RAGInference(AbstractModule):
 
             # Some tests bypass __init__ so optional components may be missing.
             pageindex_retriever = getattr(self, "pageindex_retriever", None)
-            if pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
-                try:
-                    for owner_token in visibility.owner_ids:
-                        section_hits = pageindex_retriever.retrieve_sections(
-                            rewritten_query,
-                            owner_id=str(owner_token),
-                            file_ids=None,
-                        )
-                        for hit in section_hits:
-                            meta = getattr(hit, "metadata", None) or {}
-                            section_id = str(meta.get("section_id") or getattr(hit, "id", "") or "").strip()
-                            if not section_id:
-                                continue
-                            score = meta.get("score")
-                            if not isinstance(score, (int, float)):
-                                score = 0.0
-                            existing = pageindex_section_scores.get(section_id, None)
-                            if existing is None or score > existing:
-                                pageindex_section_scores[section_id] = float(score)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("PageIndex retrieval failed: %s", exc)
+            section_reranker = getattr(self, "_section_reranker", None)
 
-            for owner_token in visibility.owner_ids:
-                retrieved: list[Chunk] = self.retriever.invoke(
-                    rewritten_query,
-                    owner_id=owner_token,
-                    return_subgraph_info=return_subgraph,
-                    k=graph_candidates_k,
-                    **({"bm25_query": bm25_query} if bm25_query else {}),
-                    **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
+            # ── Section retrieval function (runs in parallel with multipath) ──
+            def _run_section_retrieval() -> list[Chunk]:
+                """Use PageIndex + rerank model to find section-relevant chunks.
+
+                Flow: PageIndex (FAISS+BM25) → rerank model → expand to data chunks.
+                """
+                if pageindex_retriever is None or not pageindex_cfg.pageindex_enabled():
+                    return []
+                try:
+                    import os
+                    section_weight = float(os.getenv("RAG_RETRIEVAL_WEIGHT_SECTION", "0.5"))
+                    if section_weight <= 0:
+                        return []
+
+                    section_hits: list = []
+                    for owner_token in visibility.owner_ids:
+                        section_hits.extend(
+                            pageindex_retriever.retrieve_sections(
+                                rewritten_query,
+                                owner_id=str(owner_token),
+                                file_ids=None,
+                            )
+                        )
+                    if not section_hits:
+                        return []
+
+                    # Rerank sections with dedicated rerank model for better quality.
+                    if section_reranker is not None and len(section_hits) > 1:
+                        try:
+                            section_docs = [
+                                str(getattr(h, "content", "") or "") for h in section_hits
+                            ]
+                            ranked = section_reranker.rerank(
+                                rewritten_query, section_hits, top_k=min(10, len(section_hits)),
+                            )
+                            # ranked = [(original_index, score), ...]
+                            reranked_hits = []
+                            for orig_idx, score in ranked:
+                                if 0 <= orig_idx < len(section_hits):
+                                    hit = section_hits[orig_idx]
+                                    meta = getattr(hit, "metadata", None) or {}
+                                    meta["score"] = float(score)
+                                    hit.metadata = meta
+                                    reranked_hits.append(hit)
+                            section_hits = reranked_hits if reranked_hits else section_hits
+                        except Exception as exc:
+                            logger.warning("Section reranking failed, using original order: %s", exc)
+
+                    # Build section_id → score mapping.
+                    section_scores: dict[str, float] = {}
+                    for hit in section_hits:
+                        meta = getattr(hit, "metadata", None) or {}
+                        section_id = str(
+                            meta.get("section_id") or getattr(hit, "id", "") or ""
+                        ).strip()
+                        if not section_id:
+                            continue
+                        score = meta.get("score")
+                        if not isinstance(score, (int, float)):
+                            score = 0.0
+                        existing = section_scores.get(section_id)
+                        if existing is None or score > existing:
+                            section_scores[section_id] = float(score)
+
+                    # Section hits themselves *are* chunks (section-level content).
+                    # Return them directly as section-path results for RRF fusion.
+                    # Their score from rerank model is already set in metadata.
+                    return section_hits
+
+                except Exception as exc:
+                    logger.warning("Section retrieval failed: %s", exc)
+                    return []
+
+            # ── Multipath retrieval function ──
+            def _run_multipath_retrieval() -> tuple[list[Chunk], list[dict]]:
+                mp_chunks: list[Chunk] = []
+                mp_subgraph_infos: list[dict] = []
+                for owner_token in visibility.owner_ids:
+                    retrieved: list[Chunk] = self.retriever.invoke(
+                        rewritten_query,
+                        owner_id=owner_token,
+                        return_subgraph_info=return_subgraph,
+                        k=graph_candidates_k,
+                        **({"bm25_query": bm25_query} if bm25_query else {}),
+                        **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
+                        **({"hyde_query": hyde_query} if hyde_query else {}),
+                    )
+                    per_info = self._consume_subgraph_info(retrieved)
+                    if per_info:
+                        try:
+                            per_info.setdefault("owner_scope", str(owner_token))
+                        except Exception:
+                            pass
+                        mp_subgraph_infos.append(per_info)
+                    mp_chunks.extend(retrieved)
+                return mp_chunks, mp_subgraph_infos
+
+            # ── Run section + multipath in parallel ──
+            import os
+            section_weight = float(os.getenv("RAG_RETRIEVAL_WEIGHT_SECTION", "0.5"))
+            run_section = (
+                pageindex_retriever is not None
+                and pageindex_cfg.pageindex_enabled()
+                and section_weight > 0
+            )
+
+            section_future = None
+            if run_section:
+                section_future = get_thread_pool().executor.submit(_run_section_retrieval)
+
+            chunks, mp_subgraph_infos = _run_multipath_retrieval()
+            subgraph_infos.extend(mp_subgraph_infos)
+
+            # Wait for section results and fuse as 4th path.
+            section_chunks: list[Chunk] = []
+            if section_future is not None:
+                try:
+                    section_chunks = section_future.result(timeout=10.0)
+                except Exception as exc:
+                    logger.warning("Section retrieval future failed: %s", exc)
+
+            if section_chunks and hasattr(self.retriever, "fuse_with_extra_paths"):
+                # Re-fuse: base multipath results + section path.
+                # The multipath retriever already fused dense+bm25+graph internally.
+                # We need the raw per-retriever results for a proper 4-way RRF.
+                # Since we don't have them here, we treat the fused multipath results
+                # as one "path" and section as another, using a 2-way RRF.
+                from core.utils.fusion import RRFusion
+                rrf_k = float(os.getenv("RAG_RRF_K", "60"))
+                # multipath weight = 1.0 (already fused internally), section = section_weight
+                fusion = RRFusion(k=rrf_k, weights=[1.0, section_weight])
+                combined = fusion.fuse([chunks, section_chunks], graph_candidates_k)
+                logger.info(
+                    "Section fusion: multipath=%d + section=%d → combined=%d",
+                    len(chunks), len(section_chunks), len(combined),
                 )
-                per_info = self._consume_subgraph_info(retrieved)
-                if per_info:
-                    try:
-                        per_info.setdefault("owner_scope", str(owner_token))
-                    except Exception:  # noqa: BLE001
-                        pass
-                    subgraph_infos.append(per_info)
-                chunks.extend(retrieved)
+                chunks = combined
 
             try:
                 if hasattr(self.retriever, "get_multipath_info"):
@@ -1272,6 +1421,16 @@ class RAGInference(AbstractModule):
                 }
             )
         rerank_start = time.perf_counter()
+        # Set dynamic reranker instruct based on query and web search state.
+        has_web_chunks = bool(web_chunk_ids)
+        rerank_instruct = "The user's question is: {}. Please find the most relevant passages.".format(rewritten_query)
+        if has_web_chunks:
+            rerank_instruct += " Prioritize content from web search results."
+        try:
+            if hasattr(self.reranker, "rerank_llm") and hasattr(self.reranker.rerank_llm, "instruct"):
+                self.reranker.rerank_llm.instruct = rerank_instruct
+        except Exception:  # noqa: BLE001
+            pass
         reranked_chunks = self.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
         
         # Ensure web chunks are included in final results

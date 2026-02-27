@@ -141,6 +141,17 @@ def load_intent_router_config(path: str | None = None) -> IntentRouterConfig:
     # embedding config
     emb = router.get("embedding") or {}
     provider = str(emb.get("provider") or "qwen_local").strip()
+
+    # Env override: INTENT_EMBEDDING_PROVIDER (api|local) takes precedence over TOML.
+    # Default is "api" — reuses RAG embedding credentials. Set "local" to use downloaded Qwen model.
+    _env_provider = os.getenv("INTENT_EMBEDDING_PROVIDER", "api").strip().lower()
+    if _env_provider in {"api", "openai_compat"}:
+        provider = "openai_compat"
+    elif _env_provider in {"local", "qwen_local"}:
+        provider = "qwen_local"
+    elif _env_provider:
+        raise ValueError(f"INTENT_EMBEDDING_PROVIDER must be api|local, got: {_env_provider}")
+
     if provider not in {"qwen_local", "openai_compat"}:
         raise ValueError(f"Invalid intent_router.embedding.provider: {provider}")
 
@@ -155,6 +166,20 @@ def load_intent_router_config(path: str | None = None) -> IntentRouterConfig:
     qwen_encode_kwargs = qwen.get("encode_kwargs") or {}
     if not isinstance(qwen_encode_kwargs, dict):
         qwen_encode_kwargs = {}
+
+    # When provider is openai_compat, apply credential fallback chain so CPU servers
+    # only need INTENT_EMBEDDING_PROVIDER=api (credentials inherited from RAG embedding / main API).
+    oai_api_key = _coerce_optional_str(oai.get("api_key"))
+    oai_base_url = _coerce_optional_str(oai.get("base_url"))
+    oai_model_name = _coerce_optional_str(oai.get("model_name"))
+    if provider == "openai_compat":
+        if not oai_api_key:
+            oai_api_key = _coerce_optional_str(os.getenv("EMBEDDING_API_KEY")) or _coerce_optional_str(os.getenv("OPENAI_API_KEY"))
+        if not oai_base_url:
+            oai_base_url = _coerce_optional_str(os.getenv("EMBEDDING_API_BASE_URL")) or _coerce_optional_str(os.getenv("OPENAI_BASE_URL"))
+        if not oai_model_name:
+            oai_model_name = _coerce_optional_str(os.getenv("OPENAI_EMBEDDING_MODEL"))
+
     embedding = IntentEmbeddingConfig(
         provider=provider,  # type: ignore[arg-type]
         qwen_model_name=_coerce_optional_str(qwen.get("model_name")),
@@ -164,9 +189,9 @@ def load_intent_router_config(path: str | None = None) -> IntentRouterConfig:
         qwen_model_kwargs=qwen_model_kwargs,
         qwen_sentence_transformer_model_kwargs=qwen_st_model_kwargs,
         qwen_encode_kwargs=qwen_encode_kwargs,
-        openai_model_name=_coerce_optional_str(oai.get("model_name")),
-        openai_api_key=_coerce_optional_str(oai.get("api_key")),
-        openai_base_url=_coerce_optional_str(oai.get("base_url")),
+        openai_model_name=oai_model_name,
+        openai_api_key=oai_api_key,
+        openai_base_url=oai_base_url,
         openai_timeout_seconds=float(oai.get("timeout_seconds") or 20.0),
         openai_max_retries=int(oai.get("max_retries") or 0),
         openai_request_batch_size=int(oai.get("request_batch_size") or 64),

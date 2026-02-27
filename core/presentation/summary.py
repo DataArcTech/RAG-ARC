@@ -230,13 +230,6 @@ class DeepSearchReport:
         raw_answer = (report_block.get("answer") or "").strip()
         if not raw_answer:
             raw_answer = (reasoning_block.get("final_answer") or "").strip()
-        if not raw_answer:
-            for candidate in sorted_evidences:
-                if str(candidate.get("source") or "").strip() == "graph.llm_chain_explorer":
-                    content = str(candidate.get("content") or "").strip()
-                    if content:
-                        raw_answer = content
-                        break
         if not raw_answer and fallback_highlights:
             enumerated = [f"{idx}. {text}" for idx, text in enumerate(fallback_highlights[:5], start=1)]
             raw_answer = "Key findings from graph reasoning:\n" + "\n".join(enumerated)

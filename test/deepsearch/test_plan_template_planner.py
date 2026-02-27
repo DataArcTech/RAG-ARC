@@ -23,10 +23,8 @@ def test_instantiate_template_plan_renders_slots_and_question() -> None:
     )
     assert signature
     assert any("IRR" in item["text"] for item in plan_items)
-    assert tool_calls and tool_calls[0]["tool_name"] == "explore"
-    actions = tool_calls[0]["tool_args"]["actions"]
-    assert actions[0]["tool"] == "search.file"
-    assert actions[0]["args"]["query"] == "Which term has the highest IRR?"
+    assert tool_calls and tool_calls[0]["tool_name"] == "locate"
+    assert tool_calls[0]["tool_args"]["query"] == "Which term has the highest IRR?"
 
 
 @pytest.mark.asyncio
@@ -54,3 +52,14 @@ async def test_select_plan_template_rejects_unknown_template_id() -> None:
     assert selection is not None
     assert selection.use_template is False
     assert selection.template_id is None
+
+
+def test_numeric_table_template_mentions_code_python() -> None:
+    templates = coerce_templates()
+    plan_items, _, _ = instantiate_template_plan(
+        templates=templates,
+        template_id="doc.numeric_table.v1",
+        question="What is the ROCE?",
+        slots={"metric": "ROCE", "context": "FY2023"},
+    )
+    assert any("code.python" in item["text"] for item in plan_items)

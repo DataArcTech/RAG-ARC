@@ -12,9 +12,6 @@ Filesystem mapping notes:
 The intent is that in MinIO mode, the *source of truth* lives in object storage; the
 system should not rely on local disk for non-index namespaces.
 """
-
-from __future__ import annotations
-
 import os
 from pathlib import Path, PurePosixPath
 

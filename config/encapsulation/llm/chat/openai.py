@@ -59,6 +59,10 @@ class OpenAIChatConfig(AbstractConfig):
     )
     max_tokens: int = 2000
     temperature: float = 0.1
+    reasoning_enabled: bool = Field(
+        default_factory=lambda: os.getenv("LLM_REASONING_ENABLED", "false").strip().lower() in ("true", "1", "yes"),
+        description="Enable extended-thinking / reasoning mode. Default false.",
+    )
 
     # HuggingFace-only knobs (used when loading_method="huggingface")
     device: str = Field(default_factory=lambda: os.getenv("CHAT_MODEL_DEVICE", os.getenv("DEVICE", "cpu")))

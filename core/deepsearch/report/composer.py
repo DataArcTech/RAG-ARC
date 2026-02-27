@@ -624,6 +624,12 @@ class DeepSearchReporter:
             tool_results = []
         elif keep_tool_results > 0:
             tool_results = tool_results[-keep_tool_results:]
+        # Exclude code.python results from methodology context to prevent
+        # potentially-wrong computed values from interfering with the report LLM.
+        tool_results = [
+            entry for entry in tool_results
+            if isinstance(entry, dict) and str(entry.get("tool_name") or "").strip() != "code.python"
+        ]
         methodology = {
             "plan_steps": plan_steps,
             "reasoning_steps": [

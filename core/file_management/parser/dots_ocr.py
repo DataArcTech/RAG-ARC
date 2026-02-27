@@ -9,7 +9,6 @@ from PIL import Image
 import fitz
 
 from .base import AbstractParser
-from framework.singleton_decorator import singleton
 from framework.thread_pool import get_thread_pool
 
 # Import DotsOCR utilities
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@singleton
 class DotsOCRParser(AbstractParser):
     """
     DotsOCR-based document parser implementation for advanced OCR and layout analysis.

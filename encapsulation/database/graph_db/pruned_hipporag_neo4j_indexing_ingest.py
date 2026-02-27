@@ -932,6 +932,31 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                     logger.info(f"  Batch inserted {len(chunk_data)} chunks")
 
                 if section_data_by_key:
+                    # Delete stale Section nodes for this file before upserting.
+                    # When the tree builder is re-run, section_ids may change;
+                    # without this cleanup, ghost nodes from the old tree linger.
+                    file_ids_in_batch = list({
+                        s["source_file_id"]
+                        for s in section_data_by_key.values()
+                        if s.get("source_file_id")
+                    })
+                    owner_ids_in_batch = list({
+                        s["owner_id"]
+                        for s in section_data_by_key.values()
+                        if s.get("owner_id")
+                    })
+                    if file_ids_in_batch and owner_ids_in_batch:
+                        delete_old_sections_query = """
+                        MATCH (s:Section)
+                        WHERE s.source_file_id IN $file_ids AND s.owner_id IN $owner_ids
+                        DETACH DELETE s
+                        """
+                        tx.run(delete_old_sections_query, {
+                            "file_ids": file_ids_in_batch,
+                            "owner_ids": owner_ids_in_batch,
+                        })
+                        logger.info("  Deleted old Section nodes for file_ids=%s", file_ids_in_batch)
+
                     section_query = """
                     UNWIND $sections AS section
                     MERGE (s:Section {section_id: section.section_id, owner_id: section.owner_id})

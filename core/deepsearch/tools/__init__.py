@@ -3,29 +3,11 @@ from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
 from .explore import (
-    ExploreTool,
-    GraphOpsTool,
-    FileSearchTool,
+    LocateTool,
     TocTreeTool,
-    TreeRootTool,
-    TreeChildrenTool,
-    TreeNodeTool,
-    TreeOpenTool,
-    SectionSelectTool,
     ReadPagesTool,
-    SearchFaissTool,
-    SearchGlobalFaissTool,
-    SearchBM25Tool,
-    SearchGlobalBM25Tool,
-    SearchGraphChunkTool,
-    SearchGlobalGraphTool,
-    SearchScopedTool,
-    SearchGlobalTool,
     WebSearchTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 )
-from .check import LogicCheckTool
 from .think import ThinkTool
 from .code import CodePythonTool
 
@@ -34,28 +16,10 @@ __all__ = [
     "ToolDescriptor",
     "ToolResult",
     "ToolRunRequest",
-    "ExploreTool",
-    "GraphOpsTool",
-    "FileSearchTool",
+    "LocateTool",
     "TocTreeTool",
-    "TreeRootTool",
-    "TreeChildrenTool",
-    "TreeNodeTool",
-    "TreeOpenTool",
-    "SectionSelectTool",
     "ReadPagesTool",
-    "SearchScopedTool",
-    "SearchGlobalTool",
-    "SearchFaissTool",
-    "SearchGlobalFaissTool",
-    "SearchBM25Tool",
-    "SearchGlobalBM25Tool",
-    "SearchGraphChunkTool",
-    "SearchGlobalGraphTool",
     "ThinkTool",
-    "LogicCheckTool",
-    "BeamSearchTool",
-    "LLMChainExplorerTool",
     "CodePythonTool",
     "WebSearchTool",
     "build_builtin_tools",
@@ -66,52 +30,24 @@ __all__ = [
 ]
 
 _BUILTIN_CLASSES = [
-    GraphOpsTool,
-    ExploreTool,
-    FileSearchTool,
+    LocateTool,
     TocTreeTool,
-    TreeRootTool,
-    TreeChildrenTool,
-    TreeNodeTool,
-    TreeOpenTool,
-    SectionSelectTool,
     ReadPagesTool,
-    SearchScopedTool,
-    SearchGlobalTool,
-    SearchFaissTool,
-    SearchGlobalFaissTool,
-    SearchBM25Tool,
-    SearchGlobalBM25Tool,
-    SearchGraphChunkTool,
-    SearchGlobalGraphTool,
-    LogicCheckTool,
     ThinkTool,
     CodePythonTool,
     WebSearchTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
-    SearchScopedTool,
-    SearchGlobalTool,
-    SearchGraphChunkTool,
-    SearchGlobalGraphTool,
-    SectionSelectTool,
     ThinkTool,
-    LogicCheckTool,
-    BeamSearchTool,
-    LLMChainExplorerTool,
 }
 _LLM_OPTIONAL = {
-    ExploreTool,
+    LocateTool,
 }
 
 
-def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, GraphTool]:
-    """Instantiate the default local graph tool set."""
-
+def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, GraphTool]:
     overrides = overrides or {}
     tools: Dict[str, GraphTool] = {}
     for cls in _BUILTIN_CLASSES:
@@ -127,24 +63,16 @@ def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Dict[s
 
 
 def builtin_tool_descriptors() -> Iterable[ToolDescriptor]:
-    """Expose tool descriptors for think hints."""
-
     return [cls.descriptor for cls in _BUILTIN_CLASSES]
 
 
 def get_tool_descriptor(tool_name: str) -> Optional[ToolDescriptor]:
-    """Return the descriptor for built-in tools when available."""
-
     return _DESCRIPTOR_MAP.get(tool_name)
 
 
 def llm_required_tool_names() -> set[str]:
-    """Expose names of tools that require an LLM connector."""
-
     return {cls.descriptor.name for cls in _LLM_REQUIRED}
 
 
 def llm_optional_tool_names() -> set[str]:
-    """Expose names of tools that can optionally consume an LLM connector."""
-
     return {cls.descriptor.name for cls in _LLM_OPTIONAL}

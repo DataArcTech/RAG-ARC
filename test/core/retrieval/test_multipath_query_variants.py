@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.multipath import MultiPathRetriever
@@ -26,7 +27,8 @@ class _DummyConfig:
     fusion_instance: object | None = None
 
 
-def test_multipath_calls_retriever_for_distinct_query_variants(monkeypatch):
+@patch("config.benchmark_mode.benchmark_mode_enabled", return_value=False)
+def test_multipath_calls_retriever_for_distinct_query_variants(_mock_bench, monkeypatch):
     monkeypatch.setattr(
         query_variants,
         "generate_query_variants",
@@ -43,7 +45,8 @@ def test_multipath_calls_retriever_for_distinct_query_variants(monkeypatch):
     assert "計劃特點" in retriever.invoked_queries
 
 
-def test_multipath_does_not_duplicate_calls_when_no_variants(monkeypatch):
+@patch("config.benchmark_mode.benchmark_mode_enabled", return_value=False)
+def test_multipath_does_not_duplicate_calls_when_no_variants(_mock_bench, monkeypatch):
     monkeypatch.setattr(
         query_variants,
         "generate_query_variants",

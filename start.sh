@@ -350,7 +350,8 @@ start_redis() {
     REDIS_HOST_PORT=${REDIS_HOST_PORT:-${REDIS_PORT:-6379}}
     REDIS_PORTS=""
     if [[ "$EXPOSE_REDIS" == "true" ]]; then
-        REDIS_PORTS="-p ${REDIS_HOST_PORT}:6379"
+        # Bind on localhost by default to avoid exposing Redis publicly.
+        REDIS_PORTS="-p 127.0.0.1:${REDIS_HOST_PORT}:6379"
         print_message "$GREEN" "   Exposing Redis on localhost:${REDIS_HOST_PORT}"
     fi
 

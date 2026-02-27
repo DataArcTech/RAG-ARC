@@ -84,6 +84,7 @@ class PageIndexService:
         markdown: str,
         md_path: Optional[str],
         output_dir: Optional[str],
+        io_manager: Any = None,
     ) -> PageIndexContext:
         tree = build_section_tree(
             file_id=file_id,
@@ -91,6 +92,7 @@ class PageIndexService:
             filename=filename,
             md_path=md_path,
             output_dir=output_dir,
+            io_manager=io_manager,
         )
         normalized_page_texts = {
             page: normalize_for_match(text)
@@ -146,9 +148,9 @@ class PageIndexService:
             return
 
         try:
-            import app_registration
+            from framework.register import Register
 
-            io_manager = app_registration.registrator.get_object("io_manager")
+            io_manager = Register().get_object("io_manager")
         except Exception as exc:  # noqa: BLE001
             io_manager = None
             logger.warning("PageIndex: io_manager not available; skipping artifacts: %s", exc)
@@ -214,6 +216,36 @@ class PageIndexService:
 
         locator = context.tree.locator
         node_map = context.nodes_by_id
+        nodes = context.tree.nodes or []
+
+        def _resolve_section_id_by_page(page_idx: int) -> Optional[str]:
+            """Resolve section_id by page span for strict-page chunks.
+
+            Strict-page chunks (content_list / page_strict=True) carry reliable page indices even when
+            substring matching against markdown fails (common for tables). For those chunks we should
+            prefer page-span routing over `_chunk_offset` routing to avoid incorrect section_id labels.
+            """
+
+            best = None
+            best_level = -1
+            best_span = None
+            for node in nodes:
+                ps = node.page_start
+                pe = node.page_end if node.page_end is not None else node.page_start
+                if ps is None or pe is None:
+                    continue
+                if ps <= page_idx <= pe:
+                    level = int(node.level or 0)
+                    span = int(pe) - int(ps)
+                    if level > best_level:
+                        best = node
+                        best_level = level
+                        best_span = span
+                    elif level == best_level and best_span is not None and span < best_span:
+                        best = node
+                        best_span = span
+            return best.section_id if best is not None else None
+
         cursor = 0
         matched_sections = 0
         matched_pages = 0
@@ -236,7 +268,16 @@ class PageIndexService:
             else:
                 unmatched += 1
 
-            section_id = locator.resolve(pos if pos is not None else cursor)
+            section_id = None
+            if has_strict_page:
+                page_idx = meta.get("page_start")
+                if not isinstance(page_idx, int):
+                    page_idx = meta.get("page_idx")
+                if isinstance(page_idx, int):
+                    section_id = _resolve_section_id_by_page(int(page_idx))
+
+            if section_id is None:
+                section_id = locator.resolve(pos if pos is not None else cursor)
             if section_id is None and context.tree.nodes:
                 section_id = context.tree.nodes[0].section_id
 

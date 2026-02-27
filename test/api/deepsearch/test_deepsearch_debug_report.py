@@ -3,11 +3,10 @@ import os
 import sys
 import time
 import uuid
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import httpx
-import uvicorn
+import pytest
 from fastapi import FastAPI
 
 # Ensure repo root is importable for modules like `app_registration`.
@@ -42,32 +41,8 @@ class _StubRagInference:
         return None
 
 
-@asynccontextmanager
-async def _serve_app(app: FastAPI):
-    import socket
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    host, port = sock.getsockname()
-    sock.close()
-
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve())
-    try:
-        for _ in range(200):
-            if server.started:
-                break
-            await asyncio.sleep(0.01)
-        if not server.started:
-            raise RuntimeError("uvicorn server failed to start")
-        yield host, port
-    finally:
-        server.should_exit = True
-        await task
-
-
-def test_deepsearch_debug_report_endpoint_returns_weaver_blocks():
+@pytest.mark.asyncio
+async def test_deepsearch_debug_report_endpoint_returns_weaver_blocks():
     class _StubAccount:
         def get_user_by_username(self, username: str):
             return None
@@ -83,31 +58,34 @@ def test_deepsearch_debug_report_endpoint_returns_weaver_blocks():
     app = FastAPI()
     app.include_router(deepsearch_router.router)
     user_id = uuid.uuid4()
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
+    async def _stub_user():  # noqa: ANN001
+        return SimpleNamespace(id=user_id)
 
-    async def _run():
-        async with _serve_app(app) as (host, port):
-            base = f"http://{host}:{port}"
-            async with httpx.AsyncClient(base_url=base, timeout=5.0) as client:
-                resp = await client.post("/deepsearch/run_async", json={"question": "hello"})
-                assert resp.status_code == 202
-                run_id = resp.json()["run_id"]
+    app.dependency_overrides[get_current_user] = _stub_user
 
-                deadline = time.time() + 3.0
-                while time.time() < deadline:
-                    result = await client.get(f"/deepsearch/result/{run_id}")
-                    if result.status_code == 200:
-                        break
-                    assert result.status_code in {409, 404}
-                    await asyncio.sleep(0.05)
+    async with asyncio.timeout(5.0):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=5.0) as client:
+            resp = await client.post("/deepsearch/run_async", json={"question": "hello"})
+            assert resp.status_code == 202
+            run_id = resp.json()["run_id"]
 
-                debug = await client.get(f"/deepsearch/{run_id}/debug_report")
-                assert debug.status_code == 200
-                body = debug.text
-                assert "DeepSearch Trace Report" in body
-                assert f"run_id: {run_id}" in body
-                # Weaver/XML blocks.
-                assert "<think>" in body
-                assert "<terminate>" in body
+            deadline = time.time() + 3.0
+            ready = False
+            while time.time() < deadline:
+                result = await client.get(f"/deepsearch/result/{run_id}")
+                if result.status_code == 200:
+                    ready = True
+                    break
+                assert result.status_code in {409, 404}
+                await asyncio.sleep(0.05)
+            assert ready, "DeepSearch async run did not finish within deadline"
 
-    asyncio.run(_run())
+            debug = await client.get(f"/deepsearch/{run_id}/debug_report")
+            assert debug.status_code == 200
+            body = debug.text
+            assert "DeepSearch Trace Report" in body
+            assert f"run_id: {run_id}" in body
+            # Weaver/XML blocks.
+            assert "<think>" in body
+            assert "<terminate>" in body

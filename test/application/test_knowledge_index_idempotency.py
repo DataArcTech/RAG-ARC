@@ -33,8 +33,10 @@ async def test_knowledge_indexing_cleans_before_each_run():
     knowledge._is_file_marked_for_deletion = lambda doc_id: False  # type: ignore[attr-defined]
     knowledge._run_coroutine_in_thread = lambda coro_func, *a, **k: coro_func(*a, **k)  # type: ignore[attr-defined]
 
+    from framework.thread_pool import get_thread_pool
+
     async def _run_blocking(func, *a, **k):  # noqa: ANN001
-        return await asyncio.to_thread(func, *a, **k)
+        return await get_thread_pool().run_blocking(func, *a, **k)
 
     knowledge._run_blocking = _run_blocking  # type: ignore[attr-defined]
 
@@ -42,4 +44,3 @@ async def test_knowledge_indexing_cleans_before_each_run():
     await knowledge._index_file_background("file_1", task_run_id="run_2")  # type: ignore[attr-defined]
 
     assert knowledge.file_index.delete_calls == 2  # type: ignore[attr-defined]
-

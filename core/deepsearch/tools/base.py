@@ -87,10 +87,10 @@ class ToolDescriptor:
     input_schema: Dict[str, Any] = field(default_factory=_default_input_schema)
     example_args: Optional[Dict[str, Any]] = None
 
-    def as_hint(self) -> Dict[str, str]:
+    def as_hint(self) -> Dict[str, Any]:
         """Return a dict representation consumed by think prompts."""
 
-        return {
+        hint: Dict[str, Any] = {
             "name": self.name,
             "channel": self.channel,
             "description": self.description,
@@ -101,6 +101,24 @@ class ToolDescriptor:
             "cost": self.cost,
             "strategy_tags": list(self.strategy_tags),
         }
+        # Expose tool_args schema so the LLM knows exact parameter names.
+        extra_schema = (self.input_schema or {}).get("properties", {}).get("extra", {})
+        extra_props = extra_schema.get("properties", {}) if isinstance(extra_schema, dict) else {}
+        if isinstance(extra_props, dict) and extra_props:
+            required = extra_schema.get("required", []) if isinstance(extra_schema, dict) else []
+            params: Dict[str, Any] = {}
+            for key, spec in extra_props.items():
+                if not isinstance(spec, dict):
+                    continue
+                entry: Dict[str, Any] = {"type": spec.get("type", "string")}
+                desc = spec.get("description")
+                if isinstance(desc, str) and desc.strip():
+                    entry["description"] = desc.strip()
+                if key in (required if isinstance(required, list) else []):
+                    entry["required"] = True
+                params[key] = entry
+            hint["tool_args_schema"] = params
+        return hint
 
     def as_mcp_spec(self) -> Dict[str, Any]:
         """Return a dict that can be passed to MCP Tool registration."""

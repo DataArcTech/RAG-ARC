@@ -10,25 +10,45 @@ def _sample_result():
         "reasoning": {
             "reasoning_steps": [
                 {
-                    "step_id": "plan_01",
+                    "step_id": "think_loop_01",
+                    "description": "Think loop checkpoint",
+                    "channel": "graph",
+                    "status": "done",
+                    "output_summary": "Planning file routing.",
+                    "diagnostics": {"tool": "think", "latency_ms": 800},
+                    "produced_evidence_ids": [],
+                    "tool_logs": [],
+                },
+                {
+                    "step_id": "think_loop_01_call_01",
                     "description": "Collect graph facts",
                     "channel": "graph",
                     "status": "done",
-                    "output_summary": "Plan step completed.",
-                    "diagnostics": {"tool": "search", "confidence": 0.72, "latency_ms": 120},
+                    "output_summary": "Located 2 relevant files.",
+                    "diagnostics": {"tool": "locate", "confidence": 0.72, "latency_ms": 120},
                     "produced_evidence_ids": ["rep-0"],
-                }
+                    "tool_logs": [
+                        {"tool_name": "locate", "latency_ms": 95, "arguments_snapshot": {"query": "RAG-ARC maintainers"}},
+                        {"tool_name": "read.pages", "latency_ms": 25, "arguments_snapshot": {"file_id": "f-001", "pages": [1, 2]}},
+                    ],
+                },
             ],
             "evidences": [{"chunk_id": f"reason-{idx}", "content": f"reasoning {idx}"} for idx in range(4)],
-            "think_notes": [{"plan_step_id": "plan_01", "reasoning": "pause"}],
+            "think_notes": [
+                {
+                    "plan_step_id": "think_loop_01",
+                    "reasoning": "Need to find which team maintains RAG-ARC by locating relevant docs.",
+                    "next_actions": ["Locate files about RAG-ARC ownership"],
+                },
+            ],
             "coverage_metrics": {},
             "tool_results": [
                 {
-                    "plan_step_id": "plan_01",
-                    "tool_name": "search",
+                    "plan_step_id": "think_loop_01_call_01",
+                    "tool_name": "locate",
                     "channel": "graph",
                     "result": {
-                        "summary": "Plan step completed.",
+                        "summary": "Located 2 relevant files.",
                         "diagnostics": {"latency_ms": 120},
                         "think_notes": [],
                     },
@@ -74,7 +94,7 @@ def test_trim_payload_attaches_evidence(monkeypatch):
     assert payload["reasoning"]["think_notes"]
     assert payload["question"] == "Who runs RAG-ARC?"
     assert payload["tool_runs"]
-    assert payload["tool_runs"][0]["tool_name"] == "search"
+    assert payload["tool_runs"][0]["tool_name"] == "locate"
     assert payload["request_metadata"] == {"priority": "high"}
     assert payload["overview"]["has_think_notes"] is True
     assert calls and calls[0][1] == 2
@@ -103,10 +123,10 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=1)
 
     assert payload["reasoning"]["reasoning_steps"]
-    step = payload["reasoning"]["reasoning_steps"][0]
-    assert step["tool"] == "search"
-    assert step["output_summary"] == "Plan step completed."
-    assert step["diagnostics"] == {"confidence": 0.72, "latency_ms": 120, "tool": "search"}
+    step = payload["reasoning"]["reasoning_steps"][1]  # tool call step
+    assert step["tool"] == "locate"
+    assert step["output_summary"] == "Located 2 relevant files."
+    assert step["diagnostics"] == {"confidence": 0.72, "latency_ms": 120, "tool": "locate"}
 
 
 def test_trim_payload_preserves_structured_report(monkeypatch):
@@ -200,13 +220,52 @@ def test_deepsearch_report_prefers_reasoning_answer():
     assert report.final_answer == "Graph RAG is managed by the RAG-ARC core team."
 
 
-def test_deepsearch_report_uses_llm_chain_explorer_when_available():
+def test_deepsearch_report_falls_back_to_highlights_when_answer_empty():
     payload = _sample_result()
     payload["report"]["answer"] = ""
     payload["reasoning"]["final_answer"] = ""
-    payload["report"]["evidences"][0]["source"] = "graph.llm_chain_explorer"
-    payload["report"]["evidences"][0]["content"] = "SAS 提供完善的 AP 课程与课外活动。"
 
     report = DeepSearchReport.from_payload(payload, graph_chain_builder=None)
 
-    assert report.final_answer == "SAS 提供完善的 AP 课程与课外活动。"
+    # With no answer and no final_answer, should fall back to highlights.
+    assert "Key findings" in report.final_answer
+
+
+def test_execution_timeline_with_reasoning_and_args(monkeypatch):
+    monkeypatch.setattr(
+        "core.presentation.deepsearch_payload.build_deepsearch_evidence",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not call")),
+    )
+
+    payload = trim_deepsearch_payload(_sample_result(), include_evidence=False)
+    timeline = payload.get("execution_timeline")
+    assert isinstance(timeline, list) and len(timeline) == 2
+
+    # Entry 0: think step — should have reasoning from think_notes
+    think = timeline[0]
+    assert think["step_id"] == "think_loop_01"
+    assert think["tool"] == "think"
+    assert think["latency_ms"] == 800
+    assert think["reasoning"] == "Need to find which team maintains RAG-ARC by locating relevant docs."
+    assert think["next_actions"] == ["Locate files about RAG-ARC ownership"]
+    assert think.get("invocations") is None  # no tool_logs on think step
+
+    # Entry 1: tool call — should have invocations with args, and inherited reasoning
+    call = timeline[1]
+    assert call["step_id"] == "think_loop_01_call_01"
+    assert call["tool"] == "locate"
+    assert call["latency_ms"] == 120
+    assert call["status"] == "done"
+    assert call["evidence_produced"] == 1
+    assert call["summary"] == "Located 2 relevant files."
+    # Tool call inherits parent think_loop_01's reasoning
+    assert "RAG-ARC" in call["reasoning"]
+
+    # Invocations should include arguments
+    invocations = call.get("invocations")
+    assert invocations and len(invocations) == 2
+    assert invocations[0]["tool"] == "locate"
+    assert invocations[0]["latency_ms"] == 95
+    assert invocations[0]["arguments"] == {"query": "RAG-ARC maintainers"}
+    assert invocations[1]["tool"] == "read.pages"
+    assert invocations[1]["arguments"] == {"file_id": "f-001", "pages": [1, 2]}

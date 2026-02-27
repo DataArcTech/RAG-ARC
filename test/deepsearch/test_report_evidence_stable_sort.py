@@ -11,7 +11,7 @@ def test_stable_sort_authoritative_evidences_orders_read_pages_by_file_and_page(
         },
         {
             "chunk_id": "other_1",
-            "source": "graph.ops",
+            "source": "locate",
             "content": "derived",
             "provenance": {},
         },

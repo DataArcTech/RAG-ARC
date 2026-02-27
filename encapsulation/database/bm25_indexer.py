@@ -17,7 +17,7 @@ from encapsulation.database.bm25_indexer_tantivy import Index
 from encapsulation.database.bm25_indexer_tokenization import _BM25IndexBuilderTokenizationMixin
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 from framework.shared_module_decorator import shared_module
-from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+from framework.virtual_paths import is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,13 @@ class BM25IndexBuilder(
         """
         self.config = config
         if is_io_path(getattr(self.config, "index_path", "")):
-            self.config.index_path = str(resolve_io_to_local_path(self.config.index_path))
+            try:
+                from framework.register import Register
+
+                io_manager = Register().get_object("io_manager")
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("io_manager unavailable while resolving io:// index_path") from exc
+            self.config.index_path = str(io_manager.resolve_local_dir(str(self.config.index_path), ensure=True))
         runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
         fallback = os.path.join(runtime_root, os.path.basename(self.config.index_path) or "bm25_index")
         self.config.index_path = ensure_writable_dir(self.config.index_path, fallback)

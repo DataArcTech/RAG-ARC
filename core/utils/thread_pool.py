@@ -55,9 +55,13 @@ async def run_blocking(func: Callable[..., T], *args: Any, executor: Optional[Th
     # Run with captured context inside the worker thread.
     def run_with_context():
         return ctx.run(partial(func, *args, **kwargs))
-    
+
+    # Use asyncio.wrap_future instead of loop.run_in_executor to avoid
+    # missed-wakeup edge cases while keeping zero-overhead event-loop
+    # integration (no busy-poll).
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor or get_shared_thread_pool(), run_with_context)
+    cf_future = (executor or get_shared_thread_pool()).submit(run_with_context)
+    return await asyncio.wrap_future(cf_future, loop=loop)
 
 
 async def run_coroutine_in_thread(coro_func: Callable[..., Any], *args: Any, executor: Optional[ThreadPoolExecutor] = None, **kwargs: Any) -> Any:

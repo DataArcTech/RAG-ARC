@@ -29,6 +29,7 @@ from core.deepsearch.tooling.errors import ToolErrorKind, ToolInvocationError, w
 from core.deepsearch.tooling.budget import ToolBudgetExceededError, attach_tool_budget_metadata, get_tool_budget
 from core.constants.io_namespaces import DEEPSEARCH_ARTIFACTS_NAMESPACE
 from framework.virtual_paths import IO_PATH_PREFIX, io_key
+from config.benchmark_mode import benchmark_mode_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -406,26 +407,105 @@ class DeepSearchToolManager:
         self.max_remote_evidences = int(self.tool_configs["max_remote_evidences"])
         self.max_remote_context_chars = int(self.tool_configs["max_remote_context_chars"])
         self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
-        from app_registration import registrator
-
-        self._io_manager = registrator.get_object("io_manager")
-        if self._io_manager is None:
-            raise RuntimeError("io_manager is required for tool artifact persistence")
+        self._io_manager = None
+        self._artifact_dir_local: Path | None = None
 
         configured = str(self.tool_configs.get("artifact_dir") or f"{IO_PATH_PREFIX}{DEEPSEARCH_ARTIFACTS_NAMESPACE}").strip()
-        if not configured.startswith(IO_PATH_PREFIX):
-            raise ValueError("tool_configs.artifact_dir must be an io:// virtual path")
-        root_key = io_key(configured)
-        if not root_key:
+        if not configured:
             raise ValueError("tool_configs.artifact_dir must not be empty")
-        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
-        self._artifact_namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
-        self._artifact_prefix = prefix
+
+        if configured.startswith(IO_PATH_PREFIX):
+            from app_registration import registrator
+
+            self._io_manager = registrator.get_object("io_manager")
+            if self._io_manager is None:
+                raise RuntimeError("io_manager is required for tool artifact persistence when artifact_dir is io://")
+
+            root_key = io_key(configured)
+            if not root_key:
+                raise ValueError("tool_configs.artifact_dir must not be empty")
+            namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+            self._artifact_namespace = namespace or DEEPSEARCH_ARTIFACTS_NAMESPACE
+            self._artifact_prefix = prefix
+        else:
+            # Local filesystem path support for unit tests / dev scripts.
+            self._artifact_namespace = None
+            self._artifact_prefix = None
+            self._artifact_dir_local = Path(configured).expanduser().resolve()
+            self._artifact_dir_local.mkdir(parents=True, exist_ok=True)
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
         """Invoke a tool through MCP and/or local registries according to the routing policy."""
 
         call_id = uuid.uuid4().hex
+        if benchmark_mode_enabled() and (str(tool_name or "") == "web.search" or str(tool_name or "").startswith("web.search.")):
+            descriptor = self._resolve_descriptor(tool_name)
+            request = self._build_request(payload)
+            summary = (
+                "web.search is disabled in benchmark/experiment mode (bench_mode=1). "
+                "Use file-grounded DeepSearch tools (locate → toc.tree → read.pages) instead."
+            )
+            result = ToolResultPayload(
+                tool_name=str(tool_name or "web.search"),
+                namespace=(descriptor.namespace if descriptor else None),
+                channel=(descriptor.channel if descriptor else "graph"),
+                profile=(descriptor.profile if descriptor else "F"),
+                determinism=(descriptor.determinism if descriptor else "deterministic"),
+                summary=summary,
+                evidences=[],
+                diagnostics={
+                    "reason": "disabled_by_benchmark_mode",
+                    "bench_mode": True,
+                    "call_id": call_id,
+                },
+                think_notes=[],
+            )
+            await emit_trace(
+                "tool_call",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "plan_step": request.plan_step,
+                            "question": request.question,
+                            "extra": request.extra,
+                            "coverage_metrics": request.coverage_metrics,
+                            "access_scope": self._access_scope_payload(request.access_scope),
+                            "graph_context": (request.graph_context.model_dump(exclude_none=True) if request.graph_context else None),
+                            "routing": {"disabled_by_benchmark_mode": True},
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={"call_id": call_id, "tool_name": tool_name, "plan_step": request.plan_step},
+            )
+            await emit_trace(
+                "tool_response",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "route": "disabled",
+                            "result": result.model_dump(exclude_none=True),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "plan_step": request.plan_step,
+                    "ok": True,
+                    "route": "disabled",
+                },
+            )
+            return result
         descriptor = self._resolve_descriptor(tool_name)
         local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
         local_disabled = self._prefer_remote_for(tool_name)
@@ -1049,13 +1129,26 @@ class DeepSearchToolManager:
 
     def _persist_artifact(self, tool_name: str, payload: ToolResultPayload) -> Optional[str]:
         file_name = f"{int(time.time() * 1000)}_{tool_name.replace('.', '_')}_{uuid.uuid4().hex}.json"
-        key_prefix = str(self._artifact_prefix or "").strip().lstrip("/")
         tool_prefix = tool_name.replace(".", "_")
+
+        if self._artifact_dir_local is not None:
+            dst_dir = (self._artifact_dir_local / "tool_artifacts" / tool_prefix).resolve()
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = (dst_dir / file_name).resolve()
+            dst.write_text(
+                json.dumps(json_safe(payload.model_dump(exclude_none=True)), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            return str(dst)
+
+        key_prefix = str(self._artifact_prefix or "").strip().lstrip("/")
         key = (
             f"{key_prefix}/tool_artifacts/{tool_prefix}/{file_name}".lstrip("/")
             if key_prefix
             else f"tool_artifacts/{tool_prefix}/{file_name}"
         )
+        if self._io_manager is None:
+            raise RuntimeError("io_manager is required for io:// artifact persistence")
         put = self._io_manager.put_json(
             namespace=self._artifact_namespace,
             key=key,

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from core.file_management.atomic_units.fenced_code import is_fence_line
+from framework.virtual_paths import is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +89,14 @@ def read_json(path: Path) -> Any:
 def resolve_content_list_path(md_path: Optional[str], output_dir: Optional[str]) -> Optional[Path]:
     candidates: List[Path] = []
     if output_dir:
-        candidates.extend(sorted(Path(output_dir).glob("*_content_list*.json")))
+        token = str(output_dir).strip()
+        if token and not is_io_path(token):
+            candidates.extend(sorted(Path(token).glob("*_content_list*.json")))
     if md_path:
-        md_dir = Path(md_path).parent
-        candidates.extend(sorted(md_dir.glob("*_content_list*.json")))
+        token = str(md_path).strip()
+        if token and not is_io_path(token):
+            md_dir = Path(token).parent
+            candidates.extend(sorted(md_dir.glob("*_content_list*.json")))
     for candidate in candidates:
         if candidate.is_file():
             return candidate

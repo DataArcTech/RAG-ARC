@@ -458,6 +458,10 @@ class DeepSearchLLMReportWriter:
 
     @staticmethod
     def _language_enforcement_prompt(question: str) -> str | None:
+        from config.benchmark_mode import benchmark_mode_enabled
+
+        if benchmark_mode_enabled():
+            return None
         q = str(question or "").strip()
         if not q:
             return None

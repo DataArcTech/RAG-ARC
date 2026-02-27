@@ -51,18 +51,28 @@ class DeepSearchTaskRegistry:
     def __init__(self, *, ttl_seconds: int = 1800) -> None:
         self._ttl_seconds = max(60, int(ttl_seconds))
         self._items: Dict[str, DeepSearchTaskInfo] = {}
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+
+    async def _get_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
 
     async def create(self, run_id: Optional[str] = None, *, owner_id: Optional[str] = None) -> DeepSearchTaskInfo:
         run_id = run_id or new_run_id()
         info = DeepSearchTaskInfo(run_id=run_id, owner_id=str(owner_id) if owner_id else None)
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             self._items[run_id] = info
         return info
 
     async def get(self, run_id: str) -> Optional[DeepSearchTaskInfo]:
         await self._cleanup()
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             return self._items.get(run_id)
 
     async def mark_done(self, run_id: str, *, result: Optional[Dict[str, Any]] = None, error: Optional[str] = None) -> None:
@@ -92,46 +102,58 @@ class DeepSearchTaskRegistry:
         if event_type != "trace":
             info.last_progress = payload
         info.append_event(event)
-        # Best-effort observability: also mirror events into RedisTaskQueue.
+        # Best-effort observability: mirror events into RedisTaskQueue in celery mode.
         # IMPORTANT: never block the event loop on Redis I/O (tests/inprocess mode rely on fast completion).
-        try:
-            progress = payload.get("progress") if isinstance(payload, dict) else None
-            percent = None
-            if isinstance(progress, dict) and "percent" in progress:
-                try:
-                    percent = int(progress.get("percent"))
-                except Exception:
-                    percent = None
-
-            async def _append() -> None:
-                try:
-                    await asyncio.to_thread(
-                        _get_redis_task_queue().append_progress_event,
-                        flow="deepsearch",
-                        task_run_id=run_id,
-                        stage=str(payload.get("stage") or event_type),
-                        status=str(event_type),
-                        percent=percent,
-                        resource_id=run_id,
-                        payload=payload if isinstance(payload, dict) else {"payload": payload},
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Failed to append DeepSearch progress event to RedisTaskQueue: %s", exc, exc_info=True)
-
+        if os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower() == "celery":
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_append())
-            except RuntimeError:
-                # No running loop; skip Redis mirroring.
-                pass
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed to schedule DeepSearch progress mirroring to RedisTaskQueue: %s", exc, exc_info=True)
+                progress = payload.get("progress") if isinstance(payload, dict) else None
+                percent = None
+                if isinstance(progress, dict) and "percent" in progress:
+                    try:
+                        percent = int(progress.get("percent"))
+                    except Exception:
+                        percent = None
+
+                async def _append() -> None:
+                    try:
+                        def _call() -> None:
+                            _get_redis_task_queue().append_progress_event(
+                                flow="deepsearch",
+                                task_run_id=run_id,
+                                stage=str(payload.get("stage") or event_type),
+                                status=str(event_type),
+                                percent=percent,
+                                resource_id=run_id,
+                                payload=payload if isinstance(payload, dict) else {"payload": payload},
+                            )
+
+                        await asyncio.to_thread(_call)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "Failed to append DeepSearch progress event to RedisTaskQueue: %s",
+                            exc,
+                            exc_info=True,
+                        )
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_append())
+                except RuntimeError:
+                    # No running loop; skip Redis mirroring.
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Failed to schedule DeepSearch progress mirroring to RedisTaskQueue: %s",
+                    exc,
+                    exc_info=True,
+                )
         async with info.cond:
             info.cond.notify_all()
 
     async def _cleanup(self) -> None:
         cutoff = _now_ms() - self._ttl_seconds * 1000
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             stale = [
                 run_id
                 for run_id, info in self._items.items()

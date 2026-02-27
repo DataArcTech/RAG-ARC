@@ -20,11 +20,9 @@ from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.evidence_kinds import count_evidences_by_kind, is_primary_evidence
 from core.deepsearch.utils.evidence_cards import evidence_cards
 from config.core.deepsearch.reasoning_defaults import (
-    REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE,
     THINK_RECENT_TOOL_RUNS_MAX,
     THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
 )
-from config.core.deepsearch.runtime_messages import MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -161,8 +159,11 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             previous_tool_call_results = []
 
         max_rounds = max(1, int(self._think_config.get("max_rounds_per_checkpoint") or 1))
+        max_think_failures = max(1, int(self._think_config.get("max_think_failures") or max_rounds))
+        think_failure_count = 0
+        think_success_count = 0
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in range(1, max_rounds + max_think_failures + 1):
                 coverage_metrics = self._coverage_snapshot(
                     evidences=evidences,
                     completed_steps=len(reasoning_steps),
@@ -230,12 +231,14 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                         "Think tool failed (continuing loop).",
                         meta={"stage": "think_loop_error", "round": round_idx, "error": str(exc)},
                     )
-                    if round_idx < max_rounds:
+                    think_failure_count += 1
+                    if think_failure_count < max_think_failures:
                         continue
                     break
 
                 await self._extend_shared_evidences(result.evidences)
                 record.status = "done"
+                think_success_count += 1
                 record.output_summary = result.summary
                 record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
                 record.diagnostics.setdefault("reason", "think_loop")
@@ -279,26 +282,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 # but never allow stopping before collecting at least one read.pages evidence.
                 think_is_final = self._extract_is_final_from_think_notes(result.think_notes or [])
                 if think_is_final is True:
-                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_final_gate",
-                                "failure_reason": "missing_primary_page_evidence",
-                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Finalization requires citeable page evidence: call read.pages at least once.",
-                                    "Use explore + search.file to obtain a real file_id (UUID) if not already known.",
-                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages, then read.pages.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Finalization requested but evidence gate unmet (missing read.pages). Continuing think loop.",
-                            meta={"stage": "final_gate", "round": round_idx},
-                        )
-                        continue
                     await emit_trace(
                         "think",
                         "Think requested finalization (stopping reasoning loop and proceeding to report).",
@@ -321,28 +304,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 proposed = int(tool_call_summary.get("proposed") or 0)
                 previous_tool_call_results = list(tool_call_summary.get("results") or [])
                 if proposed <= 0:
-                    # Hard evidence gate (report-style DeepSearch): do not stop the loop until we have at least one
-                    # successful read.pages evidence. This keeps final reports grounded in full-page context.
-                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
-                        previous_tool_call_results = [
-                            {
-                                "status": "failed",
-                                "step_id": f"{think_step_id}_evidence_gate",
-                                "failure_reason": "missing_primary_page_evidence",
-                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
-                                "suggested_next_steps": [
-                                    "Use explore + search.file to obtain a real file_id (UUID).",
-                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages.",
-                                    "Call read.pages on those pages (at least once) before stopping.",
-                                ],
-                            }
-                        ]
-                        await emit_trace(
-                            "think",
-                            "Evidence gate: missing read.pages (continuing think loop).",
-                            meta={"stage": "evidence_gate", "round": round_idx},
-                        )
-                        continue
+                    break
+                if think_success_count >= max_rounds:
                     break
         finally:
             _RUN_EVIDENCES.reset(evidences_token)
@@ -385,30 +348,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 continue
             return bool(raw.get("is_final"))
         return None
-
-    @staticmethod
-    def _should_require_primary_page_evidence(context: GraphQueryContext) -> bool:
-        meta = context.metadata if isinstance(getattr(context, "metadata", None), dict) else {}
-        report_needed = meta.get("report_needed")
-        if report_needed is False:
-            return False
-        style = str(meta.get("report_style") or "").strip().lower()
-        if style not in {"deepsearch", "research"}:
-            return False
-        try:
-            return int(REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE) >= 1
-        except Exception:
-            return True
-
-    @staticmethod
-    def _has_primary_page_evidence(evidences: Sequence[EvidenceChunk]) -> bool:
-        for ev in evidences or []:
-            try:
-                if ev.source == "read.pages":
-                    return True
-            except Exception:
-                continue
-        return False
 
     def _build_think_config(self, config) -> Dict[str, Any]:
         think = None

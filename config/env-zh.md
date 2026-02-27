@@ -97,11 +97,12 @@ Benchmark/实验模式：
 | `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | 当 429 响应未提供 Retry-After 时，默认每次重试等待（秒）。 |
 | `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | 429 重试等待上限（秒，cap）。 |
 | `INTENT_ROUTER_CONFIG_PATH` | `config/core/intent_routing/intent_router.toml` | 语义意图路由（semantic intent routing）的 TOML 配置路径。 |
-| `INTENT_EMBEDDING_API_KEY` | _(空)_ | 意图 embedding 的 API Key（当 `intent_router.embedding.provider=openai_compat`）。 |
-| `INTENT_EMBEDDING_API_BASE_URL` | _(空)_ | 意图 embedding 的 OpenAI 兼容 Base URL（当 `intent_router.embedding.provider=openai_compat`）。 |
-| `INTENT_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 意图 embedding 的模型名称（当 `openai_compat`）。 |
-| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 意图 embedding 的模型名称（当 `qwen_local`/SentenceTransformers）。 |
-| `INTENT_EMBEDDING_DEVICE` | `cpu` | 意图 embedding 的运行设备（当 `qwen_local`/SentenceTransformers）。 |
+| `INTENT_EMBEDDING_PROVIDER` | `api` | 意图 embedding 提供方。`api`：复用 RAG embedding 凭据（`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_EMBEDDING_MODEL`）。`local`：使用本地 Qwen 模型（需先下载）。 |
+| `INTENT_EMBEDDING_API_KEY` | _(空；回退至 `EMBEDDING_API_KEY` → `OPENAI_API_KEY`)_ | 意图 embedding 的 API Key（当 provider=`api`）。 |
+| `INTENT_EMBEDDING_API_BASE_URL` | _(空；回退至 `EMBEDDING_API_BASE_URL` → `OPENAI_BASE_URL`)_ | 意图 embedding 的 Base URL（当 provider=`api`）。 |
+| `INTENT_OPENAI_EMBEDDING_MODEL` | _(回退至 `OPENAI_EMBEDDING_MODEL`)_ | 意图 embedding 的模型名称（当 provider=`api`）。 |
+| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 意图 embedding 的模型名称（当 provider=`local`/SentenceTransformers）。 |
+| `INTENT_EMBEDDING_DEVICE` | `cpu` | 意图 embedding 的运行设备（当 provider=`local`/SentenceTransformers）。 |
 | `INTENT_EMBEDDING_CACHE_FOLDER` | `./models/Qwen` | 可选：意图 embedding 的本地缓存目录（SentenceTransformers）。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
@@ -123,6 +124,9 @@ Benchmark/实验模式：
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
 | `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
+| `RERANK_API_KEY` | _(空)_ | DashScope API rerank 密钥（DeepSearch `locate` 工具使用）。 |
+| `RERANK_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1` | DashScope 兼容 rerank 端点的 Base URL。 |
+| `RERANK_MODEL_NAME` | `qwen3-rerank` | API rerank 模型名称（如 `qwen3-rerank`）。 |
 | `OPENAI_API_KEY` | _(空)_ | 全局备用 Key（当各组件 `*_API_KEY` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_KEY`，则该项 **必填**。 |
 | `OPENAI_BASE_URL` | _(空)_ | 全局备用 Base URL（当各组件 `*_API_BASE_URL` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_BASE_URL`，则该项 **必填**。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
@@ -244,6 +248,9 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath 的 RRF 融合权重：graph 路径。设为 `0` 表示在**普通 RAG**中禁用图检索（可显著提速）；设为正值（如 `1.0`）可启用。注意这并不影响离线入库/索引阶段的图谱构建，DeepSearch 仍可在其专用流程中使用图信号。 |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
+| `RAG_RETRIEVAL_WEIGHT_SECTION` | `0.5` | Section（PageIndex）检索路径的 RRF 融合权重，应小于 dense/BM25 权重。设为 `0` 禁用。 |
+| `RAG_HYDE_ENABLED` | `true` | 启用 HyDE（Hypothetical Document Embedding）双路检索：rewrite 阶段并行生成假设文档片段，dense 路用 `[原始query, hyde_query]` 一起检索。即使 `bench_mode=1` 也保持启用。 |
+| `RAG_RERANKER_TYPE` | `listwise` | 重排器类型：`listwise` 使用 DashScope qwen-rerank（交叉编码器 API），`llm` 复用 chat 模型做 listwise 重排。 |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | rewrite 阶段只向模型提供 user 历史（不包含 assistant），降低错误回答污染后续 rewrite（assistant poisoning）。 |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | 启用 evidence 一致性过滤：基于 rewrite 产出的 anchors，将召回结果收敛到同一公司/产品文件集合，降低跨产品证据混入导致的回答偏移。 |
@@ -357,8 +364,8 @@ Benchmark/实验模式：
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
 | `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Redis 内联存储的最大 JSON 字节数；超过后自动外置存储（IOManager/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。该限制同时作用于任务结果与超大 progress/trace payload。 |
-| `MQ_RESULT_STORE` | `io` | 结果外置存储后端：`io`（IOManager，Phase 1 映射到 LocalDB）或 `minio`（TODO）。 |
-| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | `MQ_RESULT_STORE=io` 时的外置结果虚拟目录（io://...，映射到 LocalDB）。 |
+| `MQ_RESULT_STORE` | `io` | 结果外置存储后端：`io`（IOManager，使用 `io://...`）/ `local`（本地文件系统，不依赖 IOManager）/ `minio`（TODO）。 |
+| `MQ_RESULT_LOCAL_DIR` | `io://mq_results` | 结果目录：当 `MQ_RESULT_STORE=io` 时必须是 `io://...` 虚拟目录；当 `MQ_RESULT_STORE=local` 时可以是本地路径（也接受 `io://...` 并映射到 LocalDB 根目录，便于单测隔离）。 |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
 | `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
 | `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
@@ -412,7 +419,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | 图推理策略。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch 产物虚拟目录（runs + tools；io://...），映射到 LocalDB（位于 `IO_STORE_BASE_PATH` 下）。 |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `io://deepsearch_artifacts` | DeepSearch 运行产物目录（runs + tools）。支持 `io://...`（通过 IOManager 映射到 LocalDB/MinIO），也支持本地文件系统路径（便于单测/脚本）。 |
 | `DEEPSEARCH_LLM_DUMP_PATH` | _(空)_ | 可选调试输出根目录：当设置为 `io://...` 虚拟目录时，DeepSearch 会通过 IOManager 写入 LLM 调试事件（request/response/error），每个事件一个 JSON 对象。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
@@ -479,8 +486,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PARSER_PARSE_MODE` | `native` | PDF/图片解析方式：`native`（不做 OCR；仅 PDF 文本抽取）、`dotsocr`（本地 DotsOCR OCR）、`mineru`（远程 MinerU 服务）。 |
-| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 统一解析输出虚拟目录（io://...，native/dots_ocr/vlm_ocr/mineru 会落到子目录），通过 IO 后端持久化（`localdb` 或 `minio`）。 |
-| `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖。 |
+| `PARSER_OUTPUT_DIR` | `io://parsed_files` | 解析产物基目录（native/dots_ocr/vlm_ocr/mineru 会落到子目录）。支持 `io://...`（推荐）或本地文件系统路径。 |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖（支持 `io://...` 或本地路径）。 |
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `MINERU_SERVER_URL` | _(空)_ | 当 `PARSER_PARSE_MODE=mineru` 时必填：MinerU 服务地址（例如 `http://127.0.0.1:8899`）。 |
@@ -488,7 +495,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_REUSE_CACHE` | `1` | 重新入库时，如果 `PARSER_OUTPUT_DIR/mineru/<file_id>/` 下已有 MinerU markdown，则复用缓存（跳过远程 MinerU 调用）。 |
 | `MINERU_SHARED_CACHE_ENABLED` | `1` | 启用 MinerU 的全局（跨 owner/tenant）解析缓存复用：当文件 bytes 完全一致（sha256 匹配）时跳过远程 MinerU 调用。 |
-| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
+| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录（支持 `io://...` 或本地路径）；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
 | `MINERU_SHARED_CACHE_MODE` | `symlink` | 共享缓存物化到每个 file 输出目录的方式：`symlink`（优先）或 `copy`。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |

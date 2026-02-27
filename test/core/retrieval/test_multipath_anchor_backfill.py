@@ -207,11 +207,11 @@ def test_multipath_limits_matched_slices_to_top_scores():
         assert len(matched) == 5
 
     matched_ids = [entry.get("id") for entry in matched]
-    # RRF fusion rewrites per-chunk scores based on rank; earlier results rank higher.
-    assert matched_ids[0] == "SLICE_1"
-    assert "SLICE_5" not in matched_ids
-    assert "| 1 | value_1 |" in out.content
-    assert "| 5 | value_5 |" not in out.content
+    # Slices are sorted by descending score; SLICE_5 has the highest score (0.5).
+    assert matched_ids[0] == "SLICE_5"
+    assert "SLICE_1" not in matched_ids
+    assert "| 5 | value_5 |" in out.content
+    assert "| 1 | value_1 |" not in out.content
 
 
 def test_multipath_does_not_truncate_table_slices_when_merging():

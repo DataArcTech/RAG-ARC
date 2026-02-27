@@ -1,6 +1,7 @@
 from typing import Dict, Any, TYPE_CHECKING
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from .base import AbstractQueryRewriter
 from core.prompts.query_rewrite_prompt import (
     QUERY_REWRITE_USER_PROMPT,
@@ -11,6 +12,8 @@ from core.prompts.query_rewrite_prompt import (
     QUERY_REWRITE_INTENT_SYSTEM_SUFFIX,
     QUERY_REWRITE_AND_INTENT_USER_PROMPT,
     QUERY_REWRITE_AND_INTENT_USER_PROMPT_WITH_HISTORY,
+    HYDE_SYSTEM_PROMPT,
+    HYDE_USER_PROMPT,
 )
 from config.benchmark_mode import benchmark_mode_enabled
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
@@ -19,6 +22,7 @@ from config.rag_intent_routing import (
     rag_rewrite_history_user_only,
     rag_rewrite_history_most_recent_first,
 )
+from config.rag_hyde import rag_hyde_enabled
 from core.utils.llm_json import call_llm_json_with_retry_sync
 
 import logging
@@ -92,13 +96,15 @@ class LLMQueryRewriter(AbstractQueryRewriter):
 
     def __init__(self, config):
         super().__init__(config)
-        # In benchmark/experiment mode, query rewrite is disabled; avoid building any LLM clients.
-        if benchmark_mode_enabled():
+        # Build LLM from sub-config following framework pattern.
+        # Even in benchmark mode we need the LLM client for HyDE generation
+        # (HyDE is enabled in bench mode; only the rewrite step is skipped).
+        try:
+            self.chat_llm = config.chat_llm_config.build()
+        except Exception:  # noqa: BLE001
             self.chat_llm = None
-            return
-        # Build LLM from sub-config following framework pattern
-        # Accepts any ChatLLMBase implementation (OpenAI, Qwen, HuggingFace, etc.)
-        self.chat_llm = config.chat_llm_config.build()
+            if not benchmark_mode_enabled():
+                raise
 
     def rewrite_query(
         self,
@@ -413,11 +419,15 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         history_text: str | None = None,
         debug_info: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> tuple[str, dict[str, float] | None, str | None]:
+    ) -> tuple[str, dict[str, float] | None, str | None, str | None]:
         """
         Rewrite query and (optionally) return per-query retrieval ratios for MultiPath quotas.
 
-        Ratios are small non-negative numbers, e.g. {dense:1, bm25:1, graph:1.5}.
+        Returns:
+            (rewritten_query, retrieval_ratios, bm25_query, hyde_query)
+
+        HyDE generation runs in parallel with the main rewrite and is enabled
+        even in benchmark mode (controlled by RAG_HYDE_ENABLED env var).
         """
         start = time.perf_counter()
         _record_debug(
@@ -427,10 +437,13 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             input_query=str(query or ""),
             history_text=history_text,
             dynamic_quota_enabled=bool(rag_retrieval_dynamic_quota_enabled()),
+            hyde_enabled=bool(rag_hyde_enabled()),
         )
 
         if benchmark_mode_enabled():
+            # Rewrite is skipped in bench mode, but HyDE still runs.
             rewritten = str(query or "")
+            hyde_query = self.generate_hyde_query(rewritten)
             _record_debug(
                 debug_info,
                 skipped=True,
@@ -438,16 +451,25 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                 rewritten_query=rewritten,
                 retrieval_ratios=None,
                 bm25_query=None,
+                hyde_query=hyde_query,
                 duration_ms=int((time.perf_counter() - start) * 1000),
             )
-            return rewritten, None, None
+            return rewritten, None, None, hyde_query
         if not query or not query.strip():
             _record_debug(debug_info, error="Query cannot be empty")
             raise ValueError("Query cannot be empty")
 
         # Gate: allow disabling dynamic routing without changing JSON config.
         if not rag_retrieval_dynamic_quota_enabled():
-            rewritten = self.rewrite_query(query, history_text=history_text, debug_info=debug_info, **kwargs)
+            # Run rewrite + HyDE in parallel.
+            hyde_query: str | None = None
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                rewrite_future = pool.submit(
+                    self.rewrite_query, query, history_text=history_text, debug_info=debug_info, **kwargs,
+                )
+                hyde_future = pool.submit(self.generate_hyde_query, query)
+                rewritten = rewrite_future.result()
+                hyde_query = hyde_future.result()
             _record_debug(
                 debug_info,
                 mode="rewrite_query_with_routing",
@@ -455,9 +477,10 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                 rewritten_query=rewritten,
                 retrieval_ratios=None,
                 bm25_query=None,
+                hyde_query=hyde_query,
                 duration_ms=int((time.perf_counter() - start) * 1000),
             )
-            return rewritten, None, None
+            return rewritten, None, None, hyde_query
 
         query = str(query)
         # Keep existing skip rules for rewrite; when triggered, fall back to static routing ratios.
@@ -465,6 +488,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             for token in list(getattr(self.config, "skip_rewrite_if_contains") or []):
                 if token and token in query:
                     logger.info("Skipping query rewrite (routing fallback) because query contains %r", token)
+                    hyde_query = self.generate_hyde_query(query)
                     _record_debug(
                         debug_info,
                         skipped=True,
@@ -473,9 +497,10 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                         rewritten_query=query,
                         retrieval_ratios=None,
                         bm25_query=None,
+                        hyde_query=hyde_query,
                         duration_ms=int((time.perf_counter() - start) * 1000),
                     )
-                    return query, None, None
+                    return query, None, None, hyde_query
         if getattr(self.config, "skip_rewrite_regexes", None):
             for pattern in list(getattr(self.config, "skip_rewrite_regexes") or []):
                 if not pattern:
@@ -483,6 +508,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                 try:
                     if re.search(pattern, query):
                         logger.info("Skipping query rewrite (routing fallback) because query matches pattern %r", pattern)
+                        hyde_query = self.generate_hyde_query(query)
                         _record_debug(
                             debug_info,
                             skipped=True,
@@ -491,9 +517,10 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                             rewritten_query=query,
                             retrieval_ratios=None,
                             bm25_query=None,
+                            hyde_query=hyde_query,
                             duration_ms=int((time.perf_counter() - start) * 1000),
                         )
-                        return query, None, None
+                        return query, None, None, hyde_query
                 except re.error:
                     logger.warning("Invalid skip rewrite regex ignored: %r", pattern)
 
@@ -523,89 +550,130 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             llm_kwargs=kwargs,
         )
 
-        try:
-            payload, text = call_llm_json_with_retry_sync(
-                llm_connector=self.chat_llm,
-                messages=messages,
-                expected="dict",
-                llm_kwargs=kwargs,
-                return_raw=True,
-            )
-            text = str(text or "").strip()
-            if not isinstance(payload, dict):
-                # Strict contract: routing mode must return JSON.
-                # Avoid a second LLM call on failure; keep behavior deterministic.
-                logger.warning("Query rewrite routing: non-JSON response; using original query and static routing")
-                _record_debug(
-                    debug_info,
-                    raw_response=text,
-                    parsed_payload=None,
-                    fallback_used=True,
-                    fallback_reason="non_json_response",
-                    rewritten_query=query,
-                    retrieval_ratios=None,
-                    bm25_query=None,
-                    duration_ms=int((time.perf_counter() - start) * 1000),
+        # Run LLM rewrite + HyDE generation in parallel.
+        hyde_query = None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            hyde_future = pool.submit(self.generate_hyde_query, query)
+
+            try:
+                payload, text = call_llm_json_with_retry_sync(
+                    llm_connector=self.chat_llm,
+                    messages=messages,
+                    expected="dict",
+                    llm_kwargs=kwargs,
+                    return_raw=True,
                 )
-                return query, None, None
+                text = str(text or "").strip()
+                if not isinstance(payload, dict):
+                    logger.warning("Query rewrite routing: non-JSON response; using original query and static routing")
+                    hyde_query = hyde_future.result()
+                    _record_debug(
+                        debug_info,
+                        raw_response=text,
+                        parsed_payload=None,
+                        fallback_used=True,
+                        fallback_reason="non_json_response",
+                        rewritten_query=query,
+                        retrieval_ratios=None,
+                        bm25_query=None,
+                        hyde_query=hyde_query,
+                        duration_ms=int((time.perf_counter() - start) * 1000),
+                    )
+                    return query, None, None, hyde_query
 
-            rewritten = str(payload.get("rewritten_query") or "").strip().strip('"').strip("'")
-            if not rewritten:
-                rewritten = query
+                rewritten = str(payload.get("rewritten_query") or "").strip().strip('"').strip("'")
+                if not rewritten:
+                    rewritten = query
 
-            bm25_query = str(payload.get("bm25_query") or "").strip().strip('"').strip("'") or None
+                bm25_query = str(payload.get("bm25_query") or "").strip().strip('"').strip("'") or None
 
-            ratios_raw = payload.get("retrieval_ratios")
-            ratios: dict[str, float] = {}
-            if isinstance(ratios_raw, dict):
-                for key in ("dense", "bm25", "graph"):
-                    val = ratios_raw.get(key)
-                    try:
-                        f = float(val)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if f < 0:
-                        continue
-                    ratios[key] = f
+                ratios_raw = payload.get("retrieval_ratios")
+                ratios: dict[str, float] = {}
+                if isinstance(ratios_raw, dict):
+                    for key in ("dense", "bm25", "graph"):
+                        val = ratios_raw.get(key)
+                        try:
+                            f = float(val)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        if f < 0:
+                            continue
+                        ratios[key] = f
 
-            if not ratios:
+                hyde_query = hyde_future.result()
+
+                if not ratios:
+                    _record_debug(
+                        debug_info,
+                        raw_response=text,
+                        parsed_payload=payload,
+                        rewritten_query=rewritten,
+                        retrieval_ratios=None,
+                        bm25_query=bm25_query,
+                        hyde_query=hyde_query,
+                        fallback_used=False,
+                        duration_ms=int((time.perf_counter() - start) * 1000),
+                    )
+                    return rewritten, None, bm25_query, hyde_query
+
                 _record_debug(
                     debug_info,
                     raw_response=text,
                     parsed_payload=payload,
                     rewritten_query=rewritten,
-                    retrieval_ratios=None,
+                    retrieval_ratios=ratios,
                     bm25_query=bm25_query,
+                    hyde_query=hyde_query,
                     fallback_used=False,
                     duration_ms=int((time.perf_counter() - start) * 1000),
                 )
-                return rewritten, None, bm25_query
+                return rewritten, ratios, bm25_query, hyde_query
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Query rewrite with routing failed; using original query and static routing: %s", exc)
+                hyde_query = hyde_future.result()
+                _record_debug(
+                    debug_info,
+                    error=str(exc),
+                    fallback_used=True,
+                    fallback_reason="exception",
+                    rewritten_query=query,
+                    retrieval_ratios=None,
+                    bm25_query=None,
+                    hyde_query=hyde_query,
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                )
+                return query, None, None, hyde_query
 
-            _record_debug(
-                debug_info,
-                raw_response=text,
-                parsed_payload=payload,
-                rewritten_query=rewritten,
-                retrieval_ratios=ratios,
-                bm25_query=bm25_query,
-                fallback_used=False,
-                duration_ms=int((time.perf_counter() - start) * 1000),
-            )
-            return rewritten, ratios, bm25_query
+    def generate_hyde_query(self, query: str) -> str | None:
+        """Generate a hypothetical document passage for HyDE retrieval.
+
+        Uses the same chat LLM to produce a short passage that resembles
+        what a relevant document would contain. The dense retriever then
+        searches with both the original query and this passage.
+
+        Returns None when HyDE is disabled or generation fails (non-fatal).
+        """
+        if not rag_hyde_enabled():
+            return None
+        if self.chat_llm is None:
+            return None
+        query = str(query or "").strip()
+        if not query:
+            return None
+        try:
+            messages = [
+                {"role": "system", "content": HYDE_SYSTEM_PROMPT},
+                {"role": "user", "content": HYDE_USER_PROMPT.format(query=query)},
+            ]
+            raw = self.chat_llm.chat(messages=messages, temperature=0.0, max_tokens=200)
+            result = str(raw or "").strip()
+            if result:
+                logger.info("HyDE query generated (%d chars)", len(result))
+                return result
+            return None
         except Exception as exc:  # noqa: BLE001
-            # Avoid a second LLM call on errors; keep retrieval functional by falling back to the original query.
-            logger.warning("Query rewrite with routing failed; using original query and static routing: %s", exc)
-            _record_debug(
-                debug_info,
-                error=str(exc),
-                fallback_used=True,
-                fallback_reason="exception",
-                rewritten_query=query,
-                retrieval_ratios=None,
-                bm25_query=None,
-                duration_ms=int((time.perf_counter() - start) * 1000),
-            )
-            return query, None, None
+            logger.warning("HyDE generation failed (non-fatal): %s", exc)
+            return None
 
     def get_rewriter_info(self) -> Dict[str, Any]:
         """

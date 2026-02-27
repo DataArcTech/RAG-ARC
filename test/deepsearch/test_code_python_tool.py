@@ -26,7 +26,7 @@ def _tool_manager_configs(tmp_path, *, enabled_tools: Optional[Dict[str, Any]] =
         "enable_builtin_tools": True,
         "enabled_tools": dict(enabled_tools or {}),
         "remote_tools": {},
-        "artifact_dir": str(tmp_path),
+        "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}",
         "max_remote_evidences": 32,
         "max_remote_context_chars": 4096,
         "llm_connector": None,
@@ -322,7 +322,7 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
                 "max_tool_calls": 1,
                 "tool_call_concurrency": 1,
                 "tool_catalog_max_items": 6,
-                "tool_catalog_allowlist": ["explore", "code.python"],
+                "tool_catalog_allowlist": ["locate", "toc.tree", "read.pages", "web.search", "code.python"],
                 "include_llm_tools": True,
                 "max_rounds_per_checkpoint": 2,
             }

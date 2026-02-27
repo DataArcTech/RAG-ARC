@@ -1,8 +1,10 @@
 import logging
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.file_management.pageindex.utils import read_json, resolve_content_list_path
+from framework.virtual_paths import IO_PATH_PREFIX, io_key, is_io_path
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +74,92 @@ def load_page_markdown(
     *,
     md_path: Optional[str],
     output_dir: Optional[str],
+    io_manager: Any = None,
 ) -> Tuple[Optional[Dict[int, str]], Dict[str, Any]]:
     diagnostics: Dict[str, Any] = {}
-    content_path = resolve_content_list_path(md_path, output_dir)
-    if content_path is None:
-        diagnostics["content_list_path"] = None
-        diagnostics["reason"] = "content_list_not_found"
-        return None, diagnostics
 
-    diagnostics["content_list_path"] = str(content_path)
-    try:
-        loaded = read_json(Path(content_path))
-    except Exception as exc:  # noqa: BLE001
-        diagnostics["reason"] = "content_list_read_failed"
-        diagnostics["error"] = str(exc)
-        return None, diagnostics
+    def _load_content_list_from_io(io_dir: str, *, expected_basename: Optional[str]) -> Optional[list]:
+        if io_manager is None:
+            diagnostics["content_list_path"] = None
+            diagnostics["reason"] = "io_manager_unavailable"
+            return None
+        try:
+            keys = io_manager.list_keys_path(io_dir)
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["content_list_path"] = None
+            diagnostics["reason"] = "io_list_failed"
+            diagnostics["error"] = str(exc)
+            return None
+
+        def _basename(ref: str) -> str:
+            token = str(ref or "").strip()
+            return token.rsplit("/", 1)[-1] if "/" in token else token
+
+        expected = (expected_basename or "").strip()
+        expected_hit = None
+        matches: List[str] = []
+        for ref in keys:
+            base = _basename(ref)
+            if expected and base == expected:
+                expected_hit = str(ref)
+                break
+            if base.endswith(".json") and "_content_list" in base:
+                matches.append(str(ref))
+
+        candidate = expected_hit or (sorted(matches)[0] if matches else None)
+        if not candidate:
+            diagnostics["content_list_path"] = None
+            diagnostics["reason"] = "content_list_not_found"
+            return None
+
+        diagnostics["content_list_path"] = str(candidate)
+        try:
+            raw = io_manager.get_text_path(candidate)
+            if raw is None:
+                diagnostics["reason"] = "content_list_read_failed"
+                diagnostics["error"] = "empty_payload"
+                return None
+            loaded = json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["reason"] = "content_list_read_failed"
+            diagnostics["error"] = str(exc)
+            return None
+
+        if not isinstance(loaded, list):
+            diagnostics["reason"] = "content_list_invalid"
+            diagnostics["detail"] = f"expected list, got {type(loaded).__name__}"
+            return None
+        return loaded
+
+    loaded: Any = None
+    md_path_token = str(md_path or "").strip()
+    output_dir_token = str(output_dir or "").strip()
+    expected_content_list_basename = None
+    if md_path_token:
+        md_base = md_path_token.rsplit("/", 1)[-1]
+        if md_base.endswith(".md"):
+            expected_content_list_basename = md_base[:-3] + "_content_list.json"
+
+    if output_dir_token and is_io_path(output_dir_token):
+        loaded = _load_content_list_from_io(output_dir_token, expected_basename=expected_content_list_basename)
+    elif md_path_token and is_io_path(md_path_token):
+        parent_key = "/".join(io_key(md_path_token).split("/")[:-1])
+        if parent_key:
+            loaded = _load_content_list_from_io(f"{IO_PATH_PREFIX}{parent_key}", expected_basename=expected_content_list_basename)
+
+    if loaded is None:
+        content_path = resolve_content_list_path(md_path, output_dir)
+        if content_path is None:
+            diagnostics["content_list_path"] = None
+            diagnostics["reason"] = diagnostics.get("reason") or "content_list_not_found"
+            return None, diagnostics
+        diagnostics["content_list_path"] = str(content_path)
+        try:
+            loaded = read_json(Path(content_path))
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["reason"] = "content_list_read_failed"
+            diagnostics["error"] = str(exc)
+            return None, diagnostics
 
     if not isinstance(loaded, list):
         diagnostics["reason"] = "content_list_invalid"

@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 
 
 def test_infer_user_language_ignores_file_lists_and_titles():
@@ -15,7 +16,8 @@ def test_infer_user_language_ignores_file_lists_and_titles():
     assert infer_user_language(q2) == "zh"
 
 
-def test_report_writer_language_enforcement_uses_inferred_user_language():
+@patch("config.benchmark_mode.benchmark_mode_enabled", return_value=False)
+def test_report_writer_language_enforcement_uses_inferred_user_language(_mock_bench):
     from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter
 
     base = "BASE_PROMPT"

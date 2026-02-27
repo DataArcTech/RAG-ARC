@@ -17,7 +17,7 @@ from api.sse import (
 from core.deepsearch.trace import TraceEmitter, TraceEvent, set_trace_emitter, reset_trace_emitter
 from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
 from core.constants.io_namespaces import DEEPSEARCH_TRACES_NAMESPACE
-from api.routers.deepsearch_weaver_render import render_trace_payload, weaver_block
+from api.routers.deepsearch_weaver_render import render_trace_payload
 from framework.virtual_paths import IO_PATH_PREFIX, io_key
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,33 @@ def _extract_tool_call_hint(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _format_tool_call_label(payload: dict[str, Any]) -> str | None:
+    """Format a tool call as tool_name(key=val, ...) compact label for frontend display."""
+    tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
+    if not tool_name:
+        return None
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    tool_args = payload.get("tool_args") if isinstance(payload.get("tool_args"), dict) else {}
+    args = {**extra, **tool_args}
+    parts = []
+    for key in ("query", "focus_query", "question", "file_id", "pages"):
+        val = args.get(key)
+        if val is None:
+            continue
+        if isinstance(val, str):
+            display = (val[:40] + "...") if len(val) > 40 else val
+            parts.append(f'{key}="{display}"')
+        elif isinstance(val, list):
+            raw = str(val)
+            display = (raw[:40] + "...") if len(raw) > 40 else raw
+            parts.append(f"{key}={display}")
+        if len(parts) >= 2:
+            break
+    if parts:
+        return f"{tool_name}({', '.join(parts)})"
+    return tool_name
+
+
 def _first_nonempty_line(text: str | None) -> str | None:
     for line in str(text or "").splitlines():
         token = line.strip()
@@ -108,6 +135,9 @@ def _build_trace_message(trace_event: TraceEvent, rendered_content: str | None =
         if message:
             return message
     if trace_event.tag == "tool_call" and isinstance(parsed, dict):
+        label = _format_tool_call_label(parsed)
+        if label:
+            return label
         message = _extract_tool_call_hint(parsed)
         if message:
             return message
@@ -353,31 +383,49 @@ def _save_trace_events_to_file(
             ]
         }
 
-        io_manager = _require_io_manager()
         trace_root = str(os.getenv("DEEPSEARCH_TRACE_STORAGE_PATH", f"{IO_PATH_PREFIX}{DEEPSEARCH_TRACES_NAMESPACE}") or "").strip()
-        if not trace_root.startswith(IO_PATH_PREFIX):
-            raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must be an io:// virtual path")
-        root_key = io_key(trace_root)
-        if not root_key:
+        if not trace_root:
             raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must not be empty")
-        namespace, prefix = (root_key.split("/", 1) + [""])[:2]
-        namespace = namespace or DEEPSEARCH_TRACES_NAMESPACE
-        key = f"{prefix}/{file_id}/{filename}".lstrip("/") if prefix else f"{file_id}/{filename}"
 
-        put = io_manager.put_json(
-            namespace=namespace,
-            key=key,
-            payload=trace_data,
-        )
+        # Preferred: io:// storage via IOManager (works across LocalDB/MinIO).
+        if trace_root.startswith(IO_PATH_PREFIX):
+            io_manager = _require_io_manager()
+            root_key = io_key(trace_root)
+            if not root_key:
+                raise ValueError("DEEPSEARCH_TRACE_STORAGE_PATH must not be empty")
+            namespace, prefix = (root_key.split("/", 1) + [""])[:2]
+            namespace = namespace or DEEPSEARCH_TRACES_NAMESPACE
+            key = f"{prefix}/{file_id}/{filename}".lstrip("/") if prefix else f"{file_id}/{filename}"
 
+            put = io_manager.put_json(
+                namespace=namespace,
+                key=key,
+                payload=trace_data,
+            )
+
+            logger.info(
+                "Saved %d trace events to %s (request_id=%s, run_id=%s)",
+                len(trace_events),
+                put.ref,
+                request_id,
+                run_id or request_id,
+            )
+            return str(put.ref)
+
+        # Legacy: local filesystem path support for unit tests / dev scripts.
+        out_dir = Path(trace_root).expanduser().resolve() / str(file_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (out_dir / filename).resolve()
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(trace_data, handle, ensure_ascii=False, indent=2, default=str)
         logger.info(
             "Saved %d trace events to %s (request_id=%s, run_id=%s)",
             len(trace_events),
-            put.ref,
+            out_path,
             request_id,
             run_id or request_id,
         )
-        return str(put.ref)
+        return str(out_path)
     except Exception as e:
         logger.error("Failed to save trace events to file: %s", e, exc_info=True)
         return None
@@ -393,17 +441,28 @@ def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
         Dictionary containing trace data, or None if loading failed.
     """
     try:
-        from app_registration import registrator
+        token = str(trace_file_path or "").strip()
+        if not token:
+            return None
 
-        io_manager = registrator.get_object("io_manager")
-        if io_manager is None:
-            raise RuntimeError("io_manager is required for trace retrieval")
-        if not isinstance(trace_file_path, str) or not trace_file_path.strip().startswith("io://"):
-            raise ValueError("trace_file_path must be an io:// virtual path")
-        payload = io_manager.get_json(trace_file_path)
-        if payload is None:
-            logger.warning("Trace ref not found: %s", trace_file_path)
-        return payload
+        if token.startswith("io://"):
+            from app_registration import registrator
+
+            io_manager = registrator.get_object("io_manager")
+            if io_manager is None:
+                raise RuntimeError("io_manager is required for trace retrieval")
+            payload = io_manager.get_json(token)
+            if payload is None:
+                logger.warning("Trace ref not found: %s", token)
+            return payload
+
+        path = Path(token)
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
     except Exception as e:
         logger.error("Failed to load trace events from file %s: %s", trace_file_path, e, exc_info=True)
         return None
@@ -506,11 +565,12 @@ async def _yield_deepsearch_progress(
     chunk_id: str,
     model_name: str,
     created: int,
-    request_id: str
+    request_id: str,
+    index: int = 0,
 ) -> AsyncGenerator[str, None]:
     """Yield DeepSearch progress as SSE event."""
     tool_calls = [{
-        "index": 0,
+        "index": index,
         "id": f"call_deepsearch_progress_{uuid.uuid4().hex}",
         "type": "function",
         "function": {
@@ -540,40 +600,70 @@ async def _yield_trace_event(
     model_name: str,
     created: int,
     request_id: str,
-    run_id: str
+    run_id: str,
+    index: int = 0,
 ) -> AsyncGenerator[str, None]:
-    """Yield DeepSearch trace event as SSE event (weaver format)."""
+    """Yield DeepSearch trace event as SSE event (rag_arc_trace format)."""
+    # tool_response events contain raw retrieval results - not shown to user
+    if trace_event.tag == "tool_response":
+        return
+
     # 渲染 trace event
     rendered_tag, rendered_content = render_trace_payload(
         trace_tag=trace_event.tag,
         content=trace_event.content,
         run_id=run_id
     )
-    
-    # 包装成 weaver block
-    weaver_content = weaver_block(rendered_tag, rendered_content)
-    
+
     # 生成人类可读的 message（优先使用动态推理内容）
     message = _build_trace_message(trace_event, rendered_content=rendered_content) or str(rendered_tag or trace_event.tag or "trace")
-    
+
     # 作为 tool_call 发送
     tool_calls = [{
-        "index": 0,
+        "index": index,
         "id": f"call_deepsearch_trace_{uuid.uuid4().hex}",
         "type": "function",
         "function": {
             "name": "rag_arc_trace",
             "arguments": json.dumps(
                 {
-                    "tag": rendered_tag,
-                    "content": weaver_content,
                     "message": message,
+                    "content": rendered_content,
+                    "tag": rendered_tag,
                     "meta": trace_event.meta,
                 },
                 ensure_ascii=False,
                 default=str,
                 separators=(",", ":"),
             ),
+        },
+    }]
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role=None, tool_calls=tool_calls),
+        ),
+        request_id=request_id
+    )
+
+
+async def _yield_deepsearch_done_signal(
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    index: int = 0,
+) -> AsyncGenerator[str, None]:
+    """Yield rag_arc_progress done signal to trigger frontend collapse of thinking steps."""
+    tool_calls = [{
+        "index": index,
+        "id": f"call_deepsearch_done_{uuid.uuid4().hex}",
+        "type": "function",
+        "function": {
+            "name": "rag_arc_progress",
+            "arguments": json.dumps({"deepsearch_stage": "done"}, ensure_ascii=False),
         },
     }]
     yield sse_json_wrapped(
@@ -598,6 +688,7 @@ async def _handle_deepsearch_task_completion(
     chunk_id: str,
     model_name: str,
     created: int,
+    trace_call_index: list[int],
 ) -> tuple[str, AsyncGenerator[str, None]]:
     """处理 DeepSearch 任务完成后的逻辑（成功或失败）。
     
@@ -655,12 +746,15 @@ async def _handle_deepsearch_task_completion(
         }
         
         async def error_events_gen():
+            idx = trace_call_index[0]
+            trace_call_index[0] += 1
             async for event in _yield_deepsearch_progress(
                 error_progress,
                 chunk_id,
                 model_name,
                 created,
-                request_id
+                request_id,
+                index=idx,
             ):
                 yield event
         
@@ -692,6 +786,7 @@ async def _consume_remaining_events(
     created: int,
     request_id: str,
     effective_run_id: str,
+    trace_call_index: list[int],
 ) -> AsyncGenerator[str, None]:
     """消费剩余的 progress 和 trace 事件。"""
     deadline = time.time() + 1.0
@@ -704,17 +799,20 @@ async def _consume_remaining_events(
                     timeout=0.05
                 )
                 if progress_payload is not None:
+                    idx = trace_call_index[0]
+                    trace_call_index[0] += 1
                     async for event in _yield_deepsearch_progress(
                         progress_payload,
                         chunk_id,
                         model_name,
                         created,
-                        request_id
+                        request_id,
+                        index=idx,
                     ):
                         yield event
             except asyncio.TimeoutError:
                 pass
-            
+
             # 处理剩余的 trace 事件
             try:
                 trace_event = await asyncio.wait_for(
@@ -722,22 +820,25 @@ async def _consume_remaining_events(
                     timeout=0.05
                 )
                 if trace_event is not None:
+                    idx = trace_call_index[0]
+                    trace_call_index[0] += 1
                     async for event in _yield_trace_event(
                         trace_event,
                         chunk_id,
                         model_name,
                         created,
                         request_id,
-                        effective_run_id
+                        effective_run_id,
+                        index=idx,
                     ):
                         yield event
             except asyncio.TimeoutError:
                 pass
-            
+
             # 如果两个队列都为空，退出
             if deepsearch_progress_queue.empty() and trace_queue.empty():
                 break
-                
+
         except Exception as e:
             logger.error("Error consuming remaining events: %s", e, exc_info=True)
             break
@@ -752,31 +853,32 @@ async def _process_event_loop(
     model_name: str,
     created: int,
     request_id: str,
+    trace_call_index: list[int],
 ) -> AsyncGenerator[str, None]:
     """处理事件循环，等待并处理 progress 和 trace 事件。"""
     deepsearch_progress_task = None
     trace_task = None
-    
+
     while not deepsearch_task.done():
         # 处理 progress 事件
         if deepsearch_progress_task is None or deepsearch_progress_task.done():
             deepsearch_progress_task = asyncio.create_task(
                 deepsearch_progress_queue.get()
             )
-        
+
         # 处理 trace 事件
         if trace_task is None or trace_task.done():
             trace_task = asyncio.create_task(
                 trace_queue.get()
             )
-        
+
         # 等待任一任务完成
         done, pending = await asyncio.wait(
             [deepsearch_task, deepsearch_progress_task, trace_task],
             timeout=0.1,
             return_when=asyncio.FIRST_COMPLETED
         )
-        
+
         # 处理 progress 事件
         if deepsearch_progress_task in done:
             try:
@@ -786,19 +888,21 @@ async def _process_event_loop(
                     # 从 progress 中提取 run_id（如果存在）
                     if not run_id[0] and "run_id" in progress_payload:
                         run_id[0] = str(progress_payload.get("run_id", ""))
-                    
+                    idx = trace_call_index[0]
+                    trace_call_index[0] += 1
                     async for event in _yield_deepsearch_progress(
                         progress_payload,
                         chunk_id,
                         model_name,
                         created,
-                        request_id
+                        request_id,
+                        index=idx,
                     ):
                         yield event
             except Exception as e:
                 logger.error("Error processing DeepSearch progress: %s", e, exc_info=True)
                 deepsearch_progress_task = None
-        
+
         # 处理 trace 事件
         if trace_task in done:
             try:
@@ -807,19 +911,22 @@ async def _process_event_loop(
                 if trace_event is not None:
                     # 使用 request_id 作为 run_id（如果没有从 progress 中获取到）
                     effective_run_id = run_id[0] or request_id
+                    idx = trace_call_index[0]
+                    trace_call_index[0] += 1
                     async for event in _yield_trace_event(
                         trace_event,
                         chunk_id,
                         model_name,
                         created,
                         request_id,
-                        effective_run_id
+                        effective_run_id,
+                        index=idx,
                     ):
                         yield event
             except Exception as e:
                 logger.error("Error processing DeepSearch trace: %s", e, exc_info=True)
                 trace_task = None
-        
+
         # 如果 DeepSearch 任务完成，退出循环
         if deepsearch_task in done:
             if deepsearch_progress_task and not deepsearch_progress_task.done():
@@ -852,11 +959,11 @@ def _handle_deepsearch_error(
     error: Exception,
     error_type: type,
     trace_token: Any | None = None
-) -> tuple[list[dict[str, Any] | None], list[str | None], AsyncGenerator[str, None]]:
+) -> tuple[list[dict[str, Any] | None], list[str | None], AsyncGenerator[str, None], list[int]]:
     """处理 DeepSearch 初始化错误。
-    
+
     Returns:
-        Tuple of (deepsearch_result_container, trace_file_path_container, empty_generator)
+        Tuple of (deepsearch_result_container, trace_file_path_container, empty_generator, trace_call_index)
     """
     if error_type == KeyError:
         logger.warning("DeepSearch service not available: %s", error)
@@ -870,7 +977,7 @@ def _handle_deepsearch_error(
         except Exception:
             pass
     
-    return [None], [None], _create_empty_generator()
+    return [None], [None], _create_empty_generator(), [0]
 
 
 def _initialize_deepsearch_processing(
@@ -928,6 +1035,7 @@ async def _create_progress_generator(
     created: int,
     request_id: str,
     query: str,
+    trace_call_index: list[int],
 ) -> AsyncGenerator[str, None]:
     """创建 progress 事件生成器。"""
     # 处理事件循环
@@ -940,9 +1048,10 @@ async def _create_progress_generator(
         model_name,
         created,
         request_id,
+        trace_call_index,
     ):
         yield event
-    
+
     # 处理任务完成
     effective_run_id, error_events_gen = await _handle_deepsearch_task_completion(
         deepsearch_task,
@@ -955,12 +1064,13 @@ async def _create_progress_generator(
         chunk_id,
         model_name,
         created,
+        trace_call_index,
     )
-    
+
     # 发送错误事件（如果有）
     async for event in error_events_gen:
         yield event
-    
+
     # 消费剩余事件
     async for event in _consume_remaining_events(
         deepsearch_progress_queue,
@@ -970,9 +1080,10 @@ async def _create_progress_generator(
         created,
         request_id,
         effective_run_id,
+        trace_call_index,
     ):
         yield event
-    
+
     # 重置 trace emitter
     try:
         reset_trace_emitter(trace_token)
@@ -988,14 +1099,15 @@ async def process_deepsearch(
     model_name: str,
     created: int,
     loop: asyncio.AbstractEventLoop
-) -> tuple[list[dict[str, Any] | None], list[str | None], AsyncGenerator[str, None]]:
+) -> tuple[list[dict[str, Any] | None], list[str | None], AsyncGenerator[str, None], list[int]]:
     """Process DeepSearch and yield progress events.
-    
+
     Returns:
-        Tuple of (deepsearch_result_container, trace_file_path_container, progress_generator)
+        Tuple of (deepsearch_result_container, trace_file_path_container, progress_generator, trace_call_index)
         - deepsearch_result_container: list with one element that will be set to the result
         - trace_file_path_container: list with one element that will be set to the trace file path
         - progress_generator: async generator that yields SSE events
+        - trace_call_index: shared counter tracking the next available tool_call index
     """
     # 初始化队列和容器
     deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -1004,7 +1116,8 @@ async def process_deepsearch(
     deepsearch_result_container: list[dict[str, Any] | None] = [None]
     trace_file_path_container: list[str | None] = [None]
     run_id_list: list[str] = [""]
-    
+    trace_call_index: list[int] = [0]
+
     # 创建 emit_deepsearch_progress 函数
     async def emit_deepsearch_progress(payload: dict[str, Any]) -> None:
         nonlocal progress_seq
@@ -1016,7 +1129,7 @@ async def process_deepsearch(
         envelope.setdefault("request_id", request_id)
         envelope.setdefault("seq", progress_seq)
         await deepsearch_progress_queue.put(envelope)
-    
+
     # 初始化 DeepSearch 处理环境
     trace_token = None
     try:
@@ -1029,7 +1142,7 @@ async def process_deepsearch(
             trace_queue,
             emit_deepsearch_progress,
         )
-        
+
         # 创建并返回 progress generator
         progress_gen = _create_progress_generator(
             deepsearch_task,
@@ -1045,9 +1158,10 @@ async def process_deepsearch(
             created,
             request_id,
             query,
+            trace_call_index,
         )
-        
-        return deepsearch_result_container, trace_file_path_container, progress_gen
+
+        return deepsearch_result_container, trace_file_path_container, progress_gen, trace_call_index
         
     except KeyError as e:
         return _handle_deepsearch_error(e, KeyError, trace_token)

@@ -99,7 +99,8 @@ class FaissIndexer(BaseIndexer):
 
                 # Load if artifacts exist but db is not loaded yet.
                 try:
-                    if getattr(db, "index", None) is None and os.path.isdir(index_dir):
+                    # index_dir may be an `io://...` virtual path; FaissVectorDB.load_index resolves it via IOManager.
+                    if getattr(db, "index", None) is None:
                         db.load_index(index_dir)
                 except Exception:
                     pass
@@ -168,7 +169,8 @@ class FaissIndexer(BaseIndexer):
 
             # Load existing artifacts if present and index not loaded.
             try:
-                if getattr(db, "index", None) is None and os.path.isdir(index_dir):
+                # index_dir may be an `io://...` virtual path; FaissVectorDB.load_index resolves it via IOManager.
+                if getattr(db, "index", None) is None:
                     db.load_index(index_dir)
             except Exception:
                 pass

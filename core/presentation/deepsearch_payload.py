@@ -86,6 +86,7 @@ def trim_deepsearch_payload(
         "question": question,
         "tool_runs": _summarize_tool_runs(result.get("reasoning")),
         "overview": _build_overview(trimmed_plan, trimmed_reasoning, trimmed_report),
+        "execution_timeline": _build_execution_timeline(source.get("reasoning")),
     }
     request_metadata = trimmed_state.get("request_metadata") if isinstance(trimmed_state, dict) else None
     if request_metadata:
@@ -320,13 +321,6 @@ def _summarize_tool_runs(reasoning_block: Optional[Dict[str, Any]]) -> List[Dict
 __all__ = ["trim_deepsearch_payload"]
 
 
-def _slim_evidence_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "chunks": payload.get("chunks") or [],
-        "seed_entities": payload.get("seed_entities") or [],
-    }
-
-
 def _build_light_evidence_payload(payload: Dict[str, Any], chunk_limit: Optional[int]) -> Dict[str, Any]:
     """Build minimal evidence payload without exporting subgraphs.
 
@@ -369,6 +363,82 @@ def _build_light_evidence_payload(payload: Dict[str, Any], chunk_limit: Optional
                 return {"chunks": chunks, "seed_entities": seed_entities}
 
     return {"chunks": chunks, "seed_entities": seed_entities}
+
+
+def _build_execution_timeline(reasoning_block: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flat chronological timeline of agent steps for frontend rendering.
+
+    Each entry represents one reasoning step (think checkpoint or tool call).
+    Think-note reasoning and tool arguments are attached so the frontend can
+    show: model thinking → tool decision (with args) → tool result → next thinking.
+    """
+    if not isinstance(reasoning_block, dict):
+        return []
+
+    # Index think_notes by plan_step_id for O(1) lookup.
+    notes_by_step: Dict[str, List[Dict[str, Any]]] = {}
+    for note in (reasoning_block.get("think_notes") or []):
+        if isinstance(note, dict) and note.get("plan_step_id"):
+            notes_by_step.setdefault(note["plan_step_id"], []).append(note)
+
+    timeline: List[Dict[str, Any]] = []
+    for step in _head(reasoning_block.get("reasoning_steps") or [], DEEPSEARCH_MAX_REASONING_STEPS):
+        if not isinstance(step, dict):
+            continue
+        diag = step.get("diagnostics") or {}
+        step_id = step.get("step_id") or ""
+
+        # Tool invocations with slimmed arguments.
+        invocations = []
+        for log in (step.get("tool_logs") or []):
+            if not isinstance(log, dict):
+                continue
+            inv: Dict[str, Any] = {"tool": log.get("tool_name"), "latency_ms": log.get("latency_ms")}
+            args = log.get("arguments_snapshot")
+            if isinstance(args, dict):
+                inv["arguments"] = _slim_tool_args(args)
+            invocations.append(inv)
+
+        tool = diag.get("tool") or (invocations[0]["tool"] if invocations else None)
+        event: Dict[str, Any] = {
+            "step_id": step_id,
+            "tool": tool,
+            "latency_ms": diag.get("latency_ms"),
+            "status": step.get("status"),
+            "evidence_produced": len(step.get("produced_evidence_ids") or []),
+            "summary": step.get("output_summary"),
+        }
+
+        # Attach model's reasoning from matching think_notes.
+        # think_loop_01 → notes with plan_step_id="think_loop_01"
+        # think_loop_01_call_01 → also check parent "think_loop_01"
+        matched = notes_by_step.get(step_id)
+        if not matched and "_call_" in step_id:
+            parent_id = step_id.rsplit("_call_", 1)[0]
+            matched = notes_by_step.get(parent_id)
+        if matched:
+            event["reasoning"] = matched[0].get("reasoning")
+            actions = matched[0].get("next_actions")
+            if actions:
+                event["next_actions"] = actions
+
+        if invocations:
+            event["invocations"] = invocations
+        timeline.append(event)
+    return timeline
+
+
+def _slim_tool_args(args: Dict[str, Any], max_str_len: int = 200) -> Dict[str, Any]:
+    """Keep identifiers and short values from tool arguments, truncate large strings."""
+    slimmed: Dict[str, Any] = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            slimmed[k] = v[:max_str_len] + "…" if len(v) > max_str_len else v
+        elif isinstance(v, (int, float, bool)) or v is None:
+            slimmed[k] = v
+        elif isinstance(v, list) and len(v) <= 10:
+            slimmed[k] = v
+    return slimmed
 
 
 def _build_overview(plan_block: Dict[str, Any], reasoning_block: Dict[str, Any], report_block: Dict[str, Any]) -> Dict[str, Any]:

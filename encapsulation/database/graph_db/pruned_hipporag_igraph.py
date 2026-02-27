@@ -31,7 +31,7 @@ from encapsulation.database.utils.sqlite_threadlocal import ThreadLocalSQLiteCon
 from core.utils.path_guard import ensure_writable_dir
 from core.utils.rwlock import RWLock
 from framework.shared_module_decorator import shared_module
-from framework.virtual_paths import is_io_path, resolve_io_to_local_path
+from framework.virtual_paths import is_io_path
 
 if TYPE_CHECKING:
     from config.encapsulation.database.graph_db.pruned_hipporag_igraph_config import PrunedHippoRAGIGraphConfig
@@ -112,11 +112,7 @@ class PrunedHippoRAGIGraphStore(
 
         # Storage configuration (resolve virtual io:// into a local directory early).
         storage_path = getattr(config, "storage_path", "io://graph_index")
-        if is_io_path(storage_path):
-            storage_path = str(resolve_io_to_local_path(storage_path))
         fallback_root = os.getenv("RAGARC_RUNTIME_DIR", "io://runtime")
-        if is_io_path(fallback_root):
-            fallback_root = str(resolve_io_to_local_path(fallback_root))
         fallback_storage = os.path.join(str(fallback_root), "graph_index")
         resolved_storage = ensure_writable_dir(str(storage_path), fallback_storage)
         self.storage_path = resolved_storage

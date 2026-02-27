@@ -52,6 +52,7 @@ class CachedInitialThink:
     raw: dict[str, Any]
     plan_items: list[dict[str, Any]]
     think_notes_payloads: list[dict[str, Any]]
+    query_spec: dict[str, Any] | None = None
 
 
 class DeepSearchInitialThinkCache:

@@ -1,12 +1,13 @@
+import asyncio
 import json
 import os
 import sys
 import uuid
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
@@ -32,12 +33,15 @@ def app():
 
 
 @pytest.fixture
-def client(app):
-    return TestClient(app)
+async def client(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
-def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_links(monkeypatch, client):
+async def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_links(monkeypatch, client, app):
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_modules.stream_chat.response.response_finalizer as response_finalizer
 
     session_id = uuid.uuid4()
     user = SimpleNamespace(id=uuid.uuid4(), type=0)
@@ -45,6 +49,9 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
     class FakeSessionHandler:
         def get_session(self, _session_id):
             return SimpleNamespace(id=_session_id, user_id=user.id)
+
+        def update_session(self, *_args, **_kwargs):  # noqa: ANN001
+            return None
 
     class FakeMessageHandler:
         def __init__(self):
@@ -58,6 +65,9 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
 
         def list_messages_by_session(self, _session_id):
             return list(self._messages)
+
+        def update_message(self, *_args, **_kwargs):  # noqa: ANN001
+            return None
 
     class FakeRAG:
         llm = None
@@ -100,7 +110,7 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
             return
             yield
 
-        return [deepsearch_result], [None], _empty_gen()
+        return [deepsearch_result], [None], _empty_gen(), [0]
 
     # DeepSearch streaming uses the handler under stream_chat.deepsearch.
     monkeypatch.setattr(
@@ -118,21 +128,55 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
         _fake_process_deepsearch,
     )
 
-    client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
-    try:
-        resp = client.post(
-            f"/rag_inference/stream_chat/{session_id}",
-            json={"query": "q", "enable_deepsearch": True},
-        )
-    finally:
-        client.app.dependency_overrides.pop(rag_router.get_current_user, None)
+    async def _stub_user():  # noqa: ANN001
+        return user
 
-    assert resp.status_code == 200
+    async def _stub_generate_and_update_title(*_args, **_kwargs):  # noqa: ANN001
+        return None
+
+    async def _stub_get_or_create_final_assistant_message(**_kwargs):  # noqa: ANN001
+        assistant_response = str(_kwargs.get("assistant_response") or "")
+        msg = SimpleNamespace(
+            id=uuid.uuid4(),
+            session_id=session_id,
+            content={"role": "assistant", "content": assistant_response},
+            created_at=None,
+            subgraph_data=None,
+            sources=[],
+            source_file_ids=[],
+        )
+        return msg, True
+
+    monkeypatch.setattr(response_finalizer, "generate_and_update_title", _stub_generate_and_update_title, raising=True)
+    monkeypatch.setattr(
+        response_finalizer,
+        "_get_or_create_final_assistant_message",
+        _stub_get_or_create_final_assistant_message,
+        raising=True,
+    )
+
+    app.dependency_overrides[rag_router.get_current_user] = _stub_user
+    try:
+        raw_lines: list[str] = []
+        async with client.stream(
+            "POST",
+            f"/rag_inference/stream_chat/{session_id}",
+            json={"query": "q", "enable_deepsearch": True, "return_subgraph": False},
+        ) as stream:
+            assert stream.status_code == 200
+            async with asyncio.timeout(8.0):
+                async for line in stream.aiter_lines():
+                    raw_lines.append(line)
+                    if line.startswith("data:") and line.split(":", 1)[1].strip() == "[DONE]":
+                        break
+    finally:
+        app.dependency_overrides.pop(rag_router.get_current_user, None)
+    text = "\n".join(raw_lines)
 
     payload_args = None
     sources_event = None
     content_parts: list[str] = []
-    for raw_line in resp.text.splitlines():
+    for raw_line in raw_lines:
         line = raw_line.strip("\r")
         if not line.startswith("data:"):
             continue

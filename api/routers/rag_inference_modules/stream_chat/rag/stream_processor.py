@@ -39,54 +39,19 @@ def _run_stream_processing(
             user_type = 0
         
         rag_inference_handler = get_rag_inference_handler()
-        
-        try:
-            token_stream, chunks, subgraph_data, subgraph_info = (
-                rag_inference_handler.stream_chat(
-                    enhanced_query,
-                    effective_owner,
-                    return_subgraph=(return_subgraph or include_evidence),
-                    progress_callback=emit_progress,
-                    history_text=history_text if history_text else None,
-                    enable_web_search=enable_web_search,
-                    session_id=session_id,
-                    user_type=user_type,
-                )
+
+        token_stream, chunks, subgraph_data, subgraph_info = (
+            rag_inference_handler.stream_chat(
+                enhanced_query,
+                effective_owner,
+                return_subgraph=(return_subgraph or include_evidence),
+                progress_callback=emit_progress,
+                history_text=history_text if history_text else None,
+                enable_web_search=enable_web_search,
+                session_id=session_id,
+                user_type=user_type,
             )
-        except TypeError:
-            try:
-                token_stream, chunks, subgraph_data, subgraph_info = (
-                    rag_inference_handler.stream_chat(
-                        enhanced_query,
-                        effective_owner,
-                        return_subgraph=(return_subgraph or include_evidence),
-                        progress_callback=emit_progress,
-                        history_text=history_text if history_text else None,
-                        enable_web_search=enable_web_search,
-                        session_id=session_id,
-                    )
-                )
-            except TypeError:
-                try:
-                    token_stream, chunks, subgraph_data, subgraph_info = (
-                        rag_inference_handler.stream_chat(
-                            enhanced_query,
-                            effective_owner,
-                            return_subgraph=(return_subgraph or include_evidence),
-                            progress_callback=emit_progress,
-                            history_text=history_text if history_text else None,
-                            session_id=session_id,
-                            user_type=user_type,
-                        )
-                    )
-                except TypeError:
-                    token_stream, chunks, subgraph_data, subgraph_info = (
-                        rag_inference_handler.stream_chat(
-                            enhanced_query,
-                            effective_owner,
-                            return_subgraph=(return_subgraph or include_evidence),
-                        )
-                    )
+        )
         
         prepared["chunks"] = chunks
         prepared["subgraph_data"] = subgraph_data

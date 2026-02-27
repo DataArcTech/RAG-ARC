@@ -185,32 +185,6 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
         ratio = (hits / evidence_count) if evidence_count else 0.0
         term_stats[term] = {"hits": hits, "ratio": round(ratio, 3)}
 
-    # Guardrail: if the question includes at least one high-specificity anchor (numbers / roman numerals / parentheses)
-    # and we cannot find it in the evidence pool at all, do NOT fall back to unrelated evidences.
-    def _looks_like_anchor(term: str) -> bool:
-        if re.search(r"\d", term):
-            return True
-        # Roman numerals as standalone markers (avoid matching common letters inside words).
-        if re.search(r"(?:^|[^A-Za-z])[IVX]{1,6}(?:$|[^A-Za-z])", term):
-            return True
-        # Parentheses alone are often prompt scaffolding (e.g. "(with evidence)") and should not
-        # hard-filter cross-language evidence pools. Keep parentheses as anchors only when paired
-        # with other high-specificity signals (digits / roman numerals already handled above).
-        return False
-
-    anchor_terms = [t for t in terms if _looks_like_anchor(t)]
-    if anchor_terms:
-        if all(int(term_stats.get(t, {}).get("hits") or 0) <= 0 for t in anchor_terms):
-            return graph_items, {
-                "scope_terms_applied": True,
-                "hard_filter": True,
-                "anchor_miss": True,
-                "anchor_terms": anchor_terms,
-                "scope_terms": terms,
-                "term_stats": term_stats,
-                "graph_evidence_kept": len(graph_items),
-            }
-
     dropped_missing = [t for t in terms if int(term_stats.get(t, {}).get("hits") or 0) <= 0]
     dropped_common = [t for t in terms if t not in dropped_missing and float(term_stats.get(t, {}).get("ratio") or 0.0) > max_common_ratio]
     candidates = [t for t in terms if t not in dropped_missing and t not in dropped_common]

@@ -18,7 +18,7 @@ def _tool_manager_configs(
         "enable_builtin_tools": bool(enable_builtin_tools),
         "enabled_tools": dict(enabled_tools or {}),
         "remote_tools": dict(remote_tools or {}),
-        "artifact_dir": str(tmp_path),
+        "artifact_dir": f"io://deepsearch_artifacts/{tmp_path.name}",
         "max_remote_evidences": 32,
         "max_remote_context_chars": 4096,
         "llm_connector": llm_connector,

@@ -25,7 +25,6 @@ ENV_DEFAULTS: dict[str, str] = {
     "PARSER_OUTPUT_DIR": "io://parsed_files",
     # DeepSearch local artifacts (mapped via IOManager).
     "DEEPSEARCH_PLAN_OUTPUT_DIR": "io://deepsearch_runs",
-    "DEEPSEARCH_TOOL_ARTIFACT_DIR": "io://deepsearch_artifacts",
     # Runtime/log dirs (mapped via IOManager).
     "RAGARC_RUNTIME_DIR": "io://runtime",
     "RAGARC_LOG_DIR": "io://logs",
@@ -42,7 +41,10 @@ ENV_DEFAULTS: dict[str, str] = {
     # This does not disable graph indexing/ingestion. DeepSearch still uses graph signals in its own pipeline.
     "RAG_RETRIEVAL_WEIGHT_GRAPH": "0.0",
     # Intent router (semantic intent classification)
-    "INTENT_OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
+    # INTENT_EMBEDDING_PROVIDER: "api" (default, reuses RAG embedding credentials) or "local" (requires model download).
+    "INTENT_EMBEDDING_PROVIDER": "api",
+    # Note: INTENT_OPENAI_EMBEDDING_MODEL is intentionally not in ENV_DEFAULTS.
+    # When provider=api and this env var is empty, load_intent_router_config falls back to OPENAI_EMBEDDING_MODEL.
     "INTENT_QWEN_EMBEDDING_MODEL_NAME": "Qwen/Qwen3-Embedding-0.6B",
     "INTENT_EMBEDDING_DEVICE": "cpu",
     # Local intent embedding cache (aligns with default local model layout under ./models).
@@ -104,6 +106,7 @@ SILENT_MISSING_ENV_VARS: set[str] = {
     "OPENAI_OCR_MODEL",
     # Intent router optional overrides (TOML can provide defaults).
     "INTENT_ROUTER_CONFIG_PATH",
+    "INTENT_EMBEDDING_PROVIDER",
     "INTENT_EMBEDDING_API_KEY",
     "INTENT_EMBEDDING_API_BASE_URL",
     "INTENT_OPENAI_EMBEDDING_MODEL",
