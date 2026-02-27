@@ -790,6 +790,9 @@ class DeepSearchLLMReportWriter:
                     evidence_pack=evidence_pack,
                     coverage_json=_dump_json(coverage),
                 )
+            verification_feedback = str(context.get("verification_feedback") or "").strip()
+            if verification_feedback:
+                user_prompt += f"\n\n{verification_feedback}\n"
             messages = [
                 {
                     "role": "system",
@@ -852,6 +855,7 @@ class DeepSearchLLMReportWriter:
                 payload["text"] = text_out
             if source_key_map:
                 payload["source_key_map"] = source_key_map
+            payload["_evidence_pack"] = evidence_pack
             return payload
 
         raise RuntimeError(f"Report writing exceeded context budget: {last_exc}") from last_exc
@@ -965,10 +969,12 @@ class DeepSearchLLMReportWriter:
         title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
         title = question[:title_limit] + ("..." if len(question) > title_limit else "")
         text = self._render_sections_markdown(title=title, sections=sections)
+        full_evidence_pack = bank.evidence_pack_for_prompt(bank.ids(), source_key_map=source_key_map)
         return {
             "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
+            "_evidence_pack": full_evidence_pack,
         }
 
     async def write_report_sectionwise(
@@ -1072,10 +1078,14 @@ class DeepSearchLLMReportWriter:
         title = question[:title_limit] + ("..." if len(question) > title_limit else "")
         text = self._render_sections_markdown(title=title, sections=sections)
 
+        full_evidence_pack = bank.evidence_pack_for_prompt(
+            list(dict.fromkeys(used_ids_union)), source_key_map=source_key_map,
+        )
         return {
             "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
+            "_evidence_pack": full_evidence_pack,
         }
 
     async def _write_single_section(

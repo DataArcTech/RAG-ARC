@@ -35,6 +35,11 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "  **HyDE tip**: write focus_query as a hypothetical sentence the document might contain, e.g.\n"
     '  focus_query="The total revenue for fiscal year 2023 was" instead of just "total revenue FY2023".\n'
     "  Do NOT invent specific numbers — keep it value-free.\n"
+    "  **Decomposition tip**: if the answer likely requires combining multiple facts,\n"
+    "  search for the original query AND its components in parallel in Round 1.\n"
+    "  e.g. \"ROCE\" → locate(\"ROCE\") + locate(\"operating income\") + locate(\"capital employed\");\n"
+    "  \"total long-term liabilities\" → locate(\"long-term liabilities\") + locate(\"long-term debt\") + locate(\"lease liabilities\").\n"
+    "  This avoids wasting rounds searching for a term the document may never mention literally.\n"
     "- toc.tree: show document Table of Contents (sections + page ranges).\n"
     '  {"file_id":"<UUID or filename>"}\n'
     "  Results are CACHED per file_id — call once per file, then reuse the returned structure.\n"
@@ -56,6 +61,10 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     '  {"tool_name":"code.python","tool_args":{"code":"net_income = 1542\\ntotal_equity = 3152\\nresult = round(net_income / total_equity, 3)"}}\n'
     "Rules:\n"
     "- Use ONLY real numeric values you extracted from read.pages — never guess or use placeholders.\n"
+    "- Every variable MUST include a comment citing its source page and row/label, e.g.:\n"
+    "    equity_2023 = 2795  # page 41, row 'Total Best Buy shareholders equity'\n"
+    "    d_and_a = 1781  # page 39, 'Depreciation and amortization'\n"
+    "  This ensures you double-check each value against the evidence before computing.\n"
     "- Call code.python AFTER you have read all required values. Do NOT delay — once you have\n"
     "  the numbers, compute immediately in the SAME round or the NEXT round.\n"
     "- After code.python returns a result, set is_final=true in the following round.\n"

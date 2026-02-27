@@ -12,6 +12,7 @@ from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
+from core.deepsearch.report.verifier import verify_report
 from core.deepsearch.trace import emit_trace
 from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
@@ -79,6 +80,7 @@ class DeepSearchReporter:
         self.sectionwise_writer = bool(self.config["sectionwise_writer"])
         self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
         self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
+        self.enable_report_verifier = bool(self.config.get("enable_report_verifier", True))
         self.provenance_chunk_attach_max = int(
             self.config.get("provenance_chunk_attach_max", composer_defaults.DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX)
         )
@@ -359,6 +361,44 @@ class DeepSearchReporter:
         except RuntimeError as exc:
             # Normalize internal LLM-budget failures into a stable public exception type for callers/tests.
             raise ValueError(str(exc)) from exc
+
+        # ── Report Verifier ───────────────────────────────────────────────
+        # Run a separate LLM call to verify factual claims against evidence.
+        # If verification fails, rewrite the report once with feedback injected.
+        evidence_pack_for_verify = ""
+        if isinstance(structured_llm, dict):
+            evidence_pack_for_verify = structured_llm.pop("_evidence_pack", "") or ""
+        if self.enable_report_verifier and evidence_pack_for_verify:
+            report_text_for_verify = structured_llm.get("text", "") if isinstance(structured_llm, dict) else ""
+            if report_text_for_verify.strip():
+                verification = await verify_report(
+                    llm_connector=self.llm_connector,
+                    question=question,
+                    report_text=report_text_for_verify,
+                    evidence_pack=evidence_pack_for_verify,
+                    temperature=0.0,
+                )
+                metadata["report_verification"] = {
+                    "passed": verification.passed,
+                    "issues": verification.issues,
+                    "thinking": verification.thinking[:500] if verification.thinking else "",
+                }
+                if not verification.passed:
+                    # Inject feedback and rewrite once.
+                    feedback = verification.feedback_text()
+                    rewrite_context = dict(context)
+                    rewrite_context["verification_feedback"] = feedback
+                    try:
+                        structured_llm = await writer.write_report(
+                            question=question, outline=outline, context=rewrite_context,
+                        )
+                        if isinstance(structured_llm, dict):
+                            structured_llm.pop("_evidence_pack", None)
+                        metadata["report_verification"]["rewritten"] = True
+                    except Exception:  # noqa: BLE001
+                        # If rewrite fails, keep the original report.
+                        metadata["report_verification"]["rewritten"] = False
+
         if isinstance(structured_llm, dict) and structured_llm.get("writer_fallback"):
             metadata["writer_fallback"] = structured_llm.get("writer_fallback")
         if alias_bundle:

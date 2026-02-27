@@ -120,11 +120,19 @@ class RunToolMemoizer:
         tool_args: dict[str, Any] | None,
         file_scope_hint: dict[str, Any] | None,
     ) -> str:
+        args = tool_args or {}
+        # When tool_args already contains an explicit file_id, the file_scope_hint
+        # is redundant for cache identity.  Dropping it prevents cache misses caused
+        # by the hint accumulating state across think-loop rounds while the actual
+        # tool arguments remain identical.
+        effective_hint = file_scope_hint or {}
+        if str(args.get("file_id") or "").strip():
+            effective_hint = {}
         payload = {
             "tool": str(tool_name or "").strip(),
             "owner": str(owner_scope_id or "").strip(),
-            "tool_args": tool_args or {},
-            "file_scope_hint": file_scope_hint or {},
+            "tool_args": args,
+            "file_scope_hint": effective_hint,
         }
         # Hash to keep keys short and stable even when args are large.
         return _sha(_stable_json(payload))

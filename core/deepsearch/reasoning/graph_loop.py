@@ -42,6 +42,39 @@ from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
 logger = logging.getLogger(__name__)
 
 
+def _extract_read_pages_summary(tool_runs: Sequence[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """Build a compact {file_id: [pages]} map from all completed read.pages calls.
+
+    Injected into the think prompt so the model knows which pages are already
+    in context and avoids re-reading them.
+    """
+    file_pages: Dict[str, set[int]] = {}
+    for run in tool_runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("tool_name") != "read.pages":
+            continue
+        result = run.get("result")
+        if not isinstance(result, dict):
+            continue
+        diag = result.get("diagnostics")
+        if not isinstance(diag, dict):
+            continue
+        # diagnostics.pages is {page_str: {...}} from the read.pages tool
+        pages_info = diag.get("pages")
+        if isinstance(pages_info, dict):
+            file_id = str(diag.get("file_id") or "").strip()
+            if not file_id:
+                # Fallback: try to get file_id from the tool result envelope
+                file_id = str(result.get("file_id") or "").strip()
+            for page_str in pages_info:
+                try:
+                    file_pages.setdefault(file_id, set()).add(int(page_str))
+                except (ValueError, TypeError):
+                    continue
+    return {fid: sorted(pages) for fid, pages in file_pages.items() if pages}
+
+
 class GraphReasoningLoop(GraphLoopRuntimeMixin):
     """Run think-driven tool loops without plan-step traversal."""
 
@@ -173,6 +206,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                     tool_runs,
                     max_items=int(self._think_config.get("recent_tool_runs_max") or 0),
                 )
+                already_read_pages = _extract_read_pages_summary(tool_runs)
                 next_count = _RUN_THINK_COUNT.get() + 1
                 _RUN_THINK_COUNT.set(next_count)
                 think_step_id = f"think_loop_{next_count:02d}"
@@ -195,6 +229,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                         "available_tools": tool_catalog,
                         "previous_tool_call_results": previous_tool_call_results,
                         "recent_tool_runs": recent_tool_runs,
+                        "already_read_pages": already_read_pages,
                         "current_plan": list(plan_state.items),
                         "think_mode": "normal",
                     },

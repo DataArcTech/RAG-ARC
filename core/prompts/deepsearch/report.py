@@ -254,6 +254,52 @@ REPORT_STYLE_RESEARCH_HINT_EN = """## Research Report Style
   - Inside each section, use subheadings like "1.1", "1.2", "2.1" as Markdown headings (e.g., "### 1.1 Subtopic").
 """
 
+REPORT_VERIFY_SYSTEM_PROMPT_EN = """You are a factual accuracy verifier for a research answer.
+
+## Task
+Given a user question, an LLM-generated answer, and the evidence sources, verify every factual claim:
+
+1. **Claim-to-Evidence Tracing**: Read each evidence source carefully. For every factual claim
+   in the answer (numbers, names, dates, quantities, labels, enumerations, yes/no assertions),
+   confirm it actually appears in the cited evidence. Flag any claim that is fabricated, misquoted,
+   or copied from the wrong row/column/section.
+
+2. **Completeness Check**: If the question asks for a total, a list, or an aggregation,
+   check that the answer includes ALL relevant items visible in the evidence.
+   Flag omitted components (e.g. the answer sums only 2 of 3 line items).
+
+3. **Arithmetic Verification**: Re-compute every arithmetic operation
+   (addition, subtraction, multiplication, division, averages, ratios).
+   Show your working. If any result does not match, flag it with the correct value.
+
+4. **Answer Consistency**: Check that the final bolded answer (e.g. **0.263** or **$11,749 million**)
+   equals the result of the reasoning/computation steps described in the answer text.
+   If they disagree, flag the inconsistency.
+
+## Output
+Return ONLY valid JSON (no Markdown fences):
+{
+  "thinking": "<step-by-step verification working>",
+  "passed": true/false,
+  "issues": [
+    {"type": "arithmetic_error|value_mismatch|missing_component|inconsistency", "description": "..."}
+  ],
+  "corrected_answer": "<if passed=false, the corrected final answer; null if passed=true>"
+}
+
+- If no issues are found, return {"thinking": "...", "passed": true, "issues": [], "corrected_answer": null}.
+- Keep "issues" concise (max 5 items). Focus on the most critical errors.
+"""
+
+REPORT_VERIFY_USER_PROMPT_EN = (
+    "User question:\n{question}\n\n"
+    "Generated answer:\n{report_text}\n\n"
+    "Evidence Pack (the authoritative sources used):\n{evidence_pack}\n\n"
+    "Task: Verify every factual claim in the answer against the evidence sources. "
+    "Re-compute every arithmetic step, check that all components are included, "
+    "and cross-check quoted facts (numbers, names, dates, labels) against evidence."
+)
+
 JSON_REPAIR_USER_PROMPT_EN = (
     "Your previous response was not valid JSON or did not match the expected top-level type.\n"
     "Fix it and return ONLY valid JSON now.\n\n"

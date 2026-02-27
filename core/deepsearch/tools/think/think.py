@@ -309,6 +309,7 @@ class ThinkTool(GraphTool):
         available_tools = extra.get("available_tools")
         previous_tool_call_results = extra.get("previous_tool_call_results")
         recent_tool_runs = extra.get("recent_tool_runs")
+        already_read_pages = extra.get("already_read_pages") or {}
         current_plan = _compact_current_plan(
             extra.get("current_plan"),
             max_items=int(getattr(tool_defaults, "THINK_CURRENT_PLAN_MAX_ITEMS", 0) or 0),
@@ -330,6 +331,7 @@ class ThinkTool(GraphTool):
             "available_tools": available_tools,
             "previous_tool_call_results": previous_tool_call_results,
             "recent_tool_runs": recent_tool_runs,
+            "already_read_pages": already_read_pages if already_read_pages else None,
             "current_plan": current_plan,
         }
         if self.include_extra_in_prompt:
