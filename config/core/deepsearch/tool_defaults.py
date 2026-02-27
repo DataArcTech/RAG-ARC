@@ -299,6 +299,10 @@ READ_PAGES_SIGNALS_MEDIAN_MULTIPLIER = 1.8
 
 # List-heavy pages are likely to span multiple pages.
 READ_PAGES_SIGNALS_LIST_MIN_CHUNKS = 6
+
+# Soft advisory: when LLM requests more than this many pages, append a warning to the result.
+# NOT a hard error — all pages are still returned.
+READ_PAGES_SOFT_CAP_ADVISORY = 3
 TOC_TREE_MAX_NODES = 220
 
 # NOTE: `read.pages` returns full pages without truncation. Page selection (which pages to read)

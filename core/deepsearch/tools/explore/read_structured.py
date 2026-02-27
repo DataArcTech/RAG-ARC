@@ -376,6 +376,11 @@ class ReadPagesTool(GraphTool):
         if page_end < page_start:
             page_start, page_end = page_end, page_start
 
+        # Soft cap advisory: track whether LLM requested more pages than recommended.
+        pages_requested = int(page_end) - int(page_start) + 1
+        soft_cap = int(getattr(tool_defaults, "READ_PAGES_SOFT_CAP_ADVISORY", 3) or 3)
+        soft_cap_exceeded = pages_requested > soft_cap
+
         # PageIndex uses 0-based page indices; page 0 is valid.
 
         def _row_overlaps_page(row: _ChunkRow, page: int) -> bool:
@@ -631,10 +636,17 @@ class ReadPagesTool(GraphTool):
                     )
                     reason_text = ",".join(sorted(used_reasons)) if used_reasons else "unknown"
                     summary = summary.rstrip() + f" TIP: continuity hint (direction={direction}; {reason_text}); consider expanding to p{lo}-p{hi}."
+        if soft_cap_exceeded:
+            summary = summary.rstrip() + (
+                f" NOTE: You requested {pages_requested} pages (recommended: ≤{soft_cap})."
+                " Prefer targeted 1-3 page reads based on locate/toc.tree results."
+            )
         diagnostics = {
             **fetch_diag,
             "page_start": page_start,
             "page_end": page_end,
+            "pages_requested": pages_requested,
+            "soft_cap_exceeded": soft_cap_exceeded,
             "pages_returned": len(evidences),
             "pages": page_diag,
             "suggested_next_steps": suggested_expansions,

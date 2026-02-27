@@ -590,14 +590,17 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             )
             diagnostics["sections"] = sec_diag
 
-        # Build page->section lookup once.
+        # Build page->section lookup once (title + page range for section_context).
         page_to_sections: Dict[int, List[str]] = {}
+        page_to_section_context: Dict[int, List[Dict[str, Any]]] = {}
         for sec in sections:
             if sec.page_start is None:
                 continue
             p_end = sec.page_end if sec.page_end is not None else sec.page_start
+            entry = {"title": sec.title or sec.path, "page_start": sec.page_start, "page_end": p_end}
             for p in range(sec.page_start, p_end + 1):
                 page_to_sections.setdefault(p, []).append(sec.title or sec.path)
+                page_to_section_context.setdefault(p, []).append(entry)
 
         async def _run_faiss_seeded() -> _ChannelResult:
             """Run FAISS for the query."""
@@ -805,21 +808,13 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             preview_rows.append({
                 "page": page, "score": round(score, 6),
                 "sections": page_to_sections.get(page, []),
+                "section_context": page_to_section_context.get(page, []),
                 "snippets": shown,
             })
 
-        # Suggested reads: merge top pages into contiguous ranges.
-        top_pages_sorted = sorted(p for p, _ in results_out[:5])
-        suggested_reads: List[str] = []
-        if top_pages_sorted:
-            ranges: List[List[int]] = [[top_pages_sorted[0]]]
-            for p in top_pages_sorted[1:]:
-                if p <= ranges[-1][-1] + 2:
-                    ranges[-1].append(p)
-                else:
-                    ranges.append([p])
-            for r in ranges[:3]:
-                suggested_reads.append(f"p{min(r)}-p{max(r)}")
+        # Suggested reads: top pages as a flat list of page numbers,
+        # ready for read.pages(pages=[...]). Agent should pick top 1-3.
+        suggested_reads: List[int] = sorted(p for p, _ in results_out[:5])
 
         answer = [{"page": p, "score": round(s, 6)} for p, s in results_out]
         summary = build_llm_envelope(
