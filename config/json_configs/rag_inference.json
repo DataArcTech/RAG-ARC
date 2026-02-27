@@ -88,14 +88,14 @@
             }
         ],
         "fusion_method": "rrf",
-        "rrf_k": 60,
+        "rrf_k": "${RAG_RRF_K}",
         "weights": [
             "${RAG_RETRIEVAL_WEIGHT_DENSE}",
             "${RAG_RETRIEVAL_WEIGHT_BM25}",
             "${RAG_RETRIEVAL_WEIGHT_GRAPH}"
         ],
         "search_kwargs": {
-            "k": 30,
+            "k": "${RAG_RERANK_CANDIDATES}",
             "with_score": true,
             "must_prefix_tokens": 1
         }
@@ -103,14 +103,10 @@
     "reranker_config": {
         "type": "llm_reranker",
         "rerank_llm_config": {
-            "type": "listwise_rerank",
-            "chat_llm_config": {
-                "type": "openai_chat",
-                "model_name": "${OPENAI_CHAT_MODEL}",
-                "temperature": 0.0,
-                "openai_api_key": "${CHAT_API_KEY}",
-                "openai_base_url": "${CHAT_API_BASE_URL}"
-            }
+            "type": "dashscope_rerank",
+            "model_name": "${RERANK_MODEL_NAME}",
+            "api_key": "${RERANK_API_KEY}",
+            "base_url": "${RERANK_BASE_URL}"
         }
     },
     "llm_config": {
@@ -131,9 +127,9 @@
         "aggregate_max_results_per_group": 2
     },
     "candidate_selection": {
-        "graph_candidates_k": 30,
+        "graph_candidates_k": "${RAG_RERANK_CANDIDATES}",
         "web_candidates_k": 5,
-        "rerank_keep_k": 10,
+        "rerank_keep_k": "${RAG_RERANK_KEEP}",
         "file_prune_enabled": true,
         "file_prune_max_files": 4,
         "file_prune_max_chunks_per_file": 6
