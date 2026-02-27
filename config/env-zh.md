@@ -247,6 +247,9 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath 的 RRF 融合权重：graph 路径。设为 `0` 表示在**普通 RAG**中禁用图检索（可显著提速）；设为正值（如 `1.0`）可启用。注意这并不影响离线入库/索引阶段的图谱构建，DeepSearch 仍可在其专用流程中使用图信号。 |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
+| `RAG_RETRIEVAL_WEIGHT_SECTION` | `0.5` | Section（PageIndex）检索路径的 RRF 融合权重，应小于 dense/BM25 权重。设为 `0` 禁用。 |
+| `RAG_HYDE_ENABLED` | `true` | 启用 HyDE（Hypothetical Document Embedding）双路检索：rewrite 阶段并行生成假设文档片段，dense 路用 `[原始query, hyde_query]` 一起检索。即使 `bench_mode=1` 也保持启用。 |
+| `RAG_RERANKER_TYPE` | `listwise` | 重排器类型：`listwise` 使用 DashScope qwen-rerank（交叉编码器 API），`llm` 复用 chat 模型做 listwise 重排。 |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | rewrite 阶段只向模型提供 user 历史（不包含 assistant），降低错误回答污染后续 rewrite（assistant poisoning）。 |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | 启用 evidence 一致性过滤：基于 rewrite 产出的 anchors，将召回结果收敛到同一公司/产品文件集合，降低跨产品证据混入导致的回答偏移。 |

@@ -247,6 +247,9 @@ Notes:
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath RRF fusion weight for the BM25 retriever. Set to `0` to disable this retrieval path in normal RAG. |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath RRF fusion weight for the graph retriever. Set to `0` to disable graph retrieval in **normal RAG** (major latency savings); set to a positive value (e.g. `1.0`) to enable it. This does **not** disable graph indexing/ingestion; DeepSearch can still use graph signals in its own pipeline. |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | Enable LLM-driven per-query routing ratios that allocate MultiPath candidate quotas across retrievers (coverage floor). Falls back to static ratios when disabled. |
+| `RAG_RETRIEVAL_WEIGHT_SECTION` | `0.5` | RRF fusion weight for the section (PageIndex) retrieval path. Should be less than dense/BM25 weights. Set to `0` to disable. |
+| `RAG_HYDE_ENABLED` | `true` | Enable HyDE (Hypothetical Document Embedding) for dense retrieval. When enabled, the rewrite stage generates a hypothetical document passage in parallel with the standard query rewrite, and the dense retriever searches with both `[original_query, hyde_query]`. Stays active even in `bench_mode`. |
+| `RAG_RERANKER_TYPE` | `listwise` | Reranker backend: `listwise` uses DashScope qwen-rerank (cross-encoder API), `llm` uses the chat model for listwise reranking. |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | Feed only USER turns into the rewrite context (exclude assistant) to reduce assistant-poisoning effects. |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` |Order rewrite history context as most-recent-first (aligned with rewrite prompt wording). |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | Enable evidence consistency filtering: use rewrite-produced anchors to keep retrieval evidence within the same company/product file set (reduces cross-product mixing). |

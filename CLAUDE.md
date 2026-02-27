@@ -203,18 +203,19 @@ The `Register` class automatically substitutes environment variables when loadin
 
 ## Multi-Path Retrieval System
 
-RAG-ARC uses three parallel retrieval paths with Reciprocal Rank Fusion (RRF):
+RAG-ARC uses three parallel retrieval paths + optional section path with Reciprocal Rank Fusion (RRF):
 
 1. **Dense Retrieval** (FAISS)
    - GPU-accelerated vector similarity search
    - Supports flat, IVF, and HNSW index types
    - Two-stage retrieval for HNSW (ANN prefetch + exact rescoring)
+   - HyDE dual-query: searches with both `[original_query, hyde_query]` for better recall
    - Owner-scoped isolation
 
 2. **Sparse Retrieval** (BM25 via Tantivy)
    - Full-text search with BM25 scoring
    - Owner-scoped isolation
-   - Supports query variants for mixed-language corpora
+   - Supports query variants for mixed-language corpora (disabled in bench mode)
 
 3. **Graph Retrieval** (Neo4j HippoRAG)
    - Subgraph PPR (Personalized PageRank on relevant subgraphs)
@@ -222,11 +223,37 @@ RAG-ARC uses three parallel retrieval paths with Reciprocal Rank Fusion (RRF):
    - Incremental updates without full reconstruction
    - Optional dense-seeded file prior to reduce cross-product drift
 
+4. **Section Retrieval** (PageIndex)
+   - Weight default 0.5 (less than dense/BM25)
+   - Uses PageIndex + rerank model to find section-relevant chunks
+
+**Score Aggregation**:
+- Within each retriever path, multi-variant results are aggregated: `sum(scores) / sqrt(n + 1)`
+- Across paths, RRF fusion combines results with configurable weights
+
 **Fusion Configuration**:
-- Weights controlled via `.env`: `RAG_RETRIEVAL_WEIGHT_DENSE`, `RAG_RETRIEVAL_WEIGHT_BM25`, `RAG_RETRIEVAL_WEIGHT_GRAPH`
+- Weights controlled via `.env`: `RAG_RETRIEVAL_WEIGHT_DENSE`, `RAG_RETRIEVAL_WEIGHT_BM25`, `RAG_RETRIEVAL_WEIGHT_GRAPH`, `RAG_RETRIEVAL_WEIGHT_SECTION`
 - Default: Graph retrieval disabled for normal RAG (weight=0.0) to reduce latency
 - Graph is still built and used by DeepSearch
 - Dynamic quota allocation via `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED`
+
+**HyDE (Hypothetical Document Embedding)**:
+- Controlled by `RAG_HYDE_ENABLED` (default: true)
+- Generated in parallel with query rewrite (adds ~0 extra latency)
+- Stays active even in bench mode
+- Only used for dense retrieval path
+
+**Reranker**:
+- Controlled by `RAG_RERANKER_TYPE`: `listwise` (default) uses DashScope qwen-rerank, `llm` uses the chat model for listwise reranking
+- Dynamic instruct: includes the user's question for context-aware reranking
+- When web search is active, instruct prioritizes web content
+
+**Bench Mode Behavior** (`bench_mode=1`):
+- Intent routing: disabled
+- Query rewrite: skipped (returns original query)
+- HyDE generation: enabled (still runs)
+- BM25 multilingual variants: disabled (single query only)
+- Web search: disabled
 
 ## Document Processing Pipeline
 

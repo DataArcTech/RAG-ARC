@@ -131,6 +131,21 @@ QUERY_REWRITE_AND_INTENT_USER_PROMPT_WITH_HISTORY: Final[str] = (
     + "\n\nConversation context (most recent first, may be truncated):\n{history}"
 )
 
+HYDE_SYSTEM_PROMPT: Final[str] = (
+    "You are a document retrieval assistant. "
+    "Given a user question, write a short passage (2-3 sentences) that would appear "
+    "in a relevant document answering this question. "
+    "Write in the same language as the question. "
+    "Include specific facts, numbers, or terminology that a real document would contain. "
+    "Do NOT answer the question directly — instead, produce text that resembles the source document."
+)
+
+HYDE_USER_PROMPT: Final[str] = (
+    "Question: {query}\n\n"
+    "Write a short document passage that would contain the answer to this question."
+)
+
+
 __all__ = [
     "QUERY_REWRITE_USER_PROMPT",
     "QUERY_REWRITE_USER_PROMPT_WITH_HISTORY",
@@ -140,4 +155,6 @@ __all__ = [
     "QUERY_REWRITE_INTENT_SYSTEM_SUFFIX",
     "QUERY_REWRITE_AND_INTENT_USER_PROMPT",
     "QUERY_REWRITE_AND_INTENT_USER_PROMPT_WITH_HISTORY",
+    "HYDE_SYSTEM_PROMPT",
+    "HYDE_USER_PROMPT",
 ]
