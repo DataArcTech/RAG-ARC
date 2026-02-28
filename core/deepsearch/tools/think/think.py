@@ -5,11 +5,14 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
+from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
 from core.prompts.deepsearch import (
     THINK_TOOL_SYSTEM_PROMPT_EN,
 )
 from core.deepsearch.utils.evidence_cards import evidence_cards
+from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
+from core.utils.multimodal_llm import call_llm_with_optional_images_async
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
 from core.utils.llm_json import repair_json_from_raw_with_retry
 
@@ -291,6 +294,24 @@ class ThinkTool(GraphTool):
         )
         return ToolResult(summary=summary, diagnostics=diagnostics, think_notes=[note])
 
+    @staticmethod
+    def _collect_think_images(evidences: list | None) -> list:
+        """Collect resolved image paths from evidence for multimodal think."""
+        if not evidences:
+            return []
+        try:
+            evidence_dicts = []
+            for ev in evidences:
+                evidence_dicts.append({
+                    "content": getattr(ev, "content", "") or "",
+                    "provenance": getattr(ev, "provenance", {}) or {},
+                })
+            return collect_image_paths_from_deepsearch_evidences(
+                evidence_dicts, max_images=DEEPSEARCH_MAX_IMAGE_INPUTS,
+            )
+        except Exception:
+            return []
+
     async def _build_note(self, request: ToolRunRequest) -> ThinkNote:
         context_snapshot = self._graph_context_snapshot(request.graph_context)
         coverage_snapshot = request.coverage_metrics or {}
@@ -346,10 +367,12 @@ class ThinkTool(GraphTool):
                 "budget_phase": (budget_status or {}).get("phase") if isinstance(budget_status, dict) else None,
             }
         prompt_json = self._serialize_payload(prompt_payload)
+        _think_image_paths = self._collect_think_images(request.context_evidences)
         prompt_stats = {
             "prompt_chars": len(prompt_json),
             "evidence_cards": len(cards),
             "evidence_cards_total": len(all_cards),
+            "think_image_count": len(_think_image_paths),
             "available_tools_count": len(available_tools) if isinstance(available_tools, list) else None,
             "previous_tool_call_results_count": len(previous_tool_call_results) if isinstance(previous_tool_call_results, list) else None,
             "recent_tool_runs_count": len(recent_tool_runs) if isinstance(recent_tool_runs, list) else None,
@@ -367,12 +390,14 @@ class ThinkTool(GraphTool):
         mode = str((request.extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
         mode_defaults: Dict[str, Any] | None = None
         try:
-            response = await call_llm_async(
+            response = await call_llm_with_optional_images_async(
                 self.llm_connector,
-                messages,
+                messages=messages,
+                user_message_index=1,
+                image_paths=_think_image_paths,
+                warn_context="deepsearch.think",
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                warn_context="deepsearch.think.init",
             )
             try:
                 parsed = await self._parse_or_repair_json(messages=messages, raw=response)

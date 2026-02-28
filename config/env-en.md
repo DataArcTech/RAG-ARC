@@ -232,7 +232,7 @@ Notes:
 | `RAGARC_CITATION_STREAM_MODE` | `appearance` | Streaming citation mode for `rag_inference` SSE: `appearance` renumbers as the answer streams (no `final_text` refresh), `final` keeps original citations during streaming and sends `final_text` at the end. |
 | `CHAT_TOP_TRIPLES` | `5` | Maximum graph triples returned in chat evidence. |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Maximum seed entities surfaced in chat evidence. |
-| `CHAT_MAX_IMAGE_INPUTS` | `4` | Maximum local images attached to a single chat request when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
+| `CHAT_MAX_IMAGE_INPUTS` | `12` | Maximum local images attached to a single chat request when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | When `true`, emit retrieval observability logs/progress (per-retriever file distribution, fused distribution, rerank distribution) to debug "wrong file recalled" and follow-up drift. |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | Max file ids shown in retrieval distribution logs (counted by file_id). |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | Max chunk previews shown in retrieval observability logs. |
@@ -258,7 +258,7 @@ Notes:
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report artifacts/appendix (no truncation; item count only). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |
-| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | Maximum local images attached to DeepSearch report generation when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
+| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `12` | Maximum local images attached to DeepSearch report generation when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
 | `DEEPSEARCH_GRAPH_NODE_LIMIT` | `75` | Cap for DeepSearch graph snapshots (entity + chunk nodes). |
 | `DEEPSEARCH_GRAPH_EDGE_LIMIT` | `200` | Cap for DeepSearch edge exports between the retained nodes. |
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | Maximum reasoning steps returned in DeepSearch payloads. |

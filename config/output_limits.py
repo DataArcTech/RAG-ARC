@@ -79,7 +79,7 @@ ENABLE_ALL_EVIDENCE = _env_bool("ENABLE_ALL_EVIDENCE", False)
 CHAT_TOP_CHUNKS = _limit_or_none(_env_int("CHAT_TOP_CHUNKS", 5))
 CHAT_TOP_TRIPLES = _limit_or_none(_env_int("CHAT_TOP_TRIPLES", 5))
 CHAT_TOP_SEED_ENTITIES = _limit_or_none(_env_int("CHAT_TOP_SEED_ENTITIES", 5))
-CHAT_MAX_IMAGE_INPUTS = _max_images_or_none(_env_int("CHAT_MAX_IMAGE_INPUTS", 4))
+CHAT_MAX_IMAGE_INPUTS = _max_images_or_none(_env_int("CHAT_MAX_IMAGE_INPUTS", 12))
 
 # Chatbot-only: allow sending more sources to the LLM than the UI displays.
 # (UI uses CHATBOT_TOP_SOURCES; LLM uses this to improve coverage for broad questions like "有什么特点".)
@@ -101,7 +101,7 @@ CITATION_STREAM_MODE = _env_choice("RAGARC_CITATION_STREAM_MODE", "appearance", 
 DEEPSEARCH_TOP_CHUNKS = _limit_or_none(_env_int("DEEPSEARCH_TOP_CHUNKS", 10))
 DEEPSEARCH_TOP_TRIPLES = _limit_or_none(_env_int("DEEPSEARCH_TOP_TRIPLES", 30))
 DEEPSEARCH_TOP_SEED_ENTITIES = _limit_or_none(_env_int("DEEPSEARCH_TOP_SEED_ENTITIES", 15))
-DEEPSEARCH_MAX_IMAGE_INPUTS = _max_images_or_none(_env_int("DEEPSEARCH_MAX_IMAGE_INPUTS", 6))
+DEEPSEARCH_MAX_IMAGE_INPUTS = _max_images_or_none(_env_int("DEEPSEARCH_MAX_IMAGE_INPUTS", 12))
 DEEPSEARCH_MAX_REASONING_STEPS = _limit_or_none(_env_int("DEEPSEARCH_MAX_REASONING_STEPS", 32))
 DEEPSEARCH_MAX_STAGE_HISTORY = _limit_or_none(_env_int("DEEPSEARCH_MAX_STAGE_HISTORY", 10))
 DEEPSEARCH_MAX_TOOL_METADATA = _limit_or_none(_env_int("DEEPSEARCH_MAX_TOOL_METADATA", 5))
