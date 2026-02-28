@@ -17,7 +17,9 @@ from framework.runtime_warnings import configure_runtime_warnings
 configure_runtime_warnings()
 
 # Load environment variables from .env file
-load_dotenv()
+# override=True ensures .env is always the authoritative source,
+# even when PM2 daemon has stale values from a previous run.
+load_dotenv(override=True)
 configure_scope_provider()
 
 import app_registration
