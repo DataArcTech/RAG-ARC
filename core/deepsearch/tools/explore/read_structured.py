@@ -256,6 +256,16 @@ def _load_mineru_content_list_pages(
             continue
         text = str(row.get("text") or "").strip()
         if not text:
+            # Handle list-type items (MinerU stores content in list_items, not text).
+            list_items = row.get("list_items")
+            if isinstance(list_items, list) and list_items:
+                text = "\n".join(str(item) for item in list_items).strip()
+            else:
+                # Handle table-type items (content in table_body).
+                table_body = row.get("table_body")
+                if table_body and isinstance(table_body, str):
+                    text = table_body.strip()
+        if not text:
             continue
         page_to_parts.setdefault(int(idx), []).append(text)
 

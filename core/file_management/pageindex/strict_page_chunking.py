@@ -38,6 +38,12 @@ def _candidate_texts(item: Dict[str, Any]) -> List[str]:
     if isinstance(table_body, str):
         _push(table_body)
 
+    # MinerU list-type items store content in list_items, not text.
+    list_items = item.get("list_items")
+    if isinstance(list_items, list):
+        for entry in list_items:
+            _push(entry)
+
     # Deduplicate while preserving relative order.
     deduped: List[str] = []
     seen: set[str] = set()

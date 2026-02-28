@@ -278,7 +278,7 @@ SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (
 # -----------------------------
 # toc + structured reading defaults (PageIndex navigation)
 # -----------------------------
-TOC_TREE_DEFAULT_MAX_DEPTH = 2
+TOC_TREE_DEFAULT_MAX_DEPTH = 3
 TOC_TREE_MAX_CHUNKS_SCANNED = 5000
 
 # -----------------------------
