@@ -179,7 +179,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                     "items": {"type": "string"},
                     "description": (
                         "Regex patterns for exact keyword matching. Use when you know specific terms "
-                        "that must appear (e.g. ['EBITDA', 'net\\\\s+income', 'FY\\\\s*202[0-9]']). "
+                        "that must appear (e.g. ['appendix\\\\s+[A-Z]', 'revised.*2018', 'FY\\\\s*202[0-9]']). "
                         "Patterns are case-insensitive. Complements the semantic search channels."
                     ),
                 },

@@ -33,12 +33,16 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     '  Page-level: {"file_id":"<UUID or filename>","focus_query":"..."}\n'
     "  Results are navigation snippets only — always follow up with read.pages.\n"
     "  **HyDE tip**: write focus_query as a hypothetical sentence the document might contain, e.g.\n"
-    '  focus_query="The total revenue for fiscal year 2023 was" instead of just "total revenue FY2023".\n'
+    '  focus_query="The second regulatory objective is" (admin/strategy docs)\n'
+    '  focus_query="The incident occurred on March 24 when" (investigative/research reports)\n'
+    '  focus_query="The total revenue for fiscal year 2023 was" (financial docs)\n'
     "  Do NOT invent specific numbers — keep it value-free.\n"
     "  **Decomposition tip**: if the answer likely requires combining multiple facts,\n"
     "  search for the original query AND its components in parallel in Round 1.\n"
-    "  e.g. \"ROCE\" → locate(\"ROCE\") + locate(\"operating income\") + locate(\"capital employed\");\n"
-    "  \"total long-term liabilities\" → locate(\"long-term liabilities\") + locate(\"long-term debt\") + locate(\"lease liabilities\").\n"
+    '  e.g. "How many appendices?" → toc.tree(file=X) to count top-level sections + locate("appendix");\n'
+    '  "Total staff across departments" → locate("executive leadership") + locate("prosecution services") + locate("administrative staff");\n'
+    '  "ROCE" → locate("ROCE") + locate("operating income") + locate("capital employed");\n'
+    '  "total long-term liabilities" → locate("long-term liabilities") + locate("long-term debt") + locate("lease liabilities").\n'
     "  This avoids wasting rounds searching for a term the document may never mention literally.\n"
     "- toc.tree: show document Table of Contents (sections + page ranges).\n"
     '  {"file_id":"<UUID or filename>"}\n'
@@ -54,16 +58,16 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "- web.search: web search, only when internal evidence is insufficient.\n"
     "\n"
     "## code.python — Computation (Do NOT Mental-Math)\n"
-    "For ANY question that requires arithmetic (ratios, sums, averages, percentages, ROCE, ROE,\n"
-    "EBITDA, etc.), you MUST use code.python instead of computing in your head.\n"
+    "For ANY question that requires arithmetic (ratios, sums, counts, averages, percentages,\n"
+    "date differences, or any derived metric), you MUST use code.python instead of computing in your head.\n"
     "Mental math is unreliable and frequently produces wrong answers.\n"
     "Usage pattern:\n"
-    '  {"tool_name":"code.python","tool_args":{"code":"net_income = 1542\\ntotal_equity = 3152\\nresult = round(net_income / total_equity, 3)"}}\n'
+    '  {"tool_name":"code.python","tool_args":{"code":"staff_a = 12\\nstaff_b = 15\\nresult = staff_a + staff_b"}}\n'
     "Rules:\n"
     "- Use ONLY real numeric values you extracted from read.pages — never guess or use placeholders.\n"
     "- Every variable MUST include a comment citing its source page and row/label, e.g.:\n"
-    "    equity_2023 = 2795  # page 41, row 'Total Best Buy shareholders equity'\n"
-    "    d_and_a = 1781  # page 39, 'Depreciation and amortization'\n"
+    "    staff_dept_a = 12  # page 7, 'Executive Leadership' section\n"
+    "    staff_dept_b = 15  # page 9, 'Prosecution Services Staff'\n"
     "  This ensures you double-check each value against the evidence before computing.\n"
     "- Call code.python AFTER you have read all required values. Do NOT delay — once you have\n"
     "  the numbers, compute immediately in the SAME round or the NEXT round.\n"
@@ -73,8 +77,9 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "\n"
     "## regex_patterns — Precision Retrieval\n"
     "When calling locate, you can pass regex_patterns to match exact keywords in page text.\n"
-    "This is critical for finding specific financial terms, KPI names, or table row labels.\n"
+    "This is critical for finding specific terms, labels, dates, section identifiers, or named items.\n"
     "Example:\n"
+    '  {"file_id":"<UUID>","focus_query":"appendix listing","regex_patterns":["appendix\\\\s+[A-Z]","revised.*\\\\d{4}","objective\\\\s+\\\\d"]}\n'
     '  {"file_id":"<UUID>","focus_query":"return on equity","regex_patterns":["return on.*equity","ROE","ROAE"]}\n'
     "regex_patterns use Python regex syntax and are case-insensitive.\n"
     "ALWAYS include regex_patterns when searching for specific metrics, dates, or named items.\n"
@@ -92,7 +97,7 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "All tool_calls in one response run IN PARALLEL (up to 6 concurrent).\n"
     "ALWAYS batch independent calls together to save rounds. Examples:\n"
     "- toc.tree + locate(file_id=X, focus_query=...) → navigate + search at once\n"
-    "- locate(focus_query='net income') + locate(focus_query='equity') → two searches at once\n"
+    "- locate(focus_query='executive leadership') + locate(focus_query='prosecution staff') → two searches at once\n"
     "- read.pages(pages=[27,28]) + read.pages(pages=[39,40]) → read different sections at once\n"
     "Never emit a single tool_call when you could batch 2-4 independent calls.\n"
     "\n"
