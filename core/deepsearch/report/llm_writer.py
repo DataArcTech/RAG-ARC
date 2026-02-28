@@ -684,8 +684,13 @@ class DeepSearchLLMReportWriter:
             evidence_pack = ""
             source_key_map: Dict[str, str] = {}
             if evidences:
-                bank = EvidenceBank()
-                bank.add_many(evidences)
+                shared_bank = context.get("_shared_evidence_bank")
+                if shared_bank is not None and hasattr(shared_bank, "add_many"):
+                    bank = EvidenceBank()
+                    bank.add_many(evidences)
+                else:
+                    bank = EvidenceBank()
+                    bank.add_many(evidences)
 
                 all_ids = bank.ids()
                 q_terms = _query_terms(question, max_terms=8)
@@ -790,6 +795,9 @@ class DeepSearchLLMReportWriter:
                     evidence_pack=evidence_pack,
                     coverage_json=_dump_json(coverage),
                 )
+            verification_feedback = str(context.get("verification_feedback") or "").strip()
+            if verification_feedback:
+                user_prompt += f"\n\n{verification_feedback}\n"
             messages = [
                 {
                     "role": "system",
@@ -852,6 +860,7 @@ class DeepSearchLLMReportWriter:
                 payload["text"] = text_out
             if source_key_map:
                 payload["source_key_map"] = source_key_map
+            payload["_evidence_pack"] = evidence_pack
             return payload
 
         raise RuntimeError(f"Report writing exceeded context budget: {last_exc}") from last_exc
@@ -907,6 +916,7 @@ class DeepSearchLLMReportWriter:
         This method generates each section independently and concurrently, then merges
         them into a final report structure. Best for outlines with 3+ independent sections.
         """
+        shared_bank = context.get("_shared_evidence_bank")
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
@@ -965,10 +975,12 @@ class DeepSearchLLMReportWriter:
         title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
         title = question[:title_limit] + ("..." if len(question) > title_limit else "")
         text = self._render_sections_markdown(title=title, sections=sections)
+        full_evidence_pack = bank.evidence_pack_for_prompt(bank.ids(), source_key_map=source_key_map)
         return {
             "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
+            "_evidence_pack": full_evidence_pack,
         }
 
     async def write_report_sectionwise(
@@ -985,6 +997,7 @@ class DeepSearchLLMReportWriter:
         recency window of previously used evidence snippets for continuity.
         """
 
+        shared_bank = context.get("_shared_evidence_bank")
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
@@ -1072,10 +1085,14 @@ class DeepSearchLLMReportWriter:
         title = question[:title_limit] + ("..." if len(question) > title_limit else "")
         text = self._render_sections_markdown(title=title, sections=sections)
 
+        full_evidence_pack = bank.evidence_pack_for_prompt(
+            list(dict.fromkeys(used_ids_union)), source_key_map=source_key_map,
+        )
         return {
             "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
+            "_evidence_pack": full_evidence_pack,
         }
 
     async def _write_single_section(

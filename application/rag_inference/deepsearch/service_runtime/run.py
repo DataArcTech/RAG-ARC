@@ -403,6 +403,7 @@ class DeepSearchServiceRunMixin:
             # --- Post-loop: branch based on report_needed ---
             all_evidences = round_trace.get("evidences") if isinstance(round_trace, dict) else []
             report_evidences = self._filter_evidences_for_report(all_evidences if isinstance(all_evidences, list) else [])
+            evidence_bank = round_trace.get("evidence_bank") if isinstance(round_trace, dict) else None
 
             # Path A: direct answer (report_needed=false → no gates, no report)
             if not report_needed:
@@ -443,6 +444,7 @@ class DeepSearchServiceRunMixin:
                 stage_timings=stage_timings,
                 reasoning_trace=round_trace,
                 report_evidences=report_evidences,
+                evidence_bank=evidence_bank,
             )
             state.record_report(report)
             await emit_trace(

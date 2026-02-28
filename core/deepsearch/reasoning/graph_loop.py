@@ -30,16 +30,52 @@ from .graph_loop_runtime import GraphLoopRuntimeMixin, _prioritize_tool_catalog
 from .graph_loop_state import (
     _RUN_EVIDENCES,
     _RUN_EVIDENCE_LOCK,
+    _RUN_EVIDENCE_BANK,
     _RUN_REFLECT_COUNT,
     _RUN_THINK_COUNT,
     _RUN_TOTAL_STEPS,
     _RUN_PLAN_STATE,
     _RUN_TOOL_MEMO,
     _run_evidence_state,
+    get_evidence_bank,
 )
 from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
+from core.deepsearch.memory.evidence_bank import EvidenceBank
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_read_pages_summary(tool_runs: Sequence[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """Build a compact {file_id: [pages]} map from all completed read.pages calls.
+
+    Injected into the think prompt so the model knows which pages are already
+    in context and avoids re-reading them.
+    """
+    file_pages: Dict[str, set[int]] = {}
+    for run in tool_runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("tool_name") != "read.pages":
+            continue
+        result = run.get("result")
+        if not isinstance(result, dict):
+            continue
+        diag = result.get("diagnostics")
+        if not isinstance(diag, dict):
+            continue
+        # diagnostics.pages is {page_str: {...}} from the read.pages tool
+        pages_info = diag.get("pages")
+        if isinstance(pages_info, dict):
+            file_id = str(diag.get("file_id") or "").strip()
+            if not file_id:
+                # Fallback: try to get file_id from the tool result envelope
+                file_id = str(result.get("file_id") or "").strip()
+            for page_str in pages_info:
+                try:
+                    file_pages.setdefault(file_id, set()).add(int(page_str))
+                except (ValueError, TypeError):
+                    continue
+    return {fid: sorted(pages) for fid, pages in file_pages.items() if pages}
 
 
 class GraphReasoningLoop(GraphLoopRuntimeMixin):
@@ -94,6 +130,10 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         reflect_count_token = _RUN_REFLECT_COUNT.set(0)
         tool_memo = RunToolMemoizer()
         tool_memo_token = _RUN_TOOL_MEMO.set(tool_memo if tool_memo.enabled() else None)
+        evidence_bank = EvidenceBank()
+        if seed_evidences:
+            evidence_bank.add_chunks(seed_evidences)
+        bank_token = _RUN_EVIDENCE_BANK.set(evidence_bank)
         plan_state = PlanState()
         if isinstance(context.metadata, dict):
             plan_state.update(context.metadata.get("runtime_plan"))
@@ -173,6 +213,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                     tool_runs,
                     max_items=int(self._think_config.get("recent_tool_runs_max") or 0),
                 )
+                already_read_pages = _extract_read_pages_summary(tool_runs)
                 next_count = _RUN_THINK_COUNT.get() + 1
                 _RUN_THINK_COUNT.set(next_count)
                 think_step_id = f"think_loop_{next_count:02d}"
@@ -195,6 +236,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                         "available_tools": tool_catalog,
                         "previous_tool_call_results": previous_tool_call_results,
                         "recent_tool_runs": recent_tool_runs,
+                        "already_read_pages": already_read_pages,
                         "current_plan": list(plan_state.items),
                         "think_mode": "normal",
                     },
@@ -315,6 +357,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             _RUN_REFLECT_COUNT.reset(reflect_count_token)
             _RUN_PLAN_STATE.reset(plan_token)
             _RUN_TOOL_MEMO.reset(tool_memo_token)
+            _RUN_EVIDENCE_BANK.reset(bank_token)
 
         coverage_metrics = self._coverage_snapshot(
             evidences=evidences,
@@ -329,6 +372,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "graph_traversals": [],
             "reasoning_steps": [record.model_dump() for record in reasoning_steps],
             "evidences": [chunk.model_dump() for chunk in evidences],
+            "evidence_bank": evidence_bank,
             "tool_results": tool_runs,
             "think_notes": think_notes,
             "runtime_plan": plan_state.to_payload(),
@@ -583,6 +627,9 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             return
         async with lock:
             evidences.extend(additions)
+        bank = get_evidence_bank()
+        if bank is not None:
+            bank.add_chunks(additions)
 
     async def _snapshot_evidences(self) -> List[EvidenceChunk]:
         evidences, lock = _run_evidence_state()

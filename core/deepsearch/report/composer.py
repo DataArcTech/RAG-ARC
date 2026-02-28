@@ -12,6 +12,7 @@ from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
+from core.deepsearch.report.verifier import verify_report
 from core.deepsearch.trace import emit_trace
 from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
@@ -79,6 +80,7 @@ class DeepSearchReporter:
         self.sectionwise_writer = bool(self.config["sectionwise_writer"])
         self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
         self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
+        self.enable_report_verifier = bool(self.config.get("enable_report_verifier", True))
         self.provenance_chunk_attach_max = int(
             self.config.get("provenance_chunk_attach_max", composer_defaults.DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX)
         )
@@ -87,6 +89,7 @@ class DeepSearchReporter:
         self,
         reasoning_trace: Dict[str, Any],
         external_evidence: Optional[Iterable[Dict[str, Any] | EvidenceChunk]] = None,
+        evidence_bank: Optional["EvidenceBank"] = None,
     ) -> Dict[str, Any]:
         """Compose a report payload for downstream clients (API/CLI/MCP)."""
 
@@ -330,6 +333,7 @@ class DeepSearchReporter:
             evidences=llm_evidences,
             coverage=coverage_metrics,
             request_context=request_context,
+            evidence_bank=evidence_bank,
         )
         report_style = str(context.get("report_style") or "deepsearch").strip().lower()
         writer = DeepSearchLLMReportWriter(
@@ -359,6 +363,46 @@ class DeepSearchReporter:
         except RuntimeError as exc:
             # Normalize internal LLM-budget failures into a stable public exception type for callers/tests.
             raise ValueError(str(exc)) from exc
+
+        # ── Report Verifier ───────────────────────────────────────────────
+        # Run a separate LLM call to verify factual claims against evidence.
+        # If verification fails, rewrite the report once with feedback injected.
+        evidence_pack_for_verify = ""
+        if isinstance(structured_llm, dict):
+            evidence_pack_for_verify = structured_llm.pop("_evidence_pack", "") or ""
+        if self.enable_report_verifier and evidence_pack_for_verify:
+            report_text_for_verify = structured_llm.get("text", "") if isinstance(structured_llm, dict) else ""
+            if report_text_for_verify.strip():
+                verification = await verify_report(
+                    llm_connector=self.llm_connector,
+                    question=question,
+                    report_text=report_text_for_verify,
+                    evidence_pack=evidence_pack_for_verify,
+                    temperature=0.0,
+                )
+                metadata["report_verification"] = {
+                    "passed": verification.passed,
+                    "issues": verification.issues,
+                    "thinking": verification.thinking[:500] if verification.thinking else "",
+                }
+                if not verification.passed:
+                    # Inject feedback and rewrite once.
+                    feedback = verification.feedback_text()
+                    rewrite_context = dict(context)
+                    rewrite_context["verification_feedback"] = feedback
+                    try:
+                        structured_llm = await writer.write_report(
+                            question=question, outline=outline, context=rewrite_context,
+                        )
+                        if isinstance(structured_llm, dict):
+                            structured_llm.pop("_evidence_pack", None)
+                        metadata["report_verification"]["rewritten"] = True
+                    except Exception as exc:  # noqa: BLE001
+                        # If rewrite fails, keep the original report but log the error.
+                        logger.warning("Report verifier rewrite failed: %s", exc, exc_info=True)
+                        metadata["report_verification"]["rewritten"] = False
+                        metadata["report_verification"]["rewrite_error"] = str(exc)[:300]
+
         if isinstance(structured_llm, dict) and structured_llm.get("writer_fallback"):
             metadata["writer_fallback"] = structured_llm.get("writer_fallback")
         if alias_bundle:
@@ -614,6 +658,7 @@ class DeepSearchReporter:
         evidences: List[Dict[str, Any]],
         coverage: Dict[str, Any],
         request_context: Dict[str, Any],
+        evidence_bank: Optional["EvidenceBank"] = None,
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
@@ -665,8 +710,15 @@ class DeepSearchReporter:
 
         graph_evidence_full = self._build_graph_evidence(trace, evidences)
         graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)
-        bank = EvidenceBank()
-        bank.add_many(evidences)
+        # Build report-scoped bank from filtered evidences.
+        # If a shared evidence_bank from think loop is available, use it as the
+        # base so evidence content stays consistent across stages.
+        if evidence_bank is not None:
+            bank = EvidenceBank()
+            bank.add_many(evidences)
+        else:
+            bank = EvidenceBank()
+            bank.add_many(evidences)
         outline_index_limit = self.max_evidence_items if self.max_evidence_items is not None else None
         evidence_index = bank.index_for_prompt(max_items=outline_index_limit)
         graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
@@ -689,6 +741,7 @@ class DeepSearchReporter:
             "coverage": coverage_bundle,
             "request_context": request_context,
             "report_style": report_style or "deepsearch",
+            "_shared_evidence_bank": evidence_bank,
         }
 
     def _merge_evidences(

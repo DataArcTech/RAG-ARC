@@ -82,3 +82,26 @@ def test_collect_images_from_metadata_when_content_missing(monkeypatch: pytest.M
 
     paths = collect_image_paths_from_deepsearch_evidences(evidences, max_images=10)
     assert [p.resolve() for p in paths] == [(tmp_path / "parsed_files" / "mineru" / file_id / rel).resolve()]
+
+
+def test_max_images_limit_12(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify max_images=12 caps correctly with mocked files."""
+    monkeypatch.setenv("IO_STORE_BASE_PATH", str(tmp_path))
+    monkeypatch.setenv("PARSER_OUTPUT_DIR", "io://parsed_files")
+    fid = "test-file-id"
+    for i in range(15):
+        _touch(tmp_path / "parsed_files" / "mineru" / fid / f"images/img{i:02d}.jpg")
+    evidences = [
+        {
+            "content": "",
+            "provenance": {
+                "metadata": {
+                    "source_file_id": fid,
+                    "filename": "test.pdf",
+                    "image_urls": [f"images/img{i:02d}.jpg" for i in range(15)],
+                }
+            },
+        }
+    ]
+    paths = collect_image_paths_from_deepsearch_evidences(evidences, max_images=12)
+    assert len(paths) == 12

@@ -139,6 +139,16 @@ def build_page_text_index(content_list: Iterable[Dict[str, Any]]) -> Dict[int, s
             continue
         text = str(item.get("text") or "").strip()
         if not text:
+            # MinerU list-type items store content in list_items, not text.
+            list_items = item.get("list_items")
+            if isinstance(list_items, list) and list_items:
+                text = "\n".join(str(li) for li in list_items).strip()
+            else:
+                # MinerU table-type items store content in table_body.
+                table_body = item.get("table_body")
+                if isinstance(table_body, str):
+                    text = table_body.strip()
+        if not text:
             continue
         pages.setdefault(page_idx, []).append(text)
     return {page: "\n".join(lines) for page, lines in pages.items()}

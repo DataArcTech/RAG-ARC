@@ -5,11 +5,14 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
+from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
 from core.prompts.deepsearch import (
     THINK_TOOL_SYSTEM_PROMPT_EN,
 )
 from core.deepsearch.utils.evidence_cards import evidence_cards
+from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
+from core.utils.multimodal_llm import call_llm_with_optional_images_async
 from core.deepsearch.utils.llm_envelope import build_llm_envelope
 from core.utils.llm_json import repair_json_from_raw_with_retry
 
@@ -291,6 +294,24 @@ class ThinkTool(GraphTool):
         )
         return ToolResult(summary=summary, diagnostics=diagnostics, think_notes=[note])
 
+    @staticmethod
+    def _collect_think_images(evidences: list | None) -> list:
+        """Collect resolved image paths from evidence for multimodal think."""
+        if not evidences:
+            return []
+        try:
+            evidence_dicts = []
+            for ev in evidences:
+                evidence_dicts.append({
+                    "content": getattr(ev, "content", "") or "",
+                    "provenance": getattr(ev, "provenance", {}) or {},
+                })
+            return collect_image_paths_from_deepsearch_evidences(
+                evidence_dicts, max_images=DEEPSEARCH_MAX_IMAGE_INPUTS,
+            )
+        except Exception:
+            return []
+
     async def _build_note(self, request: ToolRunRequest) -> ThinkNote:
         context_snapshot = self._graph_context_snapshot(request.graph_context)
         coverage_snapshot = request.coverage_metrics or {}
@@ -309,6 +330,7 @@ class ThinkTool(GraphTool):
         available_tools = extra.get("available_tools")
         previous_tool_call_results = extra.get("previous_tool_call_results")
         recent_tool_runs = extra.get("recent_tool_runs")
+        already_read_pages = extra.get("already_read_pages") or {}
         current_plan = _compact_current_plan(
             extra.get("current_plan"),
             max_items=int(getattr(tool_defaults, "THINK_CURRENT_PLAN_MAX_ITEMS", 0) or 0),
@@ -330,6 +352,7 @@ class ThinkTool(GraphTool):
             "available_tools": available_tools,
             "previous_tool_call_results": previous_tool_call_results,
             "recent_tool_runs": recent_tool_runs,
+            "already_read_pages": already_read_pages if already_read_pages else None,
             "current_plan": current_plan,
         }
         if self.include_extra_in_prompt:
@@ -344,10 +367,12 @@ class ThinkTool(GraphTool):
                 "budget_phase": (budget_status or {}).get("phase") if isinstance(budget_status, dict) else None,
             }
         prompt_json = self._serialize_payload(prompt_payload)
+        _think_image_paths = self._collect_think_images(request.context_evidences)
         prompt_stats = {
             "prompt_chars": len(prompt_json),
             "evidence_cards": len(cards),
             "evidence_cards_total": len(all_cards),
+            "think_image_count": len(_think_image_paths),
             "available_tools_count": len(available_tools) if isinstance(available_tools, list) else None,
             "previous_tool_call_results_count": len(previous_tool_call_results) if isinstance(previous_tool_call_results, list) else None,
             "recent_tool_runs_count": len(recent_tool_runs) if isinstance(recent_tool_runs, list) else None,
@@ -365,12 +390,14 @@ class ThinkTool(GraphTool):
         mode = str((request.extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
         mode_defaults: Dict[str, Any] | None = None
         try:
-            response = await call_llm_async(
+            response = await call_llm_with_optional_images_async(
                 self.llm_connector,
-                messages,
+                messages=messages,
+                user_message_index=1,
+                image_paths=_think_image_paths,
+                warn_context="deepsearch.think",
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                warn_context="deepsearch.think.init",
             )
             try:
                 parsed = await self._parse_or_repair_json(messages=messages, raw=response)
@@ -672,8 +699,53 @@ class ThinkTool(GraphTool):
         def _default(value):
             return str(value)
 
-        # Stable, token-efficient JSON improves cache hit rates and reduces JSON-repair churn.
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_default)
+        # Key ordering optimised for automatic prefix caching.
+        # Prompt caches identical token prefixes from position 0.  By placing
+        # fields that are *stable across think rounds* at the beginning of the
+        # JSON, successive rounds share a longer cacheable prefix → lower cost
+        # (cache reads = 0.1× input price) and faster TTFT.
+        #
+        # Tier 1 – identical across all rounds within a single DeepSearch run:
+        #   question, available_tools, graph_context
+        # Tier 2 – mostly stable / small:
+        #   plan_step, tool_budget
+        # Tier 3 – changes each round but small:
+        #   budget_status, coverage_metrics, runtime
+        # Tier 4 – grows monotonically (large):
+        #   already_read_pages, current_plan, evidence_l0_digest,
+        #   context_evidences, context_evidences_total
+        # Tier 5 – completely new each round (must be last):
+        #   previous_tool_call_results, recent_tool_runs
+        _PREFERRED_ORDER = (
+            "question",
+            "available_tools",
+            "graph_context",
+            "plan_step",
+            "tool_budget",
+            "budget_status",
+            "coverage_metrics",
+            "runtime",
+            "already_read_pages",
+            "current_plan",
+            "evidence_l0_digest",
+            "context_evidences",
+            "context_evidences_total",
+            "previous_tool_call_results",
+            "recent_tool_runs",
+        )
+
+        if isinstance(payload, dict):
+            ordered: dict = {}
+            for key in _PREFERRED_ORDER:
+                if key in payload:
+                    ordered[key] = payload[key]
+            # Any remaining keys not in the preferred list, appended in sorted order.
+            for key in sorted(payload.keys()):
+                if key not in ordered:
+                    ordered[key] = payload[key]
+            payload = ordered
+
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_default)
 
     @staticmethod
     def _budget_phase(snapshot: Dict[str, Any]) -> str:

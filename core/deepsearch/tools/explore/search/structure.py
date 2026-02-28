@@ -51,8 +51,15 @@ class _StructureChannel:
             return _ChannelResult(channel="structure", evidences=[], diagnostics=diag, summary="structure skipped: no reranker")
 
         documents = [s.title or s.path for s in scorable]
+        _structure_rerank_instruct = (
+            f"User query is: {query}\n"
+            "Select the document section most relevant to this query."
+        )
         try:
-            scored = await client.arerank(query=query, documents=documents, top_k=len(documents))
+            scored = await client.arerank(
+                query=query, documents=documents, top_k=len(documents),
+                instruct=_structure_rerank_instruct,
+            )
         except Exception as exc:
             diag["error"] = str(exc)
             return _ChannelResult(channel="structure", evidences=[], diagnostics=diag, summary="structure: rerank failed")

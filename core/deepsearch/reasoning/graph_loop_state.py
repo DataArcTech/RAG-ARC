@@ -3,6 +3,7 @@ import contextvars
 from typing import List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.memory.evidence_bank import EvidenceBank
 from core.deepsearch.memory.plan_state import PlanState
 from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
 
@@ -26,6 +27,10 @@ _RUN_TOOL_MEMO: contextvars.ContextVar[RunToolMemoizer | None] = contextvars.Con
     "deepsearch_run_tool_memo",
     default=None,
 )
+_RUN_EVIDENCE_BANK: contextvars.ContextVar[EvidenceBank | None] = contextvars.ContextVar(
+    "deepsearch_run_evidence_bank",
+    default=None,
+)
 
 
 def _run_evidence_state() -> tuple[List[EvidenceChunk], asyncio.Lock]:
@@ -34,6 +39,11 @@ def _run_evidence_state() -> tuple[List[EvidenceChunk], asyncio.Lock]:
     if evidences is None or lock is None:
         raise RuntimeError("DeepSearch evidence state is not initialized")
     return evidences, lock
+
+
+def get_evidence_bank() -> EvidenceBank | None:
+    """Return the run-scoped EvidenceBank, or None if not initialized."""
+    return _RUN_EVIDENCE_BANK.get(None)
 
 
 def _run_plan_state() -> PlanState:
@@ -46,6 +56,7 @@ def _run_plan_state() -> PlanState:
 __all__ = [
     "_RUN_EVIDENCES",
     "_RUN_EVIDENCE_LOCK",
+    "_RUN_EVIDENCE_BANK",
     "_RUN_REFLECT_COUNT",
     "_RUN_THINK_COUNT",
     "_RUN_TOTAL_STEPS",
@@ -53,4 +64,5 @@ __all__ = [
     "_RUN_TOOL_MEMO",
     "_run_evidence_state",
     "_run_plan_state",
+    "get_evidence_bank",
 ]

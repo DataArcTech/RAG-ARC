@@ -70,6 +70,7 @@ class _Hit:
     rank: int
     score: Optional[float]
     snippet: str
+    page: Optional[int] = None
 
 
 class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, _RegexChannel, _StructureChannel, GraphTool):
@@ -179,7 +180,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                     "items": {"type": "string"},
                     "description": (
                         "Regex patterns for exact keyword matching. Use when you know specific terms "
-                        "that must appear (e.g. ['EBITDA', 'net\\\\s+income', 'FY\\\\s*202[0-9]']). "
+                        "that must appear (e.g. ['appendix\\\\s+[A-Z]', 'revised.*2018', 'FY\\\\s*202[0-9]']). "
                         "Patterns are case-insensitive. Complements the semantic search channels."
                     ),
                 },
@@ -413,6 +414,21 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                 if score_f is not None:
                     channel_scores = per_channel_scores.setdefault(channel, {})
                     channel_scores.setdefault(file_id, []).append(score_f)
+                # Extract page from provenance (regex/structure) or metadata (faiss/bm25/graph).
+                page: Optional[int] = None
+                if isinstance(provenance, dict):
+                    for _pk in ("page_start", "page_idx"):
+                        _pv = provenance.get(_pk)
+                        if _pv is not None:
+                            try:
+                                page = int(_pv)
+                            except (ValueError, TypeError):
+                                pass
+                            else:
+                                break
+                if page is None:
+                    page = _extract_page(meta)
+
                 row["hits"].append(
                     _Hit(
                         channel=channel,
@@ -420,6 +436,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                         rank=rank_i,
                         score=score_f,
                         snippet=snippet,
+                        page=page,
                     ).__dict__
                 )
 
@@ -537,6 +554,7 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
                     {
                         "channel": str(item.get("channel") or ""),
                         "rank": int(item.get("rank") or 0),
+                        "page": item.get("page"),
                         "snippet": snippet,
                     }
                 )
@@ -777,8 +795,15 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
 
             client = self._get_rerank_client()
             if client is not None:
+                _page_rerank_instruct = (
+                    f"User query is: {query}\n"
+                    "Select the page most likely to contain the answer to this query."
+                )
                 try:
-                    scored = await client.arerank(query=query, documents=rerank_docs, top_k=len(rerank_docs))
+                    scored = await client.arerank(
+                        query=query, documents=rerank_docs, top_k=len(rerank_docs),
+                        instruct=_page_rerank_instruct,
+                    )
                     reranked_order = [rerank_page_ids[idx] for idx, _ in scored if 0 <= idx < len(rerank_page_ids)]
                     reranked_set = set(reranked_order)
                     remaining = [(p, s) for p, s in ranked_pages if p not in reranked_set]
@@ -872,12 +897,14 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         diagnostics["model"] = client.model_name
 
         # Build document strings: concatenate top snippets per file candidate.
+        # Sort by score (descending) across all channels so the most relevant
+        # snippets are selected regardless of channel name.
         max_hits = max(1, int(tool_defaults.FILE_SEARCH_MAX_SNIPPETS_PER_FILE))
         documents: List[str] = []
         file_ids: List[str] = []
         for row in candidates:
             hit_items = list(row.get("hits") or [])
-            hit_items.sort(key=lambda item: (str(item.get("channel") or ""), int(item.get("rank") or 9999)))
+            hit_items.sort(key=lambda item: -float(item.get("score") or 0))
             snippets: List[str] = []
             for item in hit_items:
                 if len(snippets) >= max_hits:
@@ -890,8 +917,15 @@ class LocateTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             documents.append(doc_text)
             file_ids.append(str(row.get("file_id") or ""))
 
+        _file_rerank_instruct = (
+            f"User query is: {query}\n"
+            "Select the document most likely to contain the answer to this query."
+        )
         try:
-            scored = await client.arerank(query=query, documents=documents, top_k=len(documents))
+            scored = await client.arerank(
+                query=query, documents=documents, top_k=len(documents),
+                instruct=_file_rerank_instruct,
+            )
         except Exception as exc:  # noqa: BLE001
             diagnostics["error"] = str(exc)
             logger.warning("DashScope rerank API call failed: %s", exc)

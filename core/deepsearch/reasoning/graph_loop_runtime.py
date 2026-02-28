@@ -290,6 +290,10 @@ class GraphLoopRuntimeMixin:
                     diag = dict(cached.result.diagnostics or {})
                     diag.setdefault("memoization", {})
                     diag["memoization"] = {"hit": True}
+                    # Preserve original evidence count so the LLM sees a consistent signal
+                    # (avoids infinite retry loops when evidence_count drops to 0).
+                    original_ev_count = len(cached.result.evidences) if isinstance(cached.result.evidences, list) else len(cached.produced_evidence_ids)
+                    diag["replayed_evidence_count"] = original_ev_count
                     replay_payload = cached.result.model_copy(update={"diagnostics": diag, "evidences": []})
                     tool_runs.append(
                         {
@@ -465,6 +469,13 @@ class GraphLoopRuntimeMixin:
             envelope = try_parse_llm_envelope(summary)
             # Keep JSON envelopes machine-readable for the next LLM step.
             if envelope is not None:
+                _env_ev_count = len(result.get("evidences") or []) if isinstance(result.get("evidences"), list) else 0
+                if _env_ev_count == 0:
+                    _env_diag = result.get("diagnostics") if isinstance(result, dict) else None
+                    if isinstance(_env_diag, dict):
+                        _replayed = _env_diag.get("replayed_evidence_count")
+                        if isinstance(_replayed, int) and _replayed > 0:
+                            _env_ev_count = _replayed
                 summaries.append(
                     {
                         "plan_step_id": run.get("plan_step_id"),
@@ -472,7 +483,7 @@ class GraphLoopRuntimeMixin:
                         "channel": run.get("channel"),
                         "envelope": envelope,
                         "summary": None,  # Prefer structured envelope for JSON summaries.
-                        "evidence_count": len(result.get("evidences") or []) if isinstance(result.get("evidences"), list) else 0,
+                        "evidence_count": _env_ev_count,
                         "failure_reason": (
                             (result.get("diagnostics") or {}).get("reason") if isinstance(result.get("diagnostics"), dict) else None
                         ),
@@ -482,6 +493,12 @@ class GraphLoopRuntimeMixin:
             evidences = result.get("evidences")
             evidence_count = len(evidences) if isinstance(evidences, list) else 0
             diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+            # For memoized replays, evidences=[] but the original count is stashed
+            # in diagnostics.replayed_evidence_count to prevent LLM retry loops.
+            if evidence_count == 0 and isinstance(diagnostics, dict):
+                replayed = diagnostics.get("replayed_evidence_count")
+                if isinstance(replayed, int) and replayed > 0:
+                    evidence_count = replayed
             failure_reason = None
             if isinstance(diagnostics, dict):
                 failure_reason = diagnostics.get("reason") or diagnostics.get("error")
