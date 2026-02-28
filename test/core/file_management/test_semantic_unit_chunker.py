@@ -326,6 +326,7 @@ def test_semantic_unit_chunker_standard_emits_math_anchor():
 
 
 def test_semantic_unit_chunker_emits_image_as_atomic_anchor():
+    """Images stay in text flow for multimodal retrieval (not separate chunks)."""
     chunker = SemanticUnitChunkerConfig(
         level="basic",
         fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
@@ -342,15 +343,16 @@ def test_semantic_unit_chunker_emits_image_as_atomic_anchor():
     )
 
     chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+    # Image should be part of a text chunk, not a separate image chunk
     image_chunks = [
         c
         for c in chunks
-        if c.get("metadata", {}).get("chunk_role") == "anchor"
-        and c.get("metadata", {}).get("semantic_unit_type") == "image"
+        if c.get("metadata", {}).get("semantic_unit_type") == "image"
     ]
-    assert image_chunks, "expected at least one image chunk"
-    assert "![Figure: Premium refund table](images/abc.jpg)" in (image_chunks[0].get("content") or "")
-    assert image_chunks[0]["metadata"]["is_atomic"] is True
+    assert not image_chunks, "images should stay in text flow, not separate chunks"
+    # The image markdown should appear in one of the text chunks
+    all_content = " ".join(c.get("content", "") for c in chunks)
+    assert "![Figure: Premium refund table](images/abc.jpg)" in all_content
 
 
 def test_semantic_unit_chunker_treats_html_table_as_atomic():
@@ -385,6 +387,7 @@ def test_semantic_unit_chunker_treats_html_table_as_atomic():
 
 
 def test_semantic_unit_chunker_splits_html_table_and_trailing_image():
+    """HTML table is extracted; trailing image stays in text flow."""
     chunker = SemanticUnitChunkerConfig(
         level="basic",
         fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
@@ -401,10 +404,14 @@ def test_semantic_unit_chunker_splits_html_table_and_trailing_image():
     chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
     kinds = {(c.get("metadata") or {}).get("semantic_unit_type") for c in chunks}
     assert "table" in kinds
-    assert "image" in kinds
+    # Image stays in text, not a separate image chunk
+    assert "image" not in kinds
+    all_content = " ".join(c.get("content", "") for c in chunks)
+    assert "![cap](images/x.jpg)" in all_content
 
 
-def test_semantic_unit_chunker_does_not_use_html_table_line_as_image_caption():
+def test_semantic_unit_chunker_does_not_extract_image_as_separate_chunk():
+    """Images after tables stay in text flow for multimodal retrieval."""
     chunker = SemanticUnitChunkerConfig(
         level="basic",
         fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
@@ -423,8 +430,8 @@ def test_semantic_unit_chunker_does_not_use_html_table_line_as_image_caption():
     image_chunks = [
         c
         for c in chunks
-        if c.get("metadata", {}).get("chunk_role") == "anchor"
-        and c.get("metadata", {}).get("semantic_unit_type") == "image"
+        if c.get("metadata", {}).get("semantic_unit_type") == "image"
     ]
-    assert image_chunks, "expected an image chunk"
-    assert (image_chunks[0].get("content") or "").strip() == "![cap](images/x.jpg)"
+    assert not image_chunks, "images should stay in text flow"
+    all_content = " ".join(c.get("content", "") for c in chunks)
+    assert "![cap](images/x.jpg)" in all_content

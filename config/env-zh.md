@@ -295,6 +295,7 @@ Benchmark/实验模式：
 | `LIST_SMALL_MAX_TOKENS` | _(空)_ | 列表大小阈值覆盖。 |
 | `LIST_SLICE_MAX_TOKENS` | _(空)_ | 列表 slice 目标 token 上限覆盖。 |
 | `LIST_SLICE_OVERLAP_ITEMS` | _(空)_ | 列表 slice item overlap 覆盖。 |
+| `CHUNK_MIN_TOKENS` | `64` | 后处理：小于该 token 数的文本 chunk 会被合并到相邻文本 chunk，或在无邻居时丢弃（去除页码/孤立标题等噪声）。 |
 
 ## 3. 开发模式与租户
 
@@ -505,8 +506,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试），覆盖启动时 OpenAPI 校验与 parse/status/download 请求。 |
 | `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | 可选：MinerU HTTP 重试的基础退避秒数。 |
 | `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | 可选：MinerU HTTP 重试的最大退避秒数。 |
-| `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
-| `TOKEN_CHUNK_OVERLAP` | `100` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
+| `TOKEN_CHUNK_SIZE` | `512` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
+| `TOKEN_CHUNK_OVERLAP` | `50` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL 不可分割保护：URL 前后保留的 token 数（`token_chunker`/`semantic_unit_chunker` fallback 生效）。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `io://runtime` | 运行时虚拟根目录（io://...，映射到 LocalDB；用于 JWT secret 等运行期稳定文件）。 |

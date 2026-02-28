@@ -86,7 +86,7 @@ class SemanticUnitChunker(AbstractChunker):
             enable_lists=enabled_units["list"],
             enable_math=enabled_units["math"],
             enable_blockquotes=enabled_units["blockquote"],
-            enable_images=True,
+            enable_images=False,  # keep images in text flow for multimodal retrieval
         )
         source_file_id = ""
         if metadata:
@@ -498,6 +498,12 @@ class SemanticUnitChunker(AbstractChunker):
                 )
                 continue
 
+        min_chunk_tokens = kwargs.get(
+            "min_chunk_tokens", getattr(self.config, "min_chunk_tokens", 64)
+        )
+        if min_chunk_tokens > 0:
+            output = self._postprocess_merge_small_chunks(output, min_chunk_tokens)
+
         logger.info(
             "SemanticUnitChunker produced %d chunks (tables=%d code=%d lists=%d math=%d quotes=%d)",
             len(output),
@@ -538,6 +544,76 @@ class SemanticUnitChunker(AbstractChunker):
                 "fallback_chunker": getattr(getattr(self.config, "fallback_chunker_config", None), "type", None),
             },
         }
+
+    def _postprocess_merge_small_chunks(
+        self,
+        chunks: List[Dict[str, Any]],
+        min_tokens: int,
+    ) -> List[Dict[str, Any]]:
+        """Merge or drop text chunks smaller than *min_tokens*.
+
+        Only ``chunk_role == "text"`` chunks are touched; anchor/slice
+        (tables, code, lists, images …) are kept intact.
+
+        Small text chunks are merged into the nearest adjacent text chunk
+        (prefer previous, then next).  If no neighbour text chunk exists
+        the small chunk is dropped (isolated noise like lone page numbers).
+        """
+        if min_tokens <= 0 or not chunks:
+            return chunks
+
+        is_text = [
+            (c.get("metadata") or {}).get("chunk_role") == "text" for c in chunks
+        ]
+        token_counts = [
+            (c.get("metadata") or {}).get("token_count") or self._estimate_tokens(c.get("content", ""))
+            for c in chunks
+        ]
+        merged_into: List[int] = list(range(len(chunks)))  # self-ref = keep
+
+        for i, chunk in enumerate(chunks):
+            if not is_text[i] or token_counts[i] >= min_tokens:
+                continue
+            # find previous text chunk
+            target = -1
+            for j in range(i - 1, -1, -1):
+                if is_text[j] and merged_into[j] == j:
+                    target = j
+                    break
+            if target == -1:
+                # find next text chunk
+                for j in range(i + 1, len(chunks)):
+                    if is_text[j] and merged_into[j] == j:
+                        target = j
+                        break
+            if target == -1:
+                merged_into[i] = i  # keep as-is (no text neighbour)
+            else:
+                merged_into[i] = target
+
+        # apply merges
+        result: List[Dict[str, Any]] = []
+        append_buf: Dict[int, List[str]] = {}  # target_idx -> extra content
+        for i, chunk in enumerate(chunks):
+            t = merged_into[i]
+            if t == i:
+                result.append(chunk)
+            elif t == -1:
+                continue  # drop
+            else:
+                append_buf.setdefault(t, []).append(chunk.get("content", ""))
+
+        for chunk in result:
+            idx = chunks.index(chunk)
+            if idx in append_buf:
+                extra = "\n".join(append_buf[idx])
+                combined = chunk["content"] + "\n" + extra
+                chunk["content"] = combined
+                meta = chunk.get("metadata") or {}
+                meta["token_count"] = self._estimate_tokens(combined)
+                chunk["metadata"] = meta
+
+        return result
 
     @staticmethod
     def _make_chunk_dict(

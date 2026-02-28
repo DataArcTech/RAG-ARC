@@ -297,6 +297,7 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 | `LIST_SMALL_MAX_TOKENS` | _(empty)_ | Override list small/large threshold. |
 | `LIST_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for list slices. |
 | `LIST_SLICE_OVERLAP_ITEMS` | _(empty)_ | Override overlap items for list slices. |
+| `CHUNK_MIN_TOKENS` | `64` | Post-processing: text chunks below this token count are merged into an adjacent text chunk, or dropped when no neighbour exists (removes noise like lone page numbers / isolated headers). |
 
 ## 3. Development / Owner Scope
 
@@ -507,8 +508,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HTTP_MAX_RETRIES` | `3` | Optional: retry transient MinerU HTTP errors (0 disables retries), including startup OpenAPI validation and parse/status/download requests. |
 | `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | Optional: base backoff seconds for MinerU HTTP retries. |
 | `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | Optional: max backoff seconds for MinerU HTTP retries. |
-| `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
-| `TOKEN_CHUNK_OVERLAP` | `100` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
+| `TOKEN_CHUNK_SIZE` | `512` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
+| `TOKEN_CHUNK_OVERLAP` | `50` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL atomic protection: keep this many tokens before/after each URL together (applies to `token_chunker` and semantic-unit fallback). |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `io://runtime` | Virtual runtime root (io://...) mapped to LocalDB (used for persisted JWT secret and misc runtime probes). |

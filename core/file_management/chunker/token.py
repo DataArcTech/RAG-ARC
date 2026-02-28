@@ -60,6 +60,9 @@ class TokenChunker(AbstractChunker):
 
     _URL_RE = re.compile(r"https?://[^\s<>\[\]{}()\"']+", re.IGNORECASE)
     _URL_TRAILING_PUNCT = ".,;:!?)]}\"'"
+    # Sentence-ending characters for boundary-aware splitting.
+    _SENT_ENDS_CJK = frozenset("。！？；\n")
+    _SENT_ENDS_EN = frozenset(".!?")
 
     def __init__(self, config: "TokenChunkerConfig"):
         """Initialize TokenChunker with tokenizer configuration"""
@@ -373,6 +376,16 @@ class TokenChunker(AbstractChunker):
 
         while start_idx < len(input_ids):
             end_idx = min(start_idx + chunk_size, len(input_ids))
+
+            # --- sentence-boundary preference ---
+            if end_idx < len(input_ids):
+                sent_boundary = self._find_sentence_boundary(
+                    input_ids, tokenizer, start_idx, end_idx,
+                    max_lookback=min(chunk_size // 5, 100),
+                )
+                if sent_boundary is not None:
+                    end_idx = sent_boundary
+
             end_idx = _adjust_end_for_atomic_spans(end_idx)
             chunk_text, _, actual_end = _decode_token_window(start_idx, end_idx)
             adjusted_end = _adjust_end_for_atomic_spans(actual_end)
@@ -391,6 +404,42 @@ class TokenChunker(AbstractChunker):
             start_idx = next_start
 
         return splits
+
+    def _find_sentence_boundary(
+        self,
+        input_ids: List[int],
+        tokenizer: Any,
+        start: int,
+        end: int,
+        max_lookback: int,
+    ) -> Optional[int]:
+        """Scan backwards from *end* to find a token ending with a sentence delimiter.
+
+        Returns the token index **after** the delimiter token (i.e. the new end_idx),
+        or ``None`` if no suitable boundary is found within *max_lookback* tokens.
+        """
+        decode_single = getattr(tokenizer, "decode_single_token_bytes", None)
+        search_start = max(start + 1, end - max_lookback)
+        for i in range(end - 1, search_start - 1, -1):
+            if decode_single:
+                tok_bytes = decode_single(input_ids[i])
+            else:
+                tok_bytes = tokenizer.decode_bytes([input_ids[i]])
+            try:
+                tok_str = tok_bytes.decode("utf-8")
+            except Exception:
+                continue
+            trailing = tok_str.rstrip()
+            if not trailing:
+                continue
+            last_char = trailing[-1]
+            if last_char in self._SENT_ENDS_CJK:
+                return i + 1
+            # English punctuation: require it to be the sole trailing char
+            # (avoids breaking on "3.14", "U.S." etc.)
+            if last_char in self._SENT_ENDS_EN and (len(trailing) == 1 or not trailing[-2].isalnum()):
+                return i + 1
+        return None
 
     def _build_url_atomic_spans(
         self,

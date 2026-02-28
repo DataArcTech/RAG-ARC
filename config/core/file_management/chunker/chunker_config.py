@@ -19,11 +19,11 @@ class TokenChunkerConfig(AbstractConfig):
 
     # Core chunking parameters
     chunk_size: int = Field(
-        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_SIZE", "1000") or "1000")),
+        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_SIZE", "512") or "512")),
         description="Maximum token count per chunk.",
     )
     chunk_overlap: int = Field(
-        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_OVERLAP", "100") or "100")),
+        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_OVERLAP", "50") or "50")),
         description="Overlap token count between chunks.",
     )
     url_atomic_context_tokens: int = Field(
@@ -127,6 +127,12 @@ class SemanticUnitChunkerConfig(AbstractConfig):
 
     # Advanced: blockquotes.
     blockquote_small_max_tokens: int = 600
+
+    # Post-processing: merge or drop text chunks smaller than this threshold.
+    min_chunk_tokens: int = Field(
+        default_factory=lambda: int(str(os.getenv("CHUNK_MIN_TOKENS", "64") or "64")),
+        description="Text chunks below this token count are merged into neighbours or dropped.",
+    )
 
     def build(self) -> SemanticUnitChunker:
         return SemanticUnitChunker(self)
