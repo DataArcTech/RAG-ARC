@@ -245,6 +245,17 @@ def _extract_error_summary(state: Any) -> str | None:
 
 
 def _build_progress_message(stage: str, metadata: dict, state: Any) -> str | None:
+    # For reported/done stages, prefer the report summary so that the
+    # progress message reflects the actual answer rather than the last
+    # think-note reasoning.  Previously the think-note candidates always
+    # won (they're never empty), meaning the progress "done" event
+    # carried raw thinking text — which frontends could mistake for the
+    # final answer.
+    if stage in {"reported", "done"}:
+        report_summary = _extract_report_summary(state)
+        if report_summary:
+            return report_summary
+
     for candidate in (
         _extract_latest_think_note(state),
         _extract_tool_result_thinking(state),
@@ -257,11 +268,6 @@ def _build_progress_message(stage: str, metadata: dict, state: Any) -> str | Non
         plan_texts = _collect_plan_step_texts(getattr(state, "plan_steps", None))
         if plan_texts:
             return " / ".join(plan_texts[:2])
-
-    if stage in {"reported", "done"}:
-        report_summary = _extract_report_summary(state)
-        if report_summary:
-            return report_summary
 
     if stage == "failed":
         error_summary = _extract_error_summary(state)
@@ -519,6 +525,15 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
             progress_info["report_payload"] = state.report_payload
     elif stage == "done":
         progress_info["status"] = "completed"
+        # Use "completed" instead of "done" to avoid collision with the
+        # canonical done signal emitted by deepsearch_processor
+        # (_yield_deepsearch_done_signal).  The processor's signal is the
+        # one the frontend should act on to collapse thinking and start
+        # rendering content deltas.  If we also emit deepsearch_stage="done"
+        # here, the frontend may prematurely use this event's `message`
+        # (which contains the last think-note reasoning, not the report)
+        # as the answer.
+        progress_info["deepsearch_stage"] = "completed"
         if hasattr(state, "run_id"):
             progress_info["run_id"] = state.run_id
     elif stage == "failed":
