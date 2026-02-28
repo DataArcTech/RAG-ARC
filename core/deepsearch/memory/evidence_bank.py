@@ -43,6 +43,40 @@ class EvidenceBank:
             )
             self._order.append(evidence_id)
 
+    def add_chunks(self, chunks: Iterable[Any]) -> int:
+        """Add evidence from EvidenceChunk objects directly. Returns count of newly added items."""
+        added = 0
+        for chunk in chunks or []:
+            evidence_id = str(getattr(chunk, "chunk_id", "") or "").strip()
+            if not evidence_id or evidence_id in self._records:
+                continue
+            self._records[evidence_id] = EvidenceRecord(
+                evidence_id=evidence_id,
+                source=str(getattr(chunk, "source", "") or "").strip() or None,
+                content=str(getattr(chunk, "content", "") or ""),
+                score=getattr(chunk, "score", None),
+                provenance=getattr(chunk, "provenance", None) if isinstance(getattr(chunk, "provenance", None), dict) else None,
+            )
+            self._order.append(evidence_id)
+            added += 1
+        return added
+
+    def to_evidence_dicts(self) -> List[Dict[str, Any]]:
+        """Export all evidence as dict list (compatible with existing composer/writer interfaces)."""
+        return [
+            {
+                "chunk_id": rec.evidence_id,
+                "source": rec.source,
+                "content": rec.content,
+                "score": rec.score,
+                "provenance": rec.provenance,
+            }
+            for rec in (self._records[eid] for eid in self._order)
+        ]
+
+    def __len__(self) -> int:
+        return len(self._records)
+
     def get(self, evidence_id: str) -> Optional[EvidenceRecord]:
         token = str(evidence_id or "").strip()
         if not token:

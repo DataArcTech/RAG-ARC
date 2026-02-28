@@ -89,6 +89,7 @@ class DeepSearchReporter:
         self,
         reasoning_trace: Dict[str, Any],
         external_evidence: Optional[Iterable[Dict[str, Any] | EvidenceChunk]] = None,
+        evidence_bank: Optional["EvidenceBank"] = None,
     ) -> Dict[str, Any]:
         """Compose a report payload for downstream clients (API/CLI/MCP)."""
 
@@ -332,6 +333,7 @@ class DeepSearchReporter:
             evidences=llm_evidences,
             coverage=coverage_metrics,
             request_context=request_context,
+            evidence_bank=evidence_bank,
         )
         report_style = str(context.get("report_style") or "deepsearch").strip().lower()
         writer = DeepSearchLLMReportWriter(
@@ -395,9 +397,11 @@ class DeepSearchReporter:
                         if isinstance(structured_llm, dict):
                             structured_llm.pop("_evidence_pack", None)
                         metadata["report_verification"]["rewritten"] = True
-                    except Exception:  # noqa: BLE001
-                        # If rewrite fails, keep the original report.
+                    except Exception as exc:  # noqa: BLE001
+                        # If rewrite fails, keep the original report but log the error.
+                        logger.warning("Report verifier rewrite failed: %s", exc, exc_info=True)
                         metadata["report_verification"]["rewritten"] = False
+                        metadata["report_verification"]["rewrite_error"] = str(exc)[:300]
 
         if isinstance(structured_llm, dict) and structured_llm.get("writer_fallback"):
             metadata["writer_fallback"] = structured_llm.get("writer_fallback")
@@ -654,6 +658,7 @@ class DeepSearchReporter:
         evidences: List[Dict[str, Any]],
         coverage: Dict[str, Any],
         request_context: Dict[str, Any],
+        evidence_bank: Optional["EvidenceBank"] = None,
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
@@ -705,8 +710,15 @@ class DeepSearchReporter:
 
         graph_evidence_full = self._build_graph_evidence(trace, evidences)
         graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)
-        bank = EvidenceBank()
-        bank.add_many(evidences)
+        # Build report-scoped bank from filtered evidences.
+        # If a shared evidence_bank from think loop is available, use it as the
+        # base so evidence content stays consistent across stages.
+        if evidence_bank is not None:
+            bank = EvidenceBank()
+            bank.add_many(evidences)
+        else:
+            bank = EvidenceBank()
+            bank.add_many(evidences)
         outline_index_limit = self.max_evidence_items if self.max_evidence_items is not None else None
         evidence_index = bank.index_for_prompt(max_items=outline_index_limit)
         graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
@@ -729,6 +741,7 @@ class DeepSearchReporter:
             "coverage": coverage_bundle,
             "request_context": request_context,
             "report_style": report_style or "deepsearch",
+            "_shared_evidence_bank": evidence_bank,
         }
 
     def _merge_evidences(

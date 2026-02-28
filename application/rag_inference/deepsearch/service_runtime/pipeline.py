@@ -34,6 +34,7 @@ class DeepSearchServicePipelineMixin:
         reasoning_trace: Dict[str, Any],
         report_evidences: Sequence[Dict[str, Any]] | None = None,
         external_logs: Optional[Sequence[Dict[str, Any]]] = None,
+        evidence_bank=None,
     ) -> Dict[str, Any]:
         reporter = getattr(self, "reporter", None)
         if reporter is None:
@@ -42,4 +43,9 @@ class DeepSearchServicePipelineMixin:
         if report_evidences is not None:
             trace = dict(reasoning_trace)
             trace["evidences"] = list(report_evidences)
+        # Pass evidence_bank if the compose() method accepts it (backward-compatible).
+        import inspect
+        sig = inspect.signature(reporter.compose)
+        if "evidence_bank" in sig.parameters:
+            return await reporter.compose(trace, external_logs, evidence_bank=evidence_bank)
         return await reporter.compose(trace, external_logs)

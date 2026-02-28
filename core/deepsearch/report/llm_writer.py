@@ -684,8 +684,13 @@ class DeepSearchLLMReportWriter:
             evidence_pack = ""
             source_key_map: Dict[str, str] = {}
             if evidences:
-                bank = EvidenceBank()
-                bank.add_many(evidences)
+                shared_bank = context.get("_shared_evidence_bank")
+                if shared_bank is not None and hasattr(shared_bank, "add_many"):
+                    bank = EvidenceBank()
+                    bank.add_many(evidences)
+                else:
+                    bank = EvidenceBank()
+                    bank.add_many(evidences)
 
                 all_ids = bank.ids()
                 q_terms = _query_terms(question, max_terms=8)
@@ -911,6 +916,7 @@ class DeepSearchLLMReportWriter:
         This method generates each section independently and concurrently, then merges
         them into a final report structure. Best for outlines with 3+ independent sections.
         """
+        shared_bank = context.get("_shared_evidence_bank")
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
@@ -991,6 +997,7 @@ class DeepSearchLLMReportWriter:
         recency window of previously used evidence snippets for continuity.
         """
 
+        shared_bank = context.get("_shared_evidence_bank")
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):

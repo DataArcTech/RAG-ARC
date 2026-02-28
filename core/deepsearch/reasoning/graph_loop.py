@@ -30,14 +30,17 @@ from .graph_loop_runtime import GraphLoopRuntimeMixin, _prioritize_tool_catalog
 from .graph_loop_state import (
     _RUN_EVIDENCES,
     _RUN_EVIDENCE_LOCK,
+    _RUN_EVIDENCE_BANK,
     _RUN_REFLECT_COUNT,
     _RUN_THINK_COUNT,
     _RUN_TOTAL_STEPS,
     _RUN_PLAN_STATE,
     _RUN_TOOL_MEMO,
     _run_evidence_state,
+    get_evidence_bank,
 )
 from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
+from core.deepsearch.memory.evidence_bank import EvidenceBank
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +130,10 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         reflect_count_token = _RUN_REFLECT_COUNT.set(0)
         tool_memo = RunToolMemoizer()
         tool_memo_token = _RUN_TOOL_MEMO.set(tool_memo if tool_memo.enabled() else None)
+        evidence_bank = EvidenceBank()
+        if seed_evidences:
+            evidence_bank.add_chunks(seed_evidences)
+        bank_token = _RUN_EVIDENCE_BANK.set(evidence_bank)
         plan_state = PlanState()
         if isinstance(context.metadata, dict):
             plan_state.update(context.metadata.get("runtime_plan"))
@@ -350,6 +357,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             _RUN_REFLECT_COUNT.reset(reflect_count_token)
             _RUN_PLAN_STATE.reset(plan_token)
             _RUN_TOOL_MEMO.reset(tool_memo_token)
+            _RUN_EVIDENCE_BANK.reset(bank_token)
 
         coverage_metrics = self._coverage_snapshot(
             evidences=evidences,
@@ -364,6 +372,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "graph_traversals": [],
             "reasoning_steps": [record.model_dump() for record in reasoning_steps],
             "evidences": [chunk.model_dump() for chunk in evidences],
+            "evidence_bank": evidence_bank,
             "tool_results": tool_runs,
             "think_notes": think_notes,
             "runtime_plan": plan_state.to_payload(),
@@ -618,6 +627,9 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             return
         async with lock:
             evidences.extend(additions)
+        bank = get_evidence_bank()
+        if bank is not None:
+            bank.add_chunks(additions)
 
     async def _snapshot_evidences(self) -> List[EvidenceChunk]:
         evidences, lock = _run_evidence_state()
