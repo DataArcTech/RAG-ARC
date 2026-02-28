@@ -70,24 +70,25 @@ class DashScopeRerankLLM(RerankLLMBase):
         query: str,
         documents: List[str],
         top_k: Optional[int] = None,
+        instruct: Optional[str] = None,
     ) -> List[Tuple[int, float]]:
         """Asynchronous rerank via DashScope API."""
         if not documents:
             return []
-        return await self._call_async(query=query, documents=documents, top_k=top_k)
+        return await self._call_async(query=query, documents=documents, top_k=top_k, instruct=instruct)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _build_payload(
-        self, query: str, documents: List[str], top_k: Optional[int]
+        self, query: str, documents: List[str], top_k: Optional[int], instruct: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": self.model_name,
             "query": query,
             "documents": documents,
-            "instruct": self.instruct,
+            "instruct": instruct or self.instruct,
         }
         if top_k is not None and int(top_k) > 0:
             payload["top_n"] = int(top_k)
@@ -152,7 +153,7 @@ class DashScopeRerankLLM(RerankLLMBase):
         return self._parse_response(data, len(documents))
 
     async def _call_async(
-        self, *, query: str, documents: List[str], top_k: Optional[int]
+        self, *, query: str, documents: List[str], top_k: Optional[int], instruct: Optional[str] = None,
     ) -> List[Tuple[int, float]]:
         try:
             import httpx
@@ -162,7 +163,7 @@ class DashScopeRerankLLM(RerankLLMBase):
             ) from exc
 
         url = f"{self.base_url}/reranks"
-        payload = self._build_payload(query, documents, top_k)
+        payload = self._build_payload(query, documents, top_k, instruct=instruct)
         headers = self._build_headers()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:

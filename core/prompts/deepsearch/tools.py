@@ -32,6 +32,9 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     '  File-level: {"focus_query":"..."}\n'
     '  Page-level: {"file_id":"<UUID or filename>","focus_query":"..."}\n'
     "  Results are navigation snippets only — always follow up with read.pages.\n"
+    "  Snippets include a `page` field showing the source page. Use it to call read.pages on that exact page.\n"
+    "  NEVER extract data values (numbers, percentages, counts, names) from snippets — they may be\n"
+    "  truncated or missing context. Only read.pages content is valid evidence.\n"
     "  **HyDE tip**: write focus_query as a hypothetical sentence the document might contain, e.g.\n"
     '  focus_query="The second regulatory objective is" (admin/strategy docs)\n'
     '  focus_query="The incident occurred on March 24 when" (investigative/research reports)\n'
@@ -64,7 +67,7 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "Usage pattern:\n"
     '  {"tool_name":"code.python","tool_args":{"code":"staff_a = 12\\nstaff_b = 15\\nresult = staff_a + staff_b"}}\n'
     "Rules:\n"
-    "- Use ONLY real numeric values you extracted from read.pages — never guess or use placeholders.\n"
+    "- Use ONLY real numeric values you extracted from read.pages evidence — never from locate snippets, never guess.\n"
     "- Every variable MUST include a comment citing its source page and row/label, e.g.:\n"
     "    staff_dept_a = 12  # page 7, 'Executive Leadership' section\n"
     "    staff_dept_b = 15  # page 9, 'Prosecution Services Staff'\n"
@@ -148,6 +151,8 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "- If report_needed=true: call read.pages to collect citeable evidence, then set is_final=true.\n"
     "- For numeric/table questions: read the full table pages via read.pages; do not compute from truncated snippets.\n"
     "- If locate returns diagnostics.suggested_reads, prioritize those read.pages calls next.\n"
+    "- If a locate snippet shows a `page` number, read.pages that page — the snippet tells you WHERE to look,\n"
+    "  but only read.pages gives you the actual evidence. Do NOT skip read.pages even if the snippet looks complete.\n"
     "\n"
     "## Output\n"
     "Return ONLY valid JSON:\n"

@@ -942,6 +942,9 @@ class RAGInference(AbstractModule):
                     # Rerank sections with dedicated rerank model for better quality.
                     if section_reranker is not None and len(section_hits) > 1:
                         try:
+                            _sec_instruct = "The user's question is: {}. Please find the most relevant passages.".format(rewritten_query)
+                            if hasattr(section_reranker, "rerank_llm") and hasattr(section_reranker.rerank_llm, "instruct"):
+                                section_reranker.rerank_llm.instruct = _sec_instruct
                             section_docs = [
                                 str(getattr(h, "content", "") or "") for h in section_hits
                             ]

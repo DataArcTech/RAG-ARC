@@ -105,6 +105,12 @@ class RAGInferenceCLIModule:
                 rerank_keep_k = int(getattr(candidate_cfg, "rerank_keep_k", rerank_keep_k))
         except Exception:  # noqa: BLE001
             pass
+        rerank_instruct = "The user's question is: {}. Please find the most relevant passages.".format(rewritten_query)
+        try:
+            if hasattr(self._rag.reranker, "rerank_llm") and hasattr(self._rag.reranker.rerank_llm, "instruct"):
+                self._rag.reranker.rerank_llm.instruct = rerank_instruct
+        except Exception:  # noqa: BLE001
+            pass
         reranked_chunks = self._rag.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
         logger.info("Reranker produced %d chunks", len(reranked_chunks))
 

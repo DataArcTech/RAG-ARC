@@ -79,6 +79,12 @@ class RAGInferenceBench:
         else:
             chunks = [c for c in sources if isinstance(c, Chunk)]
 
+        rerank_instruct = "The user's question is: {}. Please find the most relevant passages.".format(question)
+        try:
+            if hasattr(self.reranker, "rerank_llm") and hasattr(self.reranker.rerank_llm, "instruct"):
+                self.reranker.rerank_llm.instruct = rerank_instruct
+        except Exception:  # noqa: BLE001
+            pass
         chunks = list(self.reranker.rerank(question, chunks, top_k=self.rerank_keep_k) or [])
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": RAG_INFERENCE_BENCH_SYSTEM_PROMPT_EN}]
