@@ -161,13 +161,27 @@ else
 fi
 echo ""
 
-# 5.4 处理Neo4j
+# 5.4 处理Neo4j（内存与是否重建由 .env 配置：NEO4J_HEAP_* / NEO4J_RECREATE_IF_RESTARTING）
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
+NEO4J_NEED_CREATE=false
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
-    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
-    docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
-    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
+    NEO4J_STATUS=$(docker inspect -f '{{.State.Status}}' ${NEO4J_CONTAINER_NAME} 2>/dev/null || true)
+    RECREATE="${NEO4J_RECREATE_IF_RESTARTING:-true}"
+    if [[ "${RECREATE}" == "true" || "${RECREATE}" == "1" || "${RECREATE}" == "yes" ]] && [[ "${NEO4J_STATUS}" == "restarting" ]]; then
+        docker rm -f ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 Neo4j 处于 Restarting，已删除并将在下方重新创建"
+        NEO4J_NEED_CREATE=true
+    else
+        docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
+        docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+        docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
+    fi
 else
+    NEO4J_NEED_CREATE=true
+fi
+if [[ "${NEO4J_NEED_CREATE}" == "true" ]]; then
+    NEO4J_HEAP_INITIAL=${NEO4J_HEAP_INITIAL:-256m}
+    NEO4J_HEAP_MAX=${NEO4J_HEAP_MAX:-512m}
+    NEO4J_PAGECACHE_SIZE=${NEO4J_PAGECACHE_SIZE:-128m}
     docker run -d \
         --name ${NEO4J_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
@@ -177,29 +191,48 @@ else
         -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
         -e NEO4J_PLUGINS='["apoc"]' \
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
+        -e NEO4J_server_memory_heap_initial_size="${NEO4J_HEAP_INITIAL}" \
+        -e NEO4J_server_memory_heap_max_size="${NEO4J_HEAP_MAX}" \
+        -e NEO4J_server_memory_pagecache_size="${NEO4J_PAGECACHE_SIZE}" \
         -v rag-arc-neo4j-data-chatKB_test:/data \
         -v rag-arc-neo4j-logs-chatKB_test:/logs \
         ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
-# 5.5 等待中间件就绪
-echo "⏳ 等待中间件就绪..."
-sleep 10
-MAX_ATTEMPTS=30
+# 5.5 等待中间件就绪（PostgreSQL / Redis / Neo4j，由 .env 的 WAIT_MIDDLEWARE_SLEEP / WAIT_MAX_ATTEMPTS 配置）
+WAIT_SLEEP=${WAIT_MIDDLEWARE_SLEEP:-15}
+MAX_ATTEMPTS=${WAIT_MAX_ATTEMPTS:-45}
+echo "⏳ 等待中间件就绪 (PG/Redis/Neo4j)，间隔 ${WAIT_SLEEP}s，最多 ${MAX_ATTEMPTS} 次..."
 ATTEMPT=0
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} -h localhost > /dev/null 2>&1; then
-        echo "  ✅ PostgreSQL已就绪 (端口: ${POSTGRES_HOST_PORT})"
+    PG_OK=false; REDIS_OK=false; NEO4J_OK=false
+    docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} -h localhost > /dev/null 2>&1 && PG_OK=true
+    docker exec ${REDIS_CONTAINER_NAME} redis-cli ping > /dev/null 2>&1 && REDIS_OK=true
+    docker exec ${NEO4J_CONTAINER_NAME} cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" "RETURN 1" > /dev/null 2>&1 && NEO4J_OK=true
+    if [[ "${PG_OK}" == "true" && "${REDIS_OK}" == "true" && "${NEO4J_OK}" == "true" ]]; then
+        echo "  ✅ PostgreSQL、Redis、Neo4j 均已就绪"
         break
     fi
     ATTEMPT=$((ATTEMPT + 1))
     echo -n "."
-    sleep 1
+    sleep "${WAIT_SLEEP}"
 done
 echo ""
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
+    echo "  ⚠️  中间件就绪超时 (PG=${PG_OK} Redis=${REDIS_OK} Neo4j=${NEO4J_OK})，将继续尝试启动应用（请检查容器日志）"
+fi
+
+# 5.6 同步 .env 中的 PostgreSQL 密码到容器（确保应用能连库，避免容器首次用旧密码创建后 .env 改密导致认证失败）
+if docker ps --format '{{.Names}}' | grep -q "^${POSTGRES_CONTAINER_NAME}$"; then
+    echo "  🔐 同步 .env 中的 PostgreSQL 密码到容器..."
+    # SQL 中单引号需转义为 ''
+    SQL_PW=$(printf '%s' "${POSTGRES_PASSWORD}" | sed "s/'/''/g")
+    if docker exec ${POSTGRES_CONTAINER_NAME} psql -U postgres -d postgres -c "ALTER USER postgres PASSWORD '${SQL_PW}';" > /dev/null 2>&1; then
+        echo "  ✅ PostgreSQL 密码已同步为 .env 中的 POSTGRES_PASSWORD"
+    else
+        echo "  ⚠️  密码同步失败（可能为本地 socket 认证限制），应用将使用 .env 中的密码尝试连接"
+    fi
 fi
 
 # ==============================================================================
